@@ -37,88 +37,248 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 
 **记住 Python 路径** → 写入 `.claude/settings.local.json`：
 ```json
-{ "env": { "WEB2MD_PYTHON": "<Python路径>" } }
+{
+  "permissions": {
+    "allow": [
+      "Bash(<Python路径> *)"
+    ]
+  },
+  "env": { "WEB2MD_PYTHON": "<Python路径>" }
+}
 ```
 后续从 `env.WEB2MD_PYTHON` 读取，不再询问。路径失效或用户要求更换时重新走此流程。
+> 同时写入 Bash allow 规则，避免后续每次执行脚本都弹确认。
 
 ### 第二步：确保脚本存在
 
-检查当前项目根目录是否有 `web2md.py`，没有则从本 skill 的嵌入式脚本写入。
+检查 `.web2md_tools/` 目录，确认以下脚本存在，没有则从本 skill 嵌入内容写入：
+
+| 文件 | 用途 | 阶段 |
+|------|------|------|
+| `web2md.py` | 主抓取脚本 | 第三步 |
+| `fix_escapes.py` | `\_` `\*` → `_` `*` | 第四步-A |
+| `list_display_fixes.py` | 列出需 `$`→`$$` 的公式 | 第四步-B |
+| `find_all_missed.py` | 扫描伪公式模式 | 第四步-C |
+| `final_verify.py` | 验证：`\_` 残留、`\\` 行断 | 收尾 |
 
 ### 第三步：执行抓取
 
 ```bash
-"<python路径>" "{项目根目录}/web2md.py" "<URL>" "{项目根目录}"
+"<python路径>" "{项目根目录}/.web2md_tools/web2md.py" "<URL>" "{项目根目录}"
 ```
 
 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量存在时自动使用。
 
 ### 第四步：审核数学公式
 
-脚本 `process_math_formulas` 只能识别以下四种标签：
+脚本 `process_math_formulas` 只识别 Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>`、`class="math"` 四种标签转为 `$...$` / `$$...$$`。
 
-- Wikipedia `.mwe-math-element`
-- MathJax `<script type="math/tex">`
-- `<math>` 标签 (MathML)
-- Sphinx/MathJax `class="math"` 元素
+生成 .md 后，分三个阶段完成审核：
 
-**以下问题脚本不能（也不应该）自动处理，必须由 Claude 读取 .md 后逐一判断修复：**
+#### 阶段 A：脚本自动修复（`fix_escapes.py`）
 
-#### A. `\_` → `_`、 `\*` → `*`（markdownify 后遗症）
+修复 markdownify 造成的 `\_` `\*` 错误转义（下标 `x_{k}` → `x\_{k}`、上标 `q^{*}` → `q^{\*}`）。
 
-markdownify 把 `_` 和 `*` 当作 Markdown 斜体/粗体标记转义为 `\_` `\*`。后果：
-
-- 下标 `x_{k}` → `x\_{k}`，无法渲染
-- 上标星号 `q^{*}` → `q^{\*}`, 多出无意义的 `\`
-
-修复方式：对 `$$...$$` 和 `$...$`（限长 300 字符防孤立 `$`）内的 `\_` `\*` 做反转义。**绝不能**同时修 `\{` `\}`——它们是 `\left\{` `\right\}` 的合法组件。
-
-#### B. 孤立 `$` 污染
-
-Wikipedia 源码偶有孤立的 `$`（非公式用途），会被正则当成公式开头吞掉数百字散文。修复时 `$...$` 匹配必须限长 300 字符。
-
-#### C. Wikipedia 的「伪公式」
-
-部分简单公式 Wikipedia 用 `<b>` `<i>` `<sup>` 等 HTML 标签渲染，不走 `<math>` 标签。markdownify 转成 `**i**` `*i*` 后失去数学语义。
-
-**这是最需要 LLM 判断的地方**——只有 Claude 能根据上下文判断 `**i**` 是四元数变量还是加粗文字。
-
-**常见遗漏模式（不只搜 `=` 号！）：**
-
-| 原文模式 | 含义 | 修复为 |
-|----------|------|--------|
-| `*x*2` | 变量+上标 | `$x^{2}$` |
-| `*x* = *y*` | 等式 | `$x=y$` |
-| `*a*1 + *b*2**i**` | 带下标表达式（无等号！） | `$a_{1}+b_{2}\mathbf{i}$` |
-| `**i** ⋅ **j** = **k**` | 粗体变量+运算符 | `$\mathbf{i}\cdot\mathbf{j}=\mathbf{k}$` |
-| `*a* + *b* **i** + *c* **j** + *d* **k**` | 四元数表达式 | `$a+b\mathbf{i}+c\mathbf{j}+d\mathbf{k}$` |
-| `*S*3` | 数学符号+上标 | `$S^{3}$` |
-| `*d*g(*p*, *q*)` | 函数+下标+参数 | `$d_{g}(p,q)$` |
-| `*r a r*−1` | 表达式+上标 | `$rar^{-1}$` |
-| `cos(*φ*)` | 数学函数 | `$\cos(\varphi)$` |
-
-**扫描方法**：用正则 `*[a-zA-Z]*[0-9]` 搜"斜体+数字"、`*[a-zA-Z]* +` 搜"斜体+运算符"，列出全部可疑行，逐条读上下文判断。
-
-**表格中的 `**i**` `**j**` `**k**` 保留**——乘法表表头，Markdown bold 即可。
-
-#### D. `$$` 粘在行末
-
-Wikipedia 把 display math `<span>` 嵌在 `<p>` 段落中，转换后 `$$` 出现在 `...is to choose $$` 这种位置。Typora 要求 `$$` 独占一行。脚本已通过正则修复：
-
-```python
-markdown = re.sub(r'([^\n])\$\$', lambda m: m.group(1) + '\n\n$$', markdown)
-markdown = re.sub(r'\$\$([^\n])', lambda m: '$$\n\n' + m.group(1), markdown)
+```bash
+"<python路径>" "{项目根目录}/.web2md_tools/fix_escapes.py" "{md文件路径}"
 ```
 
-#### E. 检查清单
+内部逻辑：`$$` 和 `$` 块内（限长 2000 字符防孤立 `$`）`\_` → `_`、`\*` → `*`，再全局兜底。
 
-生成后逐项确认：
-- [ ] `\_` 是否清零（只修 `\_`，不碰 `\{` `\}`）
-- [ ] `\*` 是否清零（只修 `\*`，不碰 `\{` `\}`）
-- [ ] `\begin{aligned}` 等环境中 `\\` 行断是否完整（双反斜杠）
-- [ ] `\left\{` `\right\}` 是否未被破坏
-- [ ] `$$` 公式块是否独占一行
-- [ ] 用 `*字母*数字` + `*字母* +` 模式全量扫描伪公式，逐条确认（不能只搜 `=` ）
+> **不在此阶段修 `\{` `\}`**——它们是 `\left\{` `\right\}` 的合法 LaTeX 组件。
+
+#### 阶段 B：`$` vs `$$` 审核（`list_display_fixes.py` + Claude 判断）
+
+```bash
+"<python路径>" "{项目根目录}/.web2md_tools/list_display_fixes.py" "{md文件路径}"
+```
+
+脚本列出含 `\begin{}` 或 `\\` 行断、但仍被 `$` 包裹的公式。Claude 根据规则逐条判、逐条 Edit：
+
+| 条件 | 判决 |
+|------|------|
+| `\begin{aligned/cases/array/bmatrix}` | → `$$` |
+| 含 `\\` 行断（多行公式） | → `$$` |
+| 其余单行公式 | 保持 `$`（`$\displaystyle...$` 在 Typora 中等同 `$$`） |
+
+#### 阶段 C：LLM 通读循环（伪公式识别）
+
+Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 `**i**` `*i*`。脚本无法判断——**由 Claude 读 .md 全文**，根据上下文识别。
+
+1. **通读** .md → 识别遗漏的伪公式（`**w***k*`、`*x*2`、`*a*1 + *b*2**i**` 等）
+2. **写清单**到 `.web2md_tools/intermediate/fix_list_roundN.md`，格式：`行号 + 原文片段 → 建议修复`
+3. **逐条 Edit**，修一条划一条
+4. **重读复核**
+5. 有遗漏 → 回到步骤 2，**直到干净**
+
+常见遗漏模式（按类型分组）：
+
+**A. 斜体 + 数字 → 下标或上标**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `*a*1` | `$a_{1}$` | 斜体字母+数字 → 下标 |
+| `*x*2` | `$x^{2}$` | 需根据上下文判下标还是上标 |
+| `*S*3` | `$S^{3}$` | 数学符号+上标 |
+| `*r*−1` | `$r^{-1}$` | 变量+幂次 |
+
+**B. 斜体 + 运算符 → 行内公式**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `*x* = *y*` | `$x=y$` | 等式 |
+| `*a* + *b*` | `$a+b$` | 加法表达式 |
+| `*p* − *q*` | `$p-q$` | 减法表达式 |
+| `*c* = *d* = 0` | `$c=d=0$` | 链式等式 |
+| `*aq* = *qa*` | `$aq=qa$` | 乘积等式 |
+
+**C. 粗体 + 数字 / 运算符 → 向量公式**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `**i**2` | `$\mathbf{i}^{2}$` | 粗体+上标 |
+| `**i** ⋅ **j** = **k**` | `$\mathbf{i}\cdot\mathbf{j}=\mathbf{k}$` | 粗体+运算符 |
+
+**D. 粗体字母作为数学符号（散文中）**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `{1, **i**, **j**, **k**}` | `$\{1,\mathbf{i},\mathbf{j},\mathbf{k}\}$` | 集合 |
+| `±**i**, ±**j**, ±**k**` | `$\pm\mathbf{i},\pm\mathbf{j},\pm\mathbf{k}$` | 带正负号 |
+| `**i**, **j**, and **k** will denote` | `$\mathbf{i},\mathbf{j},\mathbf{k}$ will denote` | 散文中的符号 |
+| `replacing 1 with a, **i** with b` | `replacing $1$ with $a$, $\mathbf{i}$ with $b$` | 映射定义 |
+
+> ⚠️ 乘法表 `| **i** | **j** | **k** |` → **保留 bold**，是表格格式化非公式
+
+**E. 函数 + 斜体参数**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `cos(*φ*)` | `$\cos(\varphi)$` | 三角函数 |
+| `sin(*θ*)` | `$\sin(\theta)$` | 同上 |
+
+**F. 混合粗体 + 斜体表达式**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `*a* + *b* **i** + *c* **j** + *d* **k**` | `$a+b\mathbf{i}+c\mathbf{j}+d\mathbf{k}$` | 四元数表达式 |
+| `*a*1 + *b*1**i** + *c*1**j**` | `$a_{1}+b_{1}\mathbf{i}+c_{1}\mathbf{j}$` | 带下标表达式 |
+| `*p* = *b*1**i** + *c*1**j** + *d*1**k**` | `$p=b_{1}\mathbf{i}+c_{1}\mathbf{j}+d_{1}\mathbf{k}$` | 向量定义 |
+
+**G. 斜体含特殊符号（上标星号等）**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `*pq*∗` | `$pq^{*}$` | 共轭/对偶标记 |
+| `*p*∗*q*` | `$p^{*}q$` | 同上 |
+| `−*q*∗*p*∗` | `$-q^{*}p^{*}$` | 同上 |
+
+**H. 数学符号/记法**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `*d*g(*p*, *q*)` | `$d_{g}(p,q)$` | 函数+下标+参数 |
+| `*r a r*−1` | `$rar^{-1}$` | 共轭表达式 |
+| `*p*s, *q*s, *p*v, *q*v` | `$p_{s},q_{s},p_{v},q_{v}$` | 变量+下标 |
+
+**I. 数学符号与单位**
+
+Wikipedia 用粗体/Unicode 渲染的数学符号，脚本无法识别。
+
+**I-1. 粗体大写字母（数域/集合记号）** — Wikipedia 用 `**X**` 替代黑体板书 `\mathbb{X}`：
+
+| 原文 | 数域 | 修复 |
+|------|------|------|
+| `**R**` | 实数 | `$\mathbf{R}$` |
+| `**C**` | 复数 | `$\mathbf{C}$` |
+| `**Z**` | 整数 | `$\mathbf{Z}$` |
+| `**Q**` | 有理数 | `$\mathbf{Q}$` |
+| `**N**` | 自然数 | `$\mathbf{N}$` |
+| `**F**` | 域 | `$\mathbf{F}$` |
+| `**H**` | 四元数 | `$\mathbf{H}$` |
+| `**U**` | 酉群/算子 | `$\mathbf{U}$` |
+| `**O**` | 正交群 | `$\mathbf{O}$` |
+| `**S**` | 球面/特殊群 | `$\mathbf{S}$` |
+| `M(2,**C**)` | 矩阵环 | `$M(2,\mathbf{C})$` |
+
+**I-2. 角度与单位**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `90°` `180°` `360°` | `$90^{\circ}$` 等 | 角度度数 |
+| `45′` `30″` | `$45'$` `$30''$` | 分、秒（罕见） |
+
+**I-3. Unicode 运算符**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `±x` `±i` | `$\pm x$` | 正负号+变量 |
+| `a ⋅ b` | `$a \cdot b$` | 点乘 |
+| `a × b` | `$a \times b$` | 叉乘（`2 × 2` 维度保留 Unicode） |
+| `a ∗ b` | `$a * b$` | 卷积/星乘 |
+| `−x` | `$-x$` | Unicode 减号 |
+
+**I-4. 不等号与关系符**
+
+| 原文 | 修复 |
+|------|------|
+| `a ≤ b` | `$a \leq b$` |
+| `a ≥ b` | `$a \geq b$` |
+| `a ≠ b` | `$a \neq b$` |
+| `a ≈ b` | `$a \approx b$` |
+| `a ≡ b` | `$a \equiv b$` |
+| `a ∼ b` | `$a \sim b$` |
+| `a ∝ b` | `$a \propto b$` |
+
+**I-5. 集合与逻辑符号**
+
+| 原文 | 修复 |
+|------|------|
+| `x ∈ S` | `$x \in S$` |
+| `x ∉ S` | `$x \notin S$` |
+| `A ⊂ B` | `$A \subset B$` |
+| `A ⊆ B` | `$A \subseteq B$` |
+| `A ∪ B` | `$A \cup B$` |
+| `A ∩ B` | `$A \cap B$` |
+| `∀x` | `$\forall x$` |
+| `∃x` | `$\exists x$` |
+
+**I-6. 箭头**
+
+| 原文 | 修复 | 说明 |
+|------|------|------|
+| `f: A → B` | `$f: A \to B$` | 函数映射 |
+| `x ↦ y` | `$x \mapsto y$` | 元素映射 |
+| `A ⇒ B` | `$A \Rightarrow B$` | 蕴含 |
+| `A ⇔ B` | `$A \Leftrightarrow B$` | 等价 |
+| 表头 `→` | 保留 Unicode | 表格格式化 |
+
+**I-7. 其他常见符号**
+
+| 原文 | 修复 |
+|------|------|
+| `∞` | `$\infty$` |
+| `∂f/∂x` | `$\partial f / \partial x$` |
+| `∇f` | `$\nabla f$` |
+| `√x` | `$\sqrt{x}$` |
+
+> **判断边界**：与变量/数字/等号紧邻 → 转 `$...$`；维度 `2 × 2`、表格箭头 → 保留。表头 `| **i** |` → 保留。
+
+> **NBSP 陷阱**：Wikipedia 公式常用 `\xa0`（non-breaking space），精确文本匹配时 `**i\xa0⋅\xa0j**` 可能被漏掉，需额外检查。
+
+辅助扫描（可选）：
+
+```bash
+"<python路径>" "{项目根目录}/.web2md_tools/find_all_missed.py" "{md文件路径}"
+```
+
+#### 收尾验证（`final_verify.py`）
+
+```bash
+"<python路径>" "{项目根目录}/.web2md_tools/final_verify.py" "{md文件路径}"
+```
+
+确认：`\_` 清零、`\*` 清零、`\\` 行断完整、`\left\{` 未破坏、`$$` 独占一行、LLM 清单全部打勾。
 
 ### 第五步：输出
 
@@ -128,8 +288,34 @@ markdown = re.sub(r'\$\$([^\n])', lambda m: '$$\n\n' + m.group(1), markdown)
 
 ## 各项目固定文件
 
-- `{项目根目录}/web2md.py` — 抓取脚本，首次使用时写入，之后保留不删
+- `.web2md_tools/web2md.py` — 主抓取脚本
+- `.web2md_tools/fix_escapes.py` — 阶段 A：`\_` `\*` 修复
+- `.web2md_tools/list_display_fixes.py` — 阶段 B：列出 `$`→`$$` 候选
+- `.web2md_tools/find_all_missed.py` — 阶段 C：伪公式扫描
+- `.web2md_tools/final_verify.py` — 收尾验证
+- `.web2md_tools/intermediate/` — LLM 清单 `fix_list_roundN.md`
 - `.claude/settings.local.json` — 记录 Python 路径（`env.WEB2MD_PYTHON`），每个项目各自记住
+
+### 目录结构规范
+
+`.web2md_tools/` 顶层只放可复用的核心脚本，一次性调试/诊断脚本放入 `_archive/`：
+
+```
+.web2md_tools/
+├── web2md.py              ← 主抓取
+├── fix_escapes.py          ← 阶段 A：\_ \* 修复
+├── list_display_fixes.py   ← 阶段 B：$→$$ 候选列表
+├── find_all_missed.py      ← 阶段 C：伪公式扫描
+├── final_verify.py         ← 收尾验证
+├── intermediate/           ← LLM 清单 fix_list_roundN.md
+└── _archive/               ← 调试脚本、临时测试等一次性文件
+```
+
+- 项目根目录禁止散放 `.py` / `.txt` / `.json`（除 `.claude/` 外）
+- LLM 生成的中间清单 → `intermediate/`
+- 非复用的一次性脚本 → `_archive/`
+
+---
 
 ## 脚本关键技术要点
 
@@ -148,11 +334,12 @@ markdown = re.sub(r'\$\$([^\n])', lambda m: '$$\n\n' + m.group(1), markdown)
 - **不要把 `\{` `\}` 当 Markdown 转义修复**——它们是 `\left\{` `\right\}` 的合法 LaTeX 组件
 - **不要用正则去区分 `**i**` 是公式还是粗体**——这是 LLM 的工作，脚本做不到
 - **不要对非 Wikipedia 页面做 Wikipedia 特有清洗**——`is_wiki` 兜底
-- **公式修复代码不要写在脚本里**——脚本只负责标签转换和结构性调整，内容级修复由 Claude 读 .md 后手动完成
+- **即使用脚本执行替换，判断必须由 Claude 做**——`**i**` → `$\mathbf{i}$` 这类转换，脚本只能做精确的 `str.replace`（Claude 手写每一条 old→new 对），不能用正则或自动判断。区分「表格粗体」和「数学符号粗体」是上下文理解，脚本做不到
+- **脚本只做机械操作，Claude 审核全部**——脚本负责 `\_` → `_`、`\*` → `*`、`$$` 独占一行等机械修改。但这些修改可能出错（修漏、修错、修坏）——Claude 必须通读全文，逐一验证每个公式是否渲染正确，包括脚本改过的和没改过的。不以「脚本已处理过」为由跳过，质量优先，不省 token
 
 ## Python 脚本（嵌入式）
 
-以下脚本是 `web2md.py` 的完整内容。首次在某个项目执行时，如果该项目根目录下没有 `web2md.py`，则将此脚本写入 `{项目根目录}/web2md.py`，之后保留复用。
+以下脚本是 `web2md.py` 的完整内容。首次在某个项目执行时，如果 `.web2md_tools/web2md.py` 不存在，则写入，之后保留复用。
 
 ```python
 #!/usr/bin/env python3
@@ -479,4 +666,218 @@ def main():
 
 if __name__ == '__main__':
     main()
+```
+
+---
+
+## 辅助脚本（嵌入式）
+
+以下四个脚本随主脚本 `web2md.py` 一起写入 `.web2md_tools/`，每个项目初次使用时检查并写入。
+
+### fix_escapes.py（阶段 A）
+
+```python
+"""Fix \_ -> _ and \* -> * inside $...$ and $$...$$ blocks.
+Do NOT touch \{ \} (legitimate LaTeX)."""
+import re, sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+fpath = sys.argv[1]
+with open(fpath, 'r', encoding='utf-8') as f:
+    text = f.read()
+
+BS = chr(92)
+before_us = text.count(BS + '_')
+before_st = text.count(BS + '*')
+
+def fix_block(m):
+    content = m.group(0)
+    content = content.replace(BS + '_', '_')
+    content = content.replace(BS + '*', '*')
+    return content
+
+# Fix display math ($$...$$)
+text = re.sub(r'\$\$[\s\S]*?\$\$', fix_block, text)
+# Fix inline math ($...$, max 2000 chars to avoid dangling $)
+text = re.sub(r'\$[^$]{1,2000}\$', fix_block, text)
+# Global fallback for any remaining
+text = text.replace(BS + '_', '_')
+text = text.replace(BS + '*', '*')
+
+after_us = text.count(BS + '_')
+after_st = text.count(BS + '*')
+left_brace = text.count(r'\left{')
+print(f'\\_: {before_us} -> {after_us} ({before_us - after_us} replaced)')
+print(f'\\*: {before_st} -> {after_st} ({before_st - after_st} replaced)')
+print(f'\\left{{ (broken): {left_brace}')
+
+with open(fpath, 'w', encoding='utf-8') as f:
+    f.write(text)
+print('Saved.')
+```
+
+### list_display_fixes.py（阶段 B）
+
+```python
+"""List inline $ formulas that should be $$ display math."""
+import re, sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+fpath = sys.argv[1]
+with open(fpath, 'r', encoding='utf-8') as f:
+    text = f.read()
+
+# Find $$...$$ spans
+display_spans = [(m.start(), m.end()) for m in re.finditer(r'\$\$[\s\S]*?\$\$', text)]
+
+def inside_display(pos):
+    for s, e in display_spans:
+        if s <= pos < e:
+            return True
+    return False
+
+needs_display = []
+for m in re.finditer(r'\$[^$]{1,2000}\$', text):
+    if inside_display(m.start()):
+        continue
+    inner = m.group()[1:-1]
+    line = text[:m.start()].count('\n') + 1
+    reasons = []
+
+    envs = re.findall(r'\\begin\{([^}]+)\}', inner)
+    if envs:
+        reasons.append('begin:' + ','.join(envs))
+    if re.search(r'\\\\[a-zA-Z\[]', inner):
+        reasons.append('multi-line')
+    n = len(inner)
+    if n > 200:
+        reasons.append('len=' + str(n))
+
+    if reasons:
+        needs_display.append((line, inner, reasons))
+
+print('Formulas that need $ -> $$ : ' + str(len(needs_display)))
+print()
+for line, inner, reasons in needs_display:
+    rstr = ' | '.join(reasons)
+    snippet = inner[:120].replace('\n', ' ')
+    print('Line ' + str(line) + ': ' + rstr)
+    print('  ' + snippet + '...')
+    print()
+```
+
+### find_all_missed.py（阶段 C 辅助）
+
+```python
+"""Find ALL remaining *x* and **x** patterns that look like math variables.
+Usage: python find_all_missed.py <markdown_file>"""
+import re, sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+fpath = sys.argv[1]
+with open(fpath, 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+
+italic_math = re.compile(
+    r'\*[a-zA-Z]\*(?:[0-9]+|(?:\xa0)?[⋅×+\-\=]|(?:\xa0)?\*\*[ijk]\*\*)'
+)
+bold_math = re.compile(
+    r'\*\*[ijk]\*\*(?:[0-9]+|(?:\xa0)?[⋅×+\-\=])'
+)
+
+for i, line in enumerate(lines):
+    lineno = i + 1
+    stripped = line.strip()
+    if not stripped:
+        continue
+    if stripped.startswith('|') or stripped.startswith('#'):
+        continue
+    if stripped.startswith('$$') or stripped.startswith('>'):
+        continue
+    if stripped.startswith('!['):
+        continue
+
+    clean = re.sub(r'\$\$[\s\S]*?\$\$', '', stripped)
+    clean = re.sub(r'\$[^$]+?\$', '', clean)
+
+    im = italic_math.findall(clean)
+    bm = bold_math.findall(clean)
+
+    if im or bm:
+        print(f'Line {lineno}:')
+        if im:
+            print(f'  italic: {im}')
+        if bm:
+            print(f'  bold:   {bm}')
+        print(f'  text:   {clean[:150]}')
+        print()
+```
+
+### final_verify.py（收尾验证）
+
+```python
+"""Final verification: check \\ _ & are all correct."""
+import sys, io, re
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+fpath = sys.argv[1] if len(sys.argv) > 1 else None
+if fpath is None:
+    print('Usage: python final_verify.py <markdown_file>')
+    sys.exit(1)
+
+with open(fpath, 'rb') as f:
+    raw = f.read()
+
+text = raw.decode('utf-8', errors='replace')
+BS = chr(92)
+
+# 1. Escaped underscores
+esc_underscore = text.count(BS + '_')
+print(f'[{"OK" if esc_underscore == 0 else "FAIL"}] Escaped underscores: {esc_underscore}')
+
+# 2. Escaped asterisks
+esc_star = text.count(BS + '*')
+print(f'[{"OK" if esc_star == 0 else "FAIL"}] Escaped asterisks: {esc_star}')
+
+# 3. Check for broken \left{ (missing backslash)
+left_broken = text.count(chr(92) + 'left{')
+print(f'[{"OK" if left_broken == 0 else "FAIL"}] \\left{{ (broken): {left_broken}')
+
+# 4. Check each aligned formula
+all_ok = True
+for m in re.finditer(r'\\begin\{aligned\}', text):
+    start = text.rfind('$', 0, m.start())
+    end = text.find('$', m.end())
+    if start >= 0 and end >= 0:
+        formula = text[start:end+1]
+        line = text[:m.start()].count('\n') + 1
+
+        line_breaks = formula.count(BS + BS)
+        amp_count = formula.count('&')
+
+        bad = 0
+        pos = 0
+        while True:
+            pos = formula.find(BS + '{', pos)
+            if pos < 0:
+                break
+            prev = formula[pos-1] if pos > 0 else ''
+            if prev == BS:
+                pos += 2
+                continue
+            if prev.isalpha():
+                pos += 1
+                continue
+            bad += 1
+            pos += 1
+
+        status = 'OK' if bad == 0 else 'FAIL (' + str(bad) + ' broken)'
+        if bad > 0:
+            all_ok = False
+        print(f'Line {line}: \\\\={line_breaks}, &=&={amp_count}, broken={bad} [{status}]')
+
+if all_ok:
+    print('\nAll formulas pass!')
+else:
+    print('\nSome formulas still have issues.')
 ```

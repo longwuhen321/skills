@@ -83,11 +83,10 @@
 
 ### 核心能力
 
-- 抓取任意网页，提取正文内容并转换为 Markdown
-- 图片自动下载到本地 `.assets` 文件夹
-- 数学公式智能识别与转换（Wikipedia `.mwe-math-element`、MathJax、MathML、Sphinx `class="math"`）
-- 防御性设计：限流退避、文件名截断、URL 解码、Wikipedia 专有清洗
-- 生成后审核：Claude 会逐项检查 `\_`/`\*` 反转义、伪公式修复、孤 `$` 污染等
+- 抓取任意网页，提取正文并转为 Markdown（`markdownify` + `BeautifulSoup`）
+- 图片自动下载到本地 `.assets` 文件夹，支持 Wikimedia 限流退避
+- 数学公式四路识别：Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>` MathML、Sphinx `class="math"`
+- **三阶段公式审核流水线**：脚本机械修复 + Claude 上下文判断，确保每个公式正确渲染
 
 ### 使用方式
 
@@ -95,7 +94,7 @@
 /web2md <URL>
 ```
 
-首次使用时会引导配置 Python 环境（自动搜索或手动指定），之后记住路径不再询问。
+首次使用时会引导配置 Python 环境（自动搜索或手动指定），同时写入 Bash allow 规则避免后续重复确认。之后记住路径不再询问。
 
 ### 输出结构
 
@@ -108,7 +107,56 @@
     └── ...
 ```
 
-用 Typora 打开 `.md` 文件即可获得完整阅读体验。
+### 公式审核流水线（第四步）
+
+脚本 `process_math_formulas` 只能做标签级转换。生成 `.md` 后，分三个阶段完成审核：
+
+| 阶段 | 工具 | 做什么 | 谁判断 |
+|------|------|--------|--------|
+| **A** | `fix_escapes.py` | `$...$` / `$$...$$` 内 `\_`→`_`、`\*`→`*`（不碰 `\{` `\}`） | 脚本机械执行 |
+| **B** | `list_display_fixes.py` | 列出含 `\begin{aligned}` 或 `\\` 行断但仍被 `$` 包裹的公式 | **Claude** 逐条判 `$`→`$$` |
+| **C** | `find_all_missed.py`（辅助扫描）+ **LLM 通读循环** | Wikipedia 伪公式识别：`**i**`、`*x*2`、`*a*1 + *b*2**i**` 等 | **Claude** 读全文 → 写清单 → Edit → 复核，循环至干净 |
+
+#### 阶段 C 伪公式分类（LLM 逐条判断）
+
+脚本无法区分表格粗体和数学符号——由 Claude 通读全文，根据上下文识别以下类别：
+
+- **斜体+数字** → 下标/上标：`*a*1` → `$a_{1}$`、`*x*2` → `$x^{2}$`
+- **斜体+运算符** → 行内公式：`*x* = *y*` → `$x=y$`
+- **粗体+数字/运算符** → 向量公式：`**i** ⋅ **j** = **k**` → `$\mathbf{i}\cdot\mathbf{j}=\mathbf{k}$`
+- **粗体数域记号**：`**R**` → `$\mathbf{R}$`、`**C**` → `$\mathbf{C}$` 等
+- **Unicode 运算符**（±, ⋅, ×, ∗, −）→ LaTeX
+- **Unicode 不等号/集合/箭头**（≤, ∈, →, ⇒, …）→ LaTeX
+- **混合粗体+斜体**：`*a* + *b* **i** + *c* **j**` → `$a+b\mathbf{i}+c\mathbf{j}$`
+- **函数+斜体参数**：`cos(*φ*)` → `$\cos(\varphi)$`
+
+> 判断边界：表格 `| **i** | **j** | **k** |` 保留 bold；维度 `2 × 2` 保留 Unicode。
+
+#### 收尾验证
+
+`final_verify.py` 最终确认：`\_` 清零、`\*` 清零、`\\` 行断完整、`\left\{` 未破坏、`$$` 独占一行、LLM 清单全部打勾。
+
+### 项目文件结构
+
+```
+<项目根目录>/
+├── .web2md_tools/
+│   ├── web2md.py              # 主抓取脚本
+│   ├── fix_escapes.py          # 阶段 A：\_ \* 修复
+│   ├── list_display_fixes.py   # 阶段 B：$→$$ 候选列表
+│   ├── find_all_missed.py      # 阶段 C：伪公式扫描辅助
+│   ├── final_verify.py         # 收尾验证
+│   ├── intermediate/           # LLM 清单 fix_list_roundN.md
+│   └── _archive/               # 调试脚本等一次性文件
+└── .claude/
+    └── settings.local.json     # Python 路径 + Bash allow 规则
+```
+
+### 设计原则
+
+- **Claude 做判断，脚本做执行**——`**i**` → `$\mathbf{i}$` 这类转换，脚本只能做 Claude 手写的精确 `str.replace`，不能自动判断上下文
+- **不碰 `\{` `\}`**——它们是 `\left\{` `\right\}` 的合法 LaTeX 组件
+- **Wikipedia 特化清洗**仅对 `wikipedia.org` / `wikimedia.org` 生效，`is_wiki` 兜底
 
 ---
 
