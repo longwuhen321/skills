@@ -1,0 +1,4 @@
+interface:
+  display_name: "Markdown to Chinese"
+  short_description: "Translate Markdown to Chinese and preserve formatting"
+  default_prompt: "Use $md2zh to translate this Markdown document into Simplified Chinese."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Webpage to Markdown"
+  short_description: "Save webpages as local Markdown with images"
+  default_prompt: "Use $web2md to convert this webpage into a local Typora-compatible Markdown document."
