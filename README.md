@@ -11,6 +11,7 @@
 | [md2zh](#md2zh) | 将英文 Markdown 翻译为中文，保留格式与技术准确性 |
 | [token-track](#token-track) | 自动追踪 Token 用量，生成会话消耗报告 |
 | [web2md](#web2md) | 抓取网页内容，输出 Typora 兼容的 Markdown 文件 |
+| [confluence-tools](#confluence-tools) | Confluence 工具集：Markdown 导入页面、数学公式升级 |
 
 ---
 
@@ -157,6 +158,57 @@
 - **Claude 做判断，脚本做执行**——`**i**` → `$\mathbf{i}$` 这类转换，脚本只能做 Claude 手写的精确 `str.replace`，不能自动判断上下文
 - **不碰 `\{` `\}`**——它们是 `\left\{` `\right\}` 的合法 LaTeX 组件
 - **Wikipedia 特化清洗**仅对 `wikipedia.org` / `wikimedia.org` 生效，`is_wiki` 兜底
+
+---
+
+## confluence-tools
+
+**Confluence 页面管理一站式工具集。**
+
+### 核心能力
+
+- **Markdown 导入** — 将 `.md` 文件上传为 Confluence 页面，自动处理代码块、数学公式、图片、高亮标记等
+- **数学公式升级** — 将已有页面的原始 `$...$` / `$$...$$` / `\`\`\`latex` 标记升级为 Confluence 原生宏
+- **首次配置向导** — Python 环境、Confluence 地址、Token、默认空间等一次配置，后续零参数调用
+- **自动查重更新** — 同标题页面已存在时自动更新而非报错
+- **自进化机制** — 每次踩坑修复后，提示用户是否将补丁固化到 skill 中
+
+### 使用方式
+
+```
+/confluence-tools
+```
+
+首次运行自动进入配置向导，之后选择功能：导入 Markdown 或升级数学公式。
+
+### 技术要点
+
+- 基于 Confluence 9.x REST API，Bearer Token (PAT) 认证
+- 数学公式使用 `mathblock` / `mathinline` 原生宏
+- 处理流水线：protect code → protect math → markdown2 → restore → convert macros → upload
+- 自动清理 `markdown2` 产生的 `<p>` 嵌套包裹和 `<div class="codehilite">` 残留
+
+### 文件结构
+
+```
+confluence-tools/
+├── SKILL.md
+├── scripts/
+│   ├── md_import.py      # Markdown → Confluence 导入
+│   ├── math_upgrade.py   # 已有页面数学公式升级
+│   └── debug_utils.py    # 调试日志清理（共用）
+└── debug/
+    ├── import/           # md_import 日志
+    └── upgrade/          # math_upgrade 日志
+```
+
+### 自进化机制
+
+每次执行遇到非一次性错误（脚本 bug、渲染异常、边界情况），修复并通过验证后，Claude 会询问是否固化：
+
+- **修改脚本** — 更新 `scripts/*.py`，根除 bug
+- **更新 SKILL.md** — 补充注意事项或调整流程
+- **都改 / 不改** — 按需选择
 
 ---
 
