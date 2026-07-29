@@ -1,31 +1,46 @@
 # Translation rules
 
-Read the complete document before translating it.
+## Content boundary
 
-## Preserve existing Markdown
+Translate reader-visible natural language in:
 
-Keep these items unchanged:
+- ATX and Setext heading text;
+- paragraphs, list-item prose, blockquotes, and table-cell prose;
+- text inside emphasis and ordinary inline HTML elements;
+- inline-link labels and image alt text;
+- footnote prose and prose surrounding citations.
 
-- fenced code blocks and inline code, including comments inside code;
-- LaTeX formulas inside `$...$`, `$$...$$`, `\(...\)`, and `\[...\]`;
-- link destinations, image paths, raw URLs, and autolinks;
-- citation anchors, reference identifiers and definitions;
-- HTML tags and attributes, entities, escape sequences, and `{{...}}` template syntax;
-- heading levels, indentation, list nesting, blockquote depth, table delimiter rows, and source line endings.
+Keep these source items unchanged:
 
-Translate paragraph text, headings, list text, blockquotes, table-cell prose, link labels, and image alt text. Preserve each protected item exactly, but allow natural Chinese word order within the same prose block when all protected items remain present.
+- fenced and indented code blocks, inline code, and code-like HTML elements;
+- LaTeX inside `$...$`, `$$...$$`, `\(...\)`, and `\[...\]`;
+- link destinations, image paths, raw URLs, autolinks, reference identifiers, citation keys, and footnote identifiers;
+- Markdown markers, indentation, hard-break whitespace, blank lines, and line endings;
+- YAML frontmatter, HTML tags and attributes, comments, entities, escapes, and template syntax;
+- formal bibliography titles and metadata.
 
-If the source contains `> 原文链接:`, preserve it and add one short translation note immediately below it.
+Reference-style shortcut labels are also identifiers, so keep them unchanged. Translate full/collapsed reference-link labels only when their identifiers remain separately protected.
+
+The pipeline represents protected source with ASCII `@@MD2ZH:PROTECT:...@@` markers. Keep every supplied marker exactly once. Markers may move with natural Chinese word order when doing so does not split formatting pairs. Never invent, edit, duplicate, or omit a marker.
+
+The model-facing input is a small set of complete translation blocks, not hundreds of JSON mapping entries. Each `@@MD2ZH:SEG:block-....:....@@` line identifies the position of the following single-line text segment. Preserve every segment line exactly and in order. Translate the content lines only; do not add wrappers, commentary, blank lines, or physical line breaks.
+
+## Ambiguous content
+
+Read `.md2zh_tools/config.json` to determine whether the user or Codex decides ambiguous content. A translate decision must select exact source substrings inside the pipeline's suggested payload; it never authorizes rewriting an entire unknown construct.
+
+For Codex decisions, use the complete supplied section and neighboring context. Record a concise reason. Let the pipeline persist all accepted, rejected, and retried decisions in `.md2zh_tools/decision_logs/*.jsonl` for later diagnosis and rule improvement.
 
 ## Translation quality
 
 - Preserve meaning, scope, tone, logical relations, and certainty. Do not add, omit, summarize, or editorialize.
-- Use established Chinese technical terms and keep recurring terminology consistent.
-- Prefer natural Chinese over literal English word order.
-- Keep personal names, product names, commands, identifiers, variables, bibliographic metadata, DOI, ISBN, URLs, and citation keys accurate.
-- Preserve cited work titles in their source language in formal reference lists unless the document consistently uses an established Chinese title.
-- For long documents, maintain a small task-local glossary rather than repeatedly revising already translated prose.
+- Prefer natural Simplified Chinese over literal English word order.
+- Use established Chinese technical terms and keep recurring terminology consistent across sections.
+- Preserve personal names, product names, commands, identifiers, variables, bibliographic metadata, DOI, ISBN, URLs, and citation keys accurately.
+- Read all blocks once, establish the document context and shared glossary, then translate blocks in source order. Never treat a content line as context-free just because the safety pipeline stores it separately.
+- Keep formal cited-work titles in their source language unless the document consistently uses an established Chinese title.
+- Translate table cells independently without changing their surrounding pipes or whitespace.
 
-## Tables
+## Semantic review
 
-Preserve the number and order of rows and cells, the outer-pipe style, alignment delimiters, and leading or trailing cell whitespace. Translate only cell prose. Do not split on pipes inside code, formulas, HTML attributes, or link/image targets.
+Review all translated blocks for omissions, duplication, mistranslation, altered certainty, terminology drift, untranslated English prose, and unnatural Chinese. For long documents, review every heading, every table, every ambiguity decision, prose around formulas and figures, the introduction, the final section, and at least one complete paragraph under every level-1 heading.
