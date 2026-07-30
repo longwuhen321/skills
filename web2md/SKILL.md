@@ -71,7 +71,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 
 ### 第四步：审核数学公式
 
-脚本 `process_math_formulas` 只识别 Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>`、`class="math"` 四种标签转为 `$...$` / `$$...$$`。
+脚本 `process_math_formulas` 只识别 Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>`、`class="math"`、MathJax SVG `<mjx-container>` 五种标签转为 `$...$` / `$$...$$`。
 
 生成 .md 后，分三个阶段完成审核：
 
@@ -456,6 +456,119 @@ def download_images(soup, img_dir: Path, base_url: str, session: requests.Sessio
     return mapping
 
 
+def _mathml_to_latex(el) -> str:
+    """Recursively convert MathML elements to LaTeX string."""
+    if el is None:
+        return ''
+    if isinstance(el, str):
+        return el
+
+    tag = el.name if hasattr(el, 'name') else None
+    if not tag:
+        return el.get_text() if hasattr(el, 'get_text') else str(el)
+
+    children = list(el.children) if hasattr(el, 'children') else []
+    child_texts = [_mathml_to_latex(c) for c in children]
+    inner = ''.join(child_texts).strip()
+
+    if tag == 'math':
+        return inner
+    elif tag == 'mi':
+        func_names = {'sin','cos','tan','cot','sec','csc',
+                      'arcsin','arccos','arctan',
+                      'sinh','cosh','tanh','coth',
+                      'log','ln','lg','exp',
+                      'lim','sup','inf','max','min',
+                      'det','dim','gcd','deg','arg',
+                      'ker','hom','Pr','mod'}
+        if inner in func_names:
+            return '\\' + inner + ' '
+        return inner
+    elif tag == 'mn':
+        return inner
+    elif tag == 'mo':
+        mo_map = {
+            '=': '=', '+': '+', '-': '-', '−': '-',
+            '×': '\\times ', '*': '*', '/': '/',
+            '(': '(', ')': ')', '[': '[', ']': ']',
+            '→': '\\to ',
+            '≤': '\\leq ', '≥': '\\geq ',
+            '≠': '\\neq ', '≈': '\\approx ',
+            '≡': '\\equiv ', '∝': '\\propto ',
+            '∈': '\\in ',
+            '±': '\\pm ',
+            '∞': '\\infty ',
+            '⋅': '\\cdot ',
+            '…': '\\dots ',
+            ',': ',', '.': '.',
+            '⁡': '', '⁢': '', '⁣': '', '⁤': '',
+        }
+        return mo_map.get(inner, inner)
+    elif tag == 'mtext':
+        if inner == '' or inner.isspace():
+            return ' '
+        return '\\text{' + inner + '}'
+    elif tag == 'msub':
+        return child_texts[0] + '_{' + child_texts[1] + '}'
+    elif tag == 'msup':
+        return child_texts[0] + '^{' + child_texts[1] + '}'
+    elif tag == 'msubsup':
+        return child_texts[0] + '_{' + child_texts[1] + '}^{' + child_texts[2] + '}'
+    elif tag == 'mfrac':
+        return '\\frac{' + child_texts[0] + '}{' + child_texts[1] + '}'
+    elif tag == 'msqrt':
+        return '\\sqrt{' + inner + '}'
+    elif tag == 'mroot':
+        return '\\sqrt[' + child_texts[1] + ']{' + child_texts[0] + '}'
+    elif tag == 'mover':
+        accent = el.find('mo')
+        accent_text = accent.get_text().strip() if accent else ''
+        if accent_text in ('¯',):
+            return '\\bar{' + child_texts[0] + '}'
+        elif accent_text in ('→', '⟶'):
+            return '\\vec{' + child_texts[0] + '}'
+        elif accent_text in ('^', '̂'):
+            return '\\hat{' + child_texts[0] + '}'
+        elif accent_text in ('˜', '~', '̃'):
+            return '\\tilde{' + child_texts[0] + '}'
+        elif accent_text in ('¨',):
+            return '\\ddot{' + child_texts[0] + '}'
+        return '\\dot{' + child_texts[0] + '}'
+    elif tag == 'munder':
+        return '\\underset{' + child_texts[1] + '}{' + child_texts[0] + '}'
+    elif tag == 'munderover':
+        return '\\underset{' + child_texts[1] + '}{\\overset{' + child_texts[2] + '}{' + child_texts[0] + '}}'
+    elif tag in ('mrow', 'mstyle', 'merror', 'mphantom', 'mpadded', 'semantics', 'TeXAtom', 'maction'):
+        return inner
+    elif tag == 'mspace':
+        return ' '
+    elif tag == 'menclose':
+        return '\\boxed{' + inner + '}'
+    elif tag == 'mtable':
+        # Build matrix from table rows
+        rows = []
+        for tr in el.find_all('mtr', recursive=False) or el.find_all('mtr'):
+            cells = [_mathml_to_latex(td) for td in tr.find_all('mtd', recursive=False) or tr.find_all('mtd')]
+            if cells:
+                rows.append(' & '.join(cells))
+        if not rows:
+            return inner
+        n_cols = max(r.count('&') + 1 for r in rows)
+        if n_cols == 1 and len(rows) <= 4:
+            # Column vector: use inline notation without extra brackets
+            return ', '.join(r.strip().rstrip('\\\\') for r in rows)
+        col_spec = 'c' * n_cols
+        return '\\begin{bmatrix}\n' + ' \\\\\n'.join(rows) + '\n\\end{bmatrix}'
+    elif tag == 'mtr':
+        return ' & '.join(child_texts) + ' \\\\'
+    elif tag == 'mlabeledtr':
+        return ' & '.join(child_texts[1:]) + ' \\\\'
+    elif tag == 'mtd':
+        return inner
+    else:
+        return inner
+
+
 def process_math_formulas(soup) -> int:
     count = 0
 
@@ -525,6 +638,39 @@ def process_math_formulas(soup) -> int:
             s = '\n$$' if is_display else '$'
             math_tag.replace_with(f'{d}{latex}{s}')
             count += 1
+
+    # 5. MathJax SVG <mjx-container> (e.g. PX4 docs, VitePress sites)
+    for container in soup.find_all('mjx-container'):
+        is_display = container.get('display') == 'true'
+        assistive = container.find('mjx-assistive-mml')
+        if assistive:
+            math_tag = assistive.find('math')
+            if math_tag:
+                latex = _mathml_to_latex(math_tag)
+                if latex:
+                    # Post-process: fix decomposed function names (MathJax SVG
+                    # splits "sin" into <mi>s</mi><mi>i</mi><mi>n</mi> etc.)
+                    func_names = [
+                        'sin', 'cos', 'tan', 'cot', 'sec', 'csc',
+                        'arcsin', 'arccos', 'arctan',
+                        'sinh', 'cosh', 'tanh', 'coth',
+                        'log', 'ln', 'lg', 'exp',
+                        'lim', 'sup', 'inf', 'max', 'min',
+                        'det', 'dim', 'gcd', 'deg', 'arg',
+                        'ker', 'hom', 'mod',
+                    ]
+                    for fn in sorted(func_names, key=len, reverse=True):
+                        # Match function name that is NOT already prefixed with backslash
+                        # Must be followed by (, space, or end-of-string
+                        latex = re.sub(
+                            r'(?<!\\)\b' + re.escape(fn) + r'(?=[(\s]|$)',
+                            '\\\\' + fn + ' ',
+                            latex
+                        )
+                    d = '$$\n' if is_display else '$'
+                    s = '\n$$' if is_display else '$'
+                    container.replace_with(f'{d}{latex}{s}')
+                    count += 1
 
     return count
 
