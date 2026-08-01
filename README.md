@@ -9,7 +9,6 @@
 | Skill | 描述 |
 |-------|------|
 | [md2zh](#md2zh) | 将英文 Markdown 翻译为中文，保留格式与技术准确性 |
-| [token-track](#token-track) | 自动追踪 Token 用量，生成会话消耗报告 |
 | [web2md](#web2md) | 抓取网页内容，输出 Typora 兼容的 Markdown 文件 |
 | [confluence-tools](#confluence-tools) | Confluence 工具集：Markdown 导入页面、数学公式升级 |
 
@@ -38,43 +37,6 @@
 ### 技术参考
 
 翻译技术术语时优先参考全国科学技术名词审定委员会 (cnterm.cn) 的审定名词与相关国标（GB/T 2900.56-2008 等）。
-
----
-
-## token-track
-
-**每次对话结束自动更新 Token 消耗报告。**
-
-### 核心能力
-
-- 记录每次提问的原文与时间戳
-- 按 API 调用链拆分 token 明细（input / output / cached / cost / 耗时）
-- 生成会话概览（总次数、总 token、总费用）
-- 支持**自动模式**（Stop hook 触发）与**手动模式**（用户主动调用）
-
-### 使用方式
-
-```
-/token-track
-```
-
-首次运行时选择自动/手动模式。自动模式下，每次对话结束自动更新项目根目录的 `token-usage.md`。
-
-### 文件结构
-
-```
-<项目根目录>/
-├── .claude/
-│   ├── token-track-mode.txt    # 运行模式
-│   └── settings.local.json     # Stop hook（自动模式）
-└── token-usage.md              # 生成的报告
-```
-
-### 数据来源
-
-- `~/.claude/telemetry/` — API 调用记录（`tengu_api_success` 事件）
-- `~/.claude/history.jsonl` — 用户提问内容
-- `~/.claude/sessions/` — 当前会话标识
 
 ---
 
@@ -163,15 +125,17 @@
 
 ## confluence-tools
 
-**Confluence 页面管理一站式工具集。**
+**Confluence 一站式工具集：Markdown 导入 + 数学公式升级。**
 
 ### 核心能力
 
-- **Markdown 导入** — 将 `.md` 文件上传为 Confluence 页面，自动处理代码块、数学公式、图片、高亮标记等
-- **数学公式升级** — 将已有页面的原始 `$...$` / `$$...$$` / `\`\`\`latex` 标记升级为 Confluence 原生宏
-- **首次配置向导** — Python 环境、Confluence 地址、Token、默认空间等一次配置，后续零参数调用
-- **自动查重更新** — 同标题页面已存在时自动更新而非报错
-- **自进化机制** — 每次踩坑修复后，提示用户是否将补丁固化到 skill 中
+- **Markdown 导入** — `.md` → Confluence 页面：代码块、表格、图片附件（上传失败 / 本地缺失 / base64 内嵌均有明确报告）、`==高亮==`、数学公式
+- **数学公式升级** — 已有页面的 `$...$` / `$$...$$` / `\`\`\`latex` 升级为原生 `mathinline` / `mathblock` 宏，支持单页、递归子页、整空间批量
+- **公式对齐可配置** — 导入与升级统一支持左对齐 / 居中（原生 `mathblock + alignment` 参数，已在 Confluence 9.2.1 实测），`--align` 可临时覆盖
+- **自动查重更新** — 空间内标题内存匹配（大小写不敏感），同标题自动更新为新版本，409 版本冲突自动重试
+- **容错机制** — 429 限流指数退避重试（尊重 `Retry-After`）、批量遇错继续 + 末尾失败汇总（`--stop-on-error` 可停）、全请求超时保护
+- **首次配置向导** — 必需项（地址 / Token / 空间）缺失即中断、禁止预填历史配置、Python 路径先问后找
+- **凭据安全** — Token 只存 `config.py`（gitignore 排除），支持 `CONFLUENCE_TOKEN` 环境变量覆盖
 
 ### 使用方式
 
@@ -179,36 +143,45 @@
 /confluence-tools
 ```
 
-首次运行自动进入配置向导，之后选择功能：导入 Markdown 或升级数学公式。
+首次运行走配置向导，之后选择：导入 Markdown 或升级数学公式。两个脚本也支持独立命令行运行。
 
 ### 技术要点
 
-- 基于 Confluence 9.x REST API，Bearer Token (PAT) 认证
-- 数学公式使用 `mathblock` / `mathinline` 原生宏
-- 处理流水线：protect code → protect math → markdown2 → restore → convert macros → upload
-- 自动清理 `markdown2` 产生的 `<p>` 嵌套包裹和 `<div class="codehilite">` 残留
+- Confluence 9.x REST API，Bearer Token (PAT) 认证
+- 公式宏统一由 `common.build_block_template` 生成（left = `mathblock + alignment=left`，center = 默认居中）
+- 导入流水线：protect code/math → markdown2 → restore → convert 宏 → 上传附件 → 更新
+- 公共层 `common.py` 集中处理：配置加载、HTTP 重试、分页收集、宏模板
+
+### 质量保障
+
+- `scripts/selftest.py`：39 个离线用例（转换管线、版本号流程、限流重试、对齐、base64 图片等），mock 配置与网络，**修改脚本后必须全绿**
+- `KNOWN_ISSUES.md`：已知问题与修复记录（现象 / 根因 / 修复 / 排查方法），排查前先读
+- 真实环境验证产物（测试页 / 临时脚本）用后即清
 
 ### 文件结构
 
 ```
 confluence-tools/
 ├── SKILL.md
+├── KNOWN_ISSUES.md           # 已知问题与修复记录
+├── config.example.py         # 配置模板（占位符）
 ├── scripts/
-│   ├── md_import.py      # Markdown → Confluence 导入
-│   ├── math_upgrade.py   # 已有页面数学公式升级
-│   └── debug_utils.py    # 调试日志清理（共用）
-└── debug/
-    ├── import/           # md_import 日志
-    └── upgrade/          # math_upgrade 日志
+│   ├── config.py             # 真实配置（gitignore 排除）
+│   ├── common.py             # 公共：配置加载、HTTP 重试、页面收集、宏模板
+│   ├── debug_utils.py        # 调试日志清理
+│   ├── md_import.py          # Markdown → Confluence
+│   ├── math_upgrade.py       # 数学公式升级
+│   └── selftest.py           # 离线自测（39 用例）
+└── debug/                    # 导入/升级调试快照（自动清理）
 ```
 
 ### 自进化机制
 
-每次执行遇到非一次性错误（脚本 bug、渲染异常、边界情况），修复并通过验证后，Claude 会询问是否固化：
+每次执行遇到非一次性错误（脚本 bug、渲染异常、边界情况），修复并通过验证后询问是否固化：
 
-- **修改脚本** — 更新 `scripts/*.py`，根除 bug
+- **修改脚本** — 更新 `scripts/*.py`
+- **记录到 KNOWN_ISSUES.md** — 追加现象 / 根因 / 修复 / 排查方法
 - **更新 SKILL.md** — 补充注意事项或调整流程
-- **都改 / 不改** — 按需选择
 
 ---
 

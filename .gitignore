@@ -1,0 +1,32 @@
+# ============================================================
+# 仓库根 .gitignore — skills 多模块仓库通用忽略规则
+# ============================================================
+
+# ---------- 通用规则（适用于仓库内所有 skill） ----------
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
+
+# IDE 本地配置（不提交，各人本机习惯不同）
+.vscode/
+.idea/
+
+# Reasonix 本地配置（会话/权限状态，不提交）
+.reasonix/
+reasonix.toml
+
+# ---------- 各 skill 专属规则 ----------
+# 规则需带 skill 目录前缀，避免误伤其他 skill 的同名路径。
+
+# confluence-tools：真实配置含 PAT token，不提交（从 config.example.py 复制）
+confluence-tools/scripts/config.py
+
+# 仓库根目录的配置测试文件（含真实 token，防止误提交）
+/config.py
+
+# confluence-tools：调试日志快照（导入/升级时生成，体积可能很大）
+confluence-tools/debug/
+
+# 其他 skill 如有需要，在此追加各自的前缀规则：
+# 例如：md2zh/xxx、web2md/xxx
