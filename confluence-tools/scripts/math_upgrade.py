@@ -8,7 +8,7 @@ Confluence 页面数学公式升级工具
 用法:
   python math_upgrade.py --page-id ID [--space KEY] [--recursive] [--align left|center]
   python math_upgrade.py --space KEY [--align left|center]
-  python math_upgrade.py --confirm <debug_folder>    # Claude 验证后确认更新
+  python math_upgrade.py --confirm <debug_folder>    # AI 助手验证后确认更新
   python math_upgrade.py --space KEY --stop-on-error  # 批量遇错即停
 
 配置从 scripts/config.py 读取（CLI 参数可覆盖默认值）。
@@ -41,7 +41,7 @@ def _sanitize_latex(s: str) -> str:
 class ConfluenceMathUpdater:
     """拉取 Confluence 页面，将原始 $LaTeX$ 标记升级为原生宏"""
 
-    def __init__(self, space_key=None, math_align=None, auto_update=None, claude_verify=None):
+    def __init__(self, space_key=None, math_align=None, auto_update=None, ai_verify=None):
         cfg = load_config()
         common = cfg['common_config']
         upgrade_cfg = cfg['upgrade_config']
@@ -52,7 +52,7 @@ class ConfluenceMathUpdater:
         self.default_page = upgrade_cfg.get('default_page', '') or None
         self.math_align = math_align if math_align is not None else upgrade_cfg.get('math_align', 'left')
         self.auto_update = auto_update if auto_update is not None else upgrade_cfg.get('auto_update', True)
-        self.claude_verify = claude_verify if claude_verify is not None else upgrade_cfg.get('claude_verify', False)
+        self.ai_verify = ai_verify if ai_verify is not None else upgrade_cfg.get('ai_verify', False)
         self.recursive = upgrade_cfg.get('recursive', True)
         self.max_depth = int(upgrade_cfg.get('max_depth', 0))
         self.block_template = build_block_template(self.math_align)
@@ -211,7 +211,7 @@ class ConfluenceMathUpdater:
                 # 行内公式规则：
                 #   - 开头 $ 后禁空白（排除 $ PWD 等）
                 #   - 闭合 $ 前禁空白（排除 $PWD / $OLDPWD 的跨变量配对）
-                #   - 内容禁 < > $ 换行（防跨 HTML 标签吞 span）
+                #   - 内容禁 < > $ 换行（防跨 HTML 标签吞 span；storage 中 < 已转义为 &lt;，实体形式可正常匹配）
                 r'(?<![$])[$](?![\s$])([^$<>\n]+?)(?<![$\s])[$](?![$])',
                 replace_inline, text)
 
@@ -371,9 +371,9 @@ class ConfluenceMathUpdater:
 
         self.save_debug(page_info, before, after, stats)
 
-        if self.claude_verify:
+        if self.ai_verify:
             return True, (f"{indent}  {page_info['title']} (v{page_info['version']}) "
-                          f"— 转换 {total_changes} 处, ⏸️ 等待 Claude 验证")
+                          f"— 转换 {total_changes} 处, ⏸️ 等待 AI 助手验证")
 
         passed, report = self.verify(before, after, stats)
         if not passed:
@@ -515,14 +515,14 @@ if __name__ == "__main__":
                         help='不递归，仅处理单个页面')
     parser.add_argument('--max-depth', type=int, default=-1, help='递归最大深度（-1=读取 config，0=不限）')
     parser.add_argument('--align', default=None, choices=['left', 'center'], help='公式对齐方式（默认从 config.py 读取）')
-    parser.add_argument('--claude-verify', action='store_true', default=None,
-                        help='转换后暂停等待 Claude 验证（默认从 config.py 读取）')
-    parser.add_argument('--no-claude-verify', action='store_false', dest='claude_verify',
+    parser.add_argument('--ai-verify', action='store_true', default=None,
+                        help='转换后暂停等待 AI 助手验证（默认从 config.py 读取）')
+    parser.add_argument('--no-ai-verify', action='store_false', dest='ai_verify',
                         help='不暂停，直接更新')
     parser.add_argument('--no-auto-update', action='store_true', help='不自动更新，仅生成 debug 文件')
     parser.add_argument('--stop-on-error', action='store_true',
                         help='批量处理时遇到失败立即停止（默认继续处理并末尾汇总）')
-    parser.add_argument('--confirm', default=None, help='Claude 验证后确认更新（传入 debug 目录路径）')
+    parser.add_argument('--confirm', default=None, help='AI 助手验证后确认更新（传入 debug 目录路径）')
 
     args = parser.parse_args()
 
@@ -535,7 +535,7 @@ if __name__ == "__main__":
         space_key=args.space,
         math_align=args.align,
         auto_update=False if args.no_auto_update else None,
-        claude_verify=args.claude_verify,
+        ai_verify=args.ai_verify,
     )
 
     page_id = args.page_id or updater.default_page

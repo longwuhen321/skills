@@ -28,5 +28,11 @@ confluence-tools/scripts/config.py
 # confluence-tools：调试日志快照（导入/升级时生成，体积可能很大）
 confluence-tools/debug/
 
+# web2md：真实配置（python_path 等），不提交（从 config.example.py 复制）
+web2md/scripts/config.py
+
+# web2md：本地测试文件夹（git 不追踪，本地质量保障用）
+web2md/scripts/tests/
+
 # 其他 skill 如有需要，在此追加各自的前缀规则：
-# 例如：md2zh/xxx、web2md/xxx
+# 例如：md2zh/xxx

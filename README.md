@@ -1,6 +1,6 @@
-# Claude Code Skills
+# AI Agent Skills
 
-本仓库收录了一套面向 Claude Code 的实用 skills，每个 skill 封装了一个完整的自动化工作流。
+本仓库收录了一套面向 AI 助手（Claude Code、Reasonix 等）的实用 skills，每个 skill 封装了一个完整的自动化工作流。
 
 ---
 
@@ -49,7 +49,7 @@
 - 抓取任意网页，提取正文并转为 Markdown（`markdownify` + `BeautifulSoup`）
 - 图片自动下载到本地 `.assets` 文件夹，支持 Wikimedia 限流退避
 - 数学公式四路识别：Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>` MathML、Sphinx `class="math"`
-- **三阶段公式审核流水线**：脚本机械修复 + Claude 上下文判断，确保每个公式正确渲染
+- **三阶段公式审核流水线**：脚本机械修复 + AI 助手上下文判断，确保每个公式正确渲染
 
 ### 使用方式
 
@@ -72,17 +72,18 @@
 
 ### 公式审核流水线（第四步）
 
-脚本 `process_math_formulas` 只能做标签级转换。生成 `.md` 后，分三个阶段完成审核：
+脚本 `process_math_formulas` 只能做标签级转换（识别 Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>`、`class="math"`、`<mjx-container>` 五种标签）。生成 `.md` 后，完成以下阶段审核：
 
 | 阶段 | 工具 | 做什么 | 谁判断 |
 |------|------|--------|--------|
-| **A** | `fix_escapes.py` | `$...$` / `$$...$$` 内 `\_`→`_`、`\*`→`*`（不碰 `\{` `\}`） | 脚本机械执行 |
-| **B** | `list_display_fixes.py` | 列出含 `\begin{aligned}` 或 `\\` 行断但仍被 `$` 包裹的公式 | **Claude** 逐条判 `$`→`$$` |
-| **C** | `find_all_missed.py`（辅助扫描）+ **LLM 通读循环** | Wikipedia 伪公式识别：`**i**`、`*x*2`、`*a*1 + *b*2**i**` 等 | **Claude** 读全文 → 写清单 → Edit → 复核，循环至干净 |
+| **A** | `fix_escapes.py` | `$...$` / `$$...$$` 内 `\_`→`_`、`\*`→`*`（不碰 `\{` `\}`，掩码忽略代码） | 脚本机械执行 |
+| **B** | `list_display_fixes.py --apply` | 自动升级确定性候选（`\begin{aligned/cases/array/bmatrix}` 或 `\\` 行断）`$`→`$$`，正文逐字节不变；其余列出 | 脚本自动 + **AI 助手**复核其余 |
+| **C** | `find_all_missed.py`（辅助扫描）+ **AI 助手通读循环** | Wikipedia 伪公式识别：`**i**`、`*x*2`、`*a*1 + *b*2**i**` 等 | **AI 助手**读全文 → 写清单 → Edit → 复核，循环至干净 |
+| **D** | 通读时同步检查 | Markdown 结构：表格分隔行/列数、图片引用存在性、围栏闭合、Sphinx 标题链接、占位符 code 化等 | **AI 助手**逐条判断 |
 
-#### 阶段 C 伪公式分类（LLM 逐条判断）
+#### 阶段 C 伪公式分类（AI 助手逐条判断）
 
-脚本无法区分表格粗体和数学符号——由 Claude 通读全文，根据上下文识别以下类别：
+脚本无法区分表格粗体和数学符号——由 AI 助手通读全文，根据上下文识别以下类别：
 
 - **斜体+数字** → 下标/上标：`*a*1` → `$a_{1}$`、`*x*2` → `$x^{2}$`
 - **斜体+运算符** → 行内公式：`*x* = *y*` → `$x=y$`
@@ -97,29 +98,43 @@
 
 #### 收尾验证
 
-`final_verify.py` 最终确认：`\_` 清零、`\*` 清零、`\\` 行断完整、`\left\{` 未破坏、`$$` 独占一行、LLM 清单全部打勾。
+`final_verify.py` 最终确认：`\_` 清零、`\*` 清零、`\\` 行断完整、`\left\{` 未破坏、`$$` 独占一行且成对、围栏闭合、LaTeX 花括号平衡、表格结构有效（分隔行 / 列数一致）、本地图片引用存在、正文无未保护占位符、LLM 清单全部打勾（先掩码代码再检查）。
 
-### 项目文件结构
+### 项目文件结构（脚本单份化）
+
+所有脚本固定存放在 skill 目录 `web2md/scripts/`，**不复制进项目**；项目只保留工作数据：
 
 ```
+web2md/                            # skill 目录（本仓库）
+├── SKILL.md
+├── config.example.py              # 配置模板（占位符）
+└── scripts/
+    ├── config.py                  # 真实配置（gitignore 排除）：python_path、timeout
+    ├── web2md.py                  # 主抓取脚本（含 DOM 规范化）
+    ├── markdown_code.py           # 代码掩码工具（各脚本共用）
+    ├── fix_escapes.py             # 阶段 A：\_ \* 修复
+    ├── list_display_fixes.py      # 阶段 B：$→$$ 自动升级 + 候选列表
+    ├── find_all_missed.py         # 阶段 C：伪公式扫描辅助
+    ├── final_verify.py            # 收尾验证
+    └── tests/                     # 本地测试（git 不追踪）
+        ├── selftest.py            # 测试入口（19 用例）
+        ├── test_formula_integrity.py
+        └── test_sphinx_conversion.py
+
 <项目根目录>/
-├── .web2md_tools/
-│   ├── web2md.py              # 主抓取脚本
-│   ├── fix_escapes.py          # 阶段 A：\_ \* 修复
-│   ├── list_display_fixes.py   # 阶段 B：$→$$ 候选列表
-│   ├── find_all_missed.py      # 阶段 C：伪公式扫描辅助
-│   ├── final_verify.py         # 收尾验证
-│   ├── intermediate/           # LLM 清单 fix_list_roundN.md
-│   └── _archive/               # 调试脚本等一次性文件
-└── .claude/
-    └── settings.local.json     # Python 路径 + Bash allow 规则
+└── .web2md_tools/
+    ├── intermediate/              # AI 助手清单 fix_list_roundN.md
+    └── _archive/                  # 调试脚本等一次性文件
 ```
 
 ### 设计原则
 
-- **Claude 做判断，脚本做执行**——`**i**` → `$\mathbf{i}$` 这类转换，脚本只能做 Claude 手写的精确 `str.replace`，不能自动判断上下文
+- **AI 助手做判断，脚本做执行**——`**i**` → `$\mathbf{i}$` 这类转换，脚本只能做 AI 助手手写的精确 `str.replace`，不能自动判断上下文
+- **脚本单份化**——可复用脚本只存在 `scripts/`，不复制进项目，避免版本漂移；各脚本通过 `markdown_code.py` 掩码忽略代码内容
+- **配置用 config.py**——仿 confluence-tools：`config.example.py` 模板 → `scripts/config.py` 真实值（gitignore 排除），`load_config()` 读取
 - **不碰 `\{` `\}`**——它们是 `\left\{` `\right\}` 的合法 LaTeX 组件
 - **Wikipedia 特化清洗**仅对 `wikipedia.org` / `wikimedia.org` 生效，`is_wiki` 兜底
+- **质量保障**——修改脚本后必须跑 `scripts/tests/selftest.py` 全绿（本地测试，不随仓库分发）
 
 ---
 
@@ -154,7 +169,7 @@
 
 ### 质量保障
 
-- `scripts/selftest.py`：39 个离线用例（转换管线、版本号流程、限流重试、对齐、base64 图片等），mock 配置与网络，**修改脚本后必须全绿**
+- `scripts/selftest.py`：42 个离线用例（转换管线、版本号流程、限流重试、对齐、base64 图片等），mock 配置与网络，**修改脚本后必须全绿**
 - `KNOWN_ISSUES.md`：已知问题与修复记录（现象 / 根因 / 修复 / 排查方法），排查前先读
 - 真实环境验证产物（测试页 / 临时脚本）用后即清
 
@@ -171,7 +186,7 @@ confluence-tools/
 │   ├── debug_utils.py        # 调试日志清理
 │   ├── md_import.py          # Markdown → Confluence
 │   ├── math_upgrade.py       # 数学公式升级
-│   └── selftest.py           # 离线自测（39 用例）
+│   └── selftest.py           # 离线自测（42 用例）
 └── debug/                    # 导入/升级调试快照（自动清理）
 ```
 
@@ -187,7 +202,7 @@ confluence-tools/
 
 ## 安装
 
-将本仓库 clone 到 `~/.claude/skills/` 目录，Claude Code 会自动发现并加载其中的 skills：
+将本仓库 clone 到 `~/.claude/skills/` 目录，AI 助手（Claude Code / Reasonix 等）会自动发现并加载其中的 skills：
 
 ```bash
 git clone <repo-url> ~/.claude/skills/

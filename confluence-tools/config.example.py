@@ -16,7 +16,7 @@
 
 # ==================== 通用配置 ====================
 common_config = {
-    # Python 解释器的完整路径。Claude 使用此路径执行所有 skill 脚本。
+    # Python 解释器的完整路径。AI 助手使用此路径执行所有 skill 脚本。
     # 可以是系统 Python、conda 环境或 venv 中的 python.exe。
     "python_path": "/path/to/your/python",
 
@@ -40,6 +40,31 @@ import_config = {
     # 公式对齐方式："left" = 左对齐（原生 mathblock + alignment=left），"center" = 居中（mathblock）。
     # 与 math_upgrade 的 upgrade_config.math_align 保持一致。可被 --align 参数覆盖。
     "math_align": "left",
+
+    # 默认父页面 ID：导入的页面挂为该页面的子页面。留空 = 不挂父级（页面建在空间根）。
+    # 仅对新建页面生效（页面已存在时按标题更新，位置不变）。可被 --parent-id 参数覆盖。
+    "default_parent_id": "",
+
+    # 默认页面标题。留空 = 取 md 文件名（不含扩展名）。可被 --page-name 参数覆盖。
+    "default_page_name": "",
+
+    # 是否启用 --dir 批量树导入功能（文件夹层级 → Confluence 页面层级）。
+    # 首次运行配置向导时明确询问，由用户确定是否开启。
+    # 开启后可用 md_import.py --dir <根文件夹> 导入整棵树（创建/更新/移动多个页面）；
+    # 未开启时使用 --dir 会报错提示（防误用）。
+    "tree_import": False,
+
+    # --dir 树导入命中已有页面的处理方式（仅树导入生效）：
+    #   "confirm" = 存在需移动层级的页面时先输出预览并暂停，每次执行都等用户确认（默认，安全）
+    #   "auto"    = 不确认，直接更新并移动到正确层级
+    #   "off"     = 不移动：命中只更新内容，页面位置不变
+    # 可被 --fix-hierarchy confirm|auto|off 参数覆盖。
+    "fix_hierarchy": "confirm",
+
+    # 自动目录宏：子标题（H2~H6）数量达到 toc_min_headings 时，自动在页面正文顶部
+    # 插入 Confluence 目录宏（toc）。toc_enabled=False 关闭此功能。
+    "toc_enabled": True,
+    "toc_min_headings": 4,
 }
 
 
@@ -60,9 +85,9 @@ upgrade_config = {
     # 可被 --no-auto-update 参数覆盖。
     "auto_update": True,
 
-    # 是否转换后暂停等待人工验证。True = 生成 debug 后停止，等 Claude 审核后 --confirm 提交。
-    # 可被 --claude-verify / --no-claude-verify 参数覆盖。
-    "claude_verify": False,
+    # 是否转换后暂停等待人工验证。True = 生成 debug 后停止，等 AI 助手审核后 --confirm 提交。
+    # 可被 --ai-verify / --no-ai-verify 参数覆盖。
+    "ai_verify": False,
 
     # 指定 --page-id 时默认是否递归处理子页面。
     # 可被 --recursive / --no-recursive 参数覆盖。

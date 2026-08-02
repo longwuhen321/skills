@@ -15,6 +15,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 from unittest.mock import patch
 
@@ -34,7 +35,7 @@ MOCK_CFG = {
     },
     'import_config': {'space': 'TEST', 'math_align': 'left'},
     'upgrade_config': {'math_align': 'left', 'auto_update': True,
-                       'claude_verify': False, 'recursive': True, 'max_depth': 0},
+                       'ai_verify': False, 'recursive': True, 'max_depth': 0},
     'debug_config': {'max_size_mb': 50, 'keep_recent': 20},
 }
 
@@ -189,6 +190,20 @@ class TestMdImport(unittest.TestCase):
         self.assertEqual(protected, md)
         self.assertEqual(len(blocks), 0)
 
+    def test_inline_math_inequality_protected(self):
+        # LaTeX 不等式 $0<x<\pi$ 应被保护层识别（历史 bug：内容含 < > 被漏掉，
+        # markdown2 转出裸 <x 导致 Confluence 400）
+        md = '当 $0<x<\\pi$ 时'
+        protected, blocks = self.importer._protect_math_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertIn('MATH_INLINE_', protected)
+        # HTML 阶段转换为 mathinline 宏，body 中 < 转义为 &lt;
+        html = '<p>当 $0<x<\\pi$ 时</p>'
+        result = self.importer._convert_math_blocks(html)
+        self.assertIn('mathinline', result)
+        self.assertIn('0&lt;x&lt;\\pi', result)
+        self.assertNotIn('$0<x<\\pi$', result)
+
     def test_convert_math_blocks(self):
         html = '<p>$$E=mc^2$$</p><p>$x$</p><pre><code>$$not math$$</code></pre>'
         result = self.importer._convert_math_blocks(html)
@@ -224,6 +239,91 @@ class TestMdImport(unittest.TestCase):
         self.assertIn('data:image/png;base64,AAAA', result)
         self.assertEqual(self.importer.failed_images, [])
         self.assertEqual(self.importer.data_images_skipped, 1)
+    def test_md_links_ignores_macro_cdata(self):
+        # mathblock 宏 CDATA 内 LaTeX \right](0) 不应被图片正则误判（历史 bug：
+        # <![CDATA[ 前缀含字面 ![，与 ]( 配对把 0 当图片路径）
+        html = ('<p>text</p>'
+                '<ac:structured-macro ac:name="mathblock" ac:schema-version="1">'
+                '<ac:parameter ac:name="alignment">left</ac:parameter>'
+                '<ac:plain-text-body><![CDATA[{\\displaystyle \\mu _{n}=(-1)^{n}'
+                '\\operatorname {E} \\left[e^{-sX}\\right](0).}]]></ac:plain-text-body>'
+                '</ac:structured-macro>')
+        result = self.importer._convert_md_links(html, 'dummy.md', '999')
+        self.assertEqual(self.importer.failed_images, [])  # 不再误报
+        self.assertIn('\\right](0).', result)            # CDATA 内容原样保留
+        # 正常图片链接仍应被识别并记入失败报告
+        html2 = '<p>![pic](missing.png)</p>'
+        self.importer._convert_md_links(html2, 'dummy.md', '999')
+        self.assertEqual(len(self.importer.failed_images), 1)
+
+    def test_upload_attachment_updates_existing(self):
+        # 同名附件已存在（页面更新场景）：POST 创建 400 → GET 查到 id → POST /data 更新
+        from types import SimpleNamespace
+
+        def make_resp(status, json_data=None, text=""):
+            resp = SimpleNamespace(status_code=status, text=text)
+            if json_data is not None:
+                resp.json = lambda: json_data
+            def _raise():
+                if status >= 400:
+                    raise Exception(f"HTTP {status}")
+            resp.raise_for_status = _raise
+            return resp
+
+        page_id = '123'
+        file_path = os.path.join(tempfile.gettempdir(), 'existing.png')
+        with open(file_path, 'wb') as f:
+            f.write(b'x')
+
+        create_resp = make_resp(400, text='Cannot add a new attachment with same file name')
+        lookup_resp = make_resp(200, json_data={'results': [{'id': '999'}]})
+        update_resp = make_resp(200)
+
+        with mock.patch.object(self.importer.session, 'post', side_effect=[create_resp, update_resp]) as mp, \
+             mock.patch.object(self.importer.session, 'get', return_value=lookup_resp) as mg:
+            result = self.importer._upload_attachment(page_id, file_path)
+        self.assertEqual(result, f'/download/attachments/{page_id}/existing.png')
+        self.assertIn('/child/attachment', mp.call_args_list[0][0][0])
+        self.assertIn('/child/attachment/999/data', mp.call_args_list[1][0][0])
+        mg.assert_called_once()
+        os.unlink(file_path)
+
+    def test_upload_attachment_updates_existing(self):
+        # 同名附件已存在（页面更新场景）：POST 创建 400 → GET 查到 id → POST /data 更新
+        from types import SimpleNamespace
+
+        def make_resp(status, json_data=None, text=""):
+            resp = SimpleNamespace(status_code=status, text=text)
+            if json_data is not None:
+                resp.json = lambda: json_data
+            def _raise():
+                if status >= 400:
+                    raise Exception(f"HTTP {status}")
+            resp.raise_for_status = _raise
+            return resp
+
+        page_id = '123'
+        file_path = os.path.join(tempfile.gettempdir(), 'existing.png')
+        with open(file_path, 'wb') as f:
+            f.write(b'x')
+
+        create_resp = make_resp(400, text='Cannot add a new attachment with same file name')
+        lookup_resp = make_resp(200, json_data={'results': [{'id': '999'}]})
+        update_resp = make_resp(200)
+
+        # request_with_retry 内部走 session.request(method, url, ...)
+        with mock.patch.object(self.importer.session, 'request',
+                               side_effect=[create_resp, lookup_resp, update_resp]) as mreq:
+            result = self.importer._upload_attachment(page_id, file_path)
+        self.assertEqual(result, f'/download/attachments/{page_id}/existing.png')
+        self.assertEqual(mreq.call_args_list[0][0][0], 'POST')
+        self.assertIn('/child/attachment', mreq.call_args_list[0][0][1])          # 创建端点
+        self.assertNotIn('/data', mreq.call_args_list[0][0][1])
+        self.assertEqual(mreq.call_args_list[1][0][0], 'GET')                     # 查附件 id
+        self.assertEqual(mreq.call_args_list[2][0][0], 'POST')
+        self.assertIn('/child/attachment/999/data', mreq.call_args_list[2][0][1])  # 更新端点
+        os.unlink(file_path)
+
 
     def test_find_page_memory_match(self):
         with patch('md_import.collect_space_pages',
@@ -271,6 +371,233 @@ class TestMdImport(unittest.TestCase):
             self.assertEqual(calls, [3, 4])
         finally:
             os.unlink(md_path)
+
+    def test_default_parent_id_from_config(self):
+        # 配置 default_parent_id：新建页面时挂到该父级下
+        cfg = dict(MOCK_CFG)
+        cfg['import_config'] = dict(MOCK_CFG['import_config'], default_parent_id='777')
+        with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False,
+                                         encoding='utf-8') as f:
+            f.write('# Hello\n\nplain text')
+            md_path = f.name
+        try:
+            with patch('md_import.load_config', return_value=cfg):
+                importer = MarkdownImporter(space_key='TEST')
+            self.assertEqual(importer.default_parent_id, '777')
+            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
+                 patch.object(importer, '_create_page', return_value=('999', 1)) as cp:
+                page_id = importer.import_markdown(md_path)
+            self.assertEqual(page_id, '999')
+            self.assertEqual(cp.call_args[0][2], '777')  # parent_id 传给 _create_page
+        finally:
+            os.unlink(md_path)
+
+    def test_default_page_name_from_config(self):
+        # 配置 default_page_name：标题用它，而非 md 文件名
+        cfg = dict(MOCK_CFG)
+        cfg['import_config'] = dict(MOCK_CFG['import_config'], default_page_name='Config Title')
+        with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False,
+                                         encoding='utf-8') as f:
+            f.write('# Hello\n\nplain text')
+            md_path = f.name
+        try:
+            with patch('md_import.load_config', return_value=cfg):
+                importer = MarkdownImporter(space_key='TEST')
+            self.assertEqual(importer.default_page_name, 'Config Title')
+            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
+                 patch.object(importer, '_create_page', return_value=('999', 1)) as cp:
+                importer.import_markdown(md_path)
+            self.assertEqual(cp.call_args[0][0], 'Config Title')  # title 用配置值
+        finally:
+            os.unlink(md_path)
+
+    def test_cli_args_override_config(self):
+        # CLI 参数（--parent-id/--page-name）优先于配置默认值
+        cfg = dict(MOCK_CFG)
+        cfg['import_config'] = dict(MOCK_CFG['import_config'],
+                                    default_parent_id='777', default_page_name='Config Title')
+        with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False,
+                                         encoding='utf-8') as f:
+            f.write('# Hello\n\nplain text')
+            md_path = f.name
+        try:
+            with patch('md_import.load_config', return_value=cfg):
+                importer = MarkdownImporter(space_key='TEST')
+            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
+                 patch.object(importer, '_create_page', return_value=('999', 1)) as cp:
+                importer.import_markdown(md_path, parent_id='888', page_name='CLI Title')
+            self.assertEqual(cp.call_args[0][0], 'CLI Title')  # 标题被 CLI 覆盖
+            self.assertEqual(cp.call_args[0][2], '888')        # 父级被 CLI 覆盖
+        finally:
+            os.unlink(md_path)
+
+    # ---- --dir 树导入 ----
+
+    def _tree_cfg(self, **kw):
+        cfg = dict(MOCK_CFG)
+        ic = dict(MOCK_CFG['import_config'], tree_import=True, fix_hierarchy='confirm')
+        ic.update(kw)
+        cfg['import_config'] = ic
+        return cfg
+
+    def test_tree_import_disabled(self):
+        # tree_import 未开启：--dir 直接报错
+        importer = MarkdownImporter(space_key='TEST')  # MOCK_CFG 无 tree_import → False
+        self.assertFalse(importer.tree_import)
+        with self.assertRaises(SystemExit):
+            importer.import_tree('C:/fake')
+
+    def test_scan_tree_builds_hierarchy(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'Parent.md').write_text('# p', encoding='utf-8')
+            child = root / 'Child'
+            child.mkdir()
+            (child / 'Child.md').write_text('# c', encoding='utf-8')
+            (child / 'Child.assets').mkdir()
+            importer = MarkdownImporter(space_key='TEST')
+            tree = importer._scan_tree(td)
+            self.assertIsNotNone(tree['md_path'])       # 根取同名 md
+            self.assertEqual(len(tree['children']), 1)
+            c = tree['children'][0]
+            self.assertEqual(c['name'], 'Child')
+            self.assertEqual(c['md_path'].name, 'Child.md')
+            self.assertEqual(c['children'], [])          # .assets 不算节点
+
+    def test_scan_tree_skips_multiple_md(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'A.md').write_text('a', encoding='utf-8')
+            (root / 'B.md').write_text('b', encoding='utf-8')
+            importer = MarkdownImporter(space_key='TEST')
+            tree = importer._scan_tree(td)
+            self.assertIsNone(tree['md_path'])           # 多个 md 无法确定内容
+            self.assertEqual(tree['children'], [])
+
+    def test_build_plan_statuses(self):
+        importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
+        node = {'name': 'Parent', 'md_path': 'P.md',
+                'children': [{'name': 'Child', 'md_path': 'C.md', 'children': []}]}
+        with patch.object(importer, '_find_page_by_title',
+                          side_effect=lambda t: ('11', 3) if t == 'Parent' else ('22', 3)), \
+             patch.object(importer, '_get_page_parent',
+                          side_effect=lambda pid: (None, None) if pid == '11' else ('99', 'Elsewhere')):
+            plan = importer._build_plan(node)
+        self.assertEqual(plan['status'], 'update')                    # Parent 命中且在根
+        self.assertEqual(plan['children'][0]['status'], 'move')        # Child 命中但父级不符
+
+    def test_execute_plan_new_passes_parent_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'Parent.md').write_text('# p', encoding='utf-8')
+            child = root / 'Child'
+            child.mkdir()
+            (child / 'Child.md').write_text('# c', encoding='utf-8')
+            importer = None
+            with patch('md_import.load_config', return_value=self._tree_cfg()):
+                importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
+            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
+                 patch.object(importer, '_create_page',
+                              side_effect=lambda t, c, pid: (str(len(importer._title_id_map) + 100), 1)) as cp, \
+                 patch.object(importer, '_convert_md_links', side_effect=lambda h, p, pid: h):
+                importer.import_tree(td, yes=True)
+            # 父先建（parent_id=None），子后建（parent_id=父 id）
+            self.assertEqual(cp.call_args_list[0][0][2], None)
+            self.assertEqual(cp.call_args_list[1][0][2], '100')
+
+    def test_fix_hierarchy_off_no_ancestors(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'Parent.md').write_text('# p', encoding='utf-8')
+            with patch('md_import.load_config', return_value=self._tree_cfg()):
+                importer = MarkdownImporter(space_key='TEST', fix_hierarchy='off')
+            with patch.object(importer, '_find_page_by_title', return_value=('11', 3)), \
+                 patch.object(importer, '_get_page_parent', return_value=('99', 'Elsewhere')), \
+                 patch.object(importer, '_update_page', side_effect=lambda *a, **k: ('11', 4)) as up, \
+                 patch.object(importer, '_convert_md_links', side_effect=lambda h, p, pid: h):
+                importer.import_tree(td, yes=True)
+            self.assertNotIn('ancestors', up.call_args.kwargs)   # off：不移动
+
+    def test_execute_plan_move_applies_ancestors(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            parent_dir = root / 'Parent'
+            parent_dir.mkdir()
+            (parent_dir / 'Parent.md').write_text('# p', encoding='utf-8')
+            child = parent_dir / 'Child'
+            child.mkdir()
+            (child / 'Child.md').write_text('# c', encoding='utf-8')
+            with patch('md_import.load_config', return_value=self._tree_cfg()):
+                importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
+            with patch.object(importer, '_find_page_by_title',
+                              side_effect=lambda t: ('111' if t == 'Parent' else '222', 3)), \
+                 patch.object(importer, '_get_page_parent',
+                              side_effect=lambda pid: (None, None) if pid == '111' else ('999', 'Elsewhere')), \
+                 patch.object(importer, '_update_page',
+                              side_effect=lambda *a, **k: (a[0], a[3] + 1)) as up, \
+                 patch.object(importer, '_convert_md_links', side_effect=lambda h, p, pid: h):
+                importer.import_tree(str(parent_dir), yes=True)
+            move_call = up.call_args_list[1]                       # 子页面移动
+            self.assertEqual(move_call.kwargs.get('ancestors'), '111')  # 用父页面 id
+
+    def test_fix_hierarchy_confirm_prompts_and_cancel(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'Parent.md').write_text('# p', encoding='utf-8')
+            with patch('md_import.load_config', return_value=self._tree_cfg()):
+                importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
+            with patch.object(importer, '_find_page_by_title', return_value=('11', 3)), \
+                 patch.object(importer, '_get_page_parent', return_value=('99', 'Elsewhere')), \
+                 patch.object(importer, '_update_page', side_effect=lambda *a, **k: ('11', 4)) as up, \
+                 patch.object(importer, '_convert_md_links', side_effect=lambda h, p, pid: h):
+                with patch('builtins.input', return_value='n') as inp:
+                    importer.import_tree(td)
+            inp.assert_called_once()     # confirm + move 触发确认
+            up.assert_not_called()       # 取消后不执行写操作
+
+    def test_plan_only_no_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'Parent.md').write_text('# p', encoding='utf-8')
+            with patch('md_import.load_config', return_value=self._tree_cfg()):
+                importer = MarkdownImporter(space_key='TEST')
+            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
+                 patch.object(importer, '_create_page') as cp, \
+                 patch.object(importer, '_update_page') as up:
+                importer.import_tree(td, plan_only=True)
+            cp.assert_not_called()
+            up.assert_not_called()
+
+    def test_toc_added_when_headings_meet_threshold(self):
+        cfg = dict(MOCK_CFG)
+        cfg['import_config'] = dict(MOCK_CFG['import_config'],
+                                    toc_enabled=True, toc_min_headings=4)
+        with patch('md_import.load_config', return_value=cfg):
+            importer = MarkdownImporter(space_key='TEST')
+        md = '# Title\n\n## A\n\n## B\n\n## C\n\n## D\n\n## E\n'
+        html = importer._convert_md_to_storage(md)
+        self.assertIn('<ac:structured-macro ac:name="toc"', html)
+        self.assertTrue(html.startswith('<ac:structured-macro'))
+
+    def test_toc_not_added_below_threshold(self):
+        cfg = dict(MOCK_CFG)
+        cfg['import_config'] = dict(MOCK_CFG['import_config'],
+                                    toc_enabled=True, toc_min_headings=4)
+        with patch('md_import.load_config', return_value=cfg):
+            importer = MarkdownImporter(space_key='TEST')
+        md = '# Title\n\n## A\n\n## B\n\n## C\n'
+        html = importer._convert_md_to_storage(md)
+        self.assertNotIn('ac:name="toc"', html)
+
+    def test_toc_disabled(self):
+        cfg = dict(MOCK_CFG)
+        cfg['import_config'] = dict(MOCK_CFG['import_config'],
+                                    toc_enabled=False, toc_min_headings=4)
+        with patch('md_import.load_config', return_value=cfg):
+            importer = MarkdownImporter(space_key='TEST')
+        md = '# Title\n\n## A\n\n## B\n\n## C\n\n## D\n\n## E\n'
+        html = importer._convert_md_to_storage(md)
+        self.assertNotIn('ac:name="toc"', html)
 
 
 class TestMathUpgrade(unittest.TestCase):
@@ -349,6 +676,17 @@ class TestMathUpgrade(unittest.TestCase):
         after, stats = self.updater.convert_math(html)
         self.assertEqual(stats['inline'], 0)
         self.assertNotIn('mathinline', after)
+
+    def test_inline_math_inequality_converts(self):
+        # storage 格式中 < 已转义为 &lt;：$0&lt;x&lt;\pi$ 应转换为 mathinline 宏。
+        # body 中 & 再转义为 &amp;（XML 解析后还原为 &lt;，渲染为 <）
+        html = '<p>$0&lt;x&lt;\\pi$</p>'
+        after, stats = self.updater.convert_math(html)
+        self.assertEqual(stats['inline'], 1)
+        self.assertIn('mathinline', after)
+        self.assertIn('0&amp;lt;x&amp;lt;\\pi', after)
+        self.assertNotIn('$0&lt;x&lt;\\pi$', after)
+
 
     def test_undefined_control_seq_star_sanitized(self):
         # \* 是未定义控制序列（MathJax 报错），转换时应归一化为 *

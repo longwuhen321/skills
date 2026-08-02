@@ -124,3 +124,59 @@
 - **排查方法**：页面版本持续增长但内容无变化时，重跑一次看是否报
   "无需转换"；selftest 有 `test_apply_alignment_idempotent_when_already_left`
   覆盖。
+
+
+## [2026-08-02] 行内公式含不等式（< >）未被识别导致导入 400
+
+- **现象**：md 内 `$0<x<\pi$` 导入报
+  `400 Error parsing xhtml: Unexpected character '&' (code 38) expected space, or '>' or '/>'`，
+  调试 HTML 出现裸 `<x`。markdown2 对 `$0<x<\pi$` 转义不一致：`<x` 被当潜在标签保留为裸 `<`，
+  `<\p` 却转成 `&lt;`，产物为 `$0<x&lt;\pi$`。
+- **根因**：行内公式正则内容禁 `<`/`>`（`[^$<>\n]`，防 `$PWD / $OLDPWD` 跨 span 配对而加）。
+  md 阶段 `_protect_math_blocks` 漏掉含不等式的公式 → markdown2 转出裸 `<x` →
+  HTML 阶段 `_convert_math_blocks` 仍禁 `<` → `$0<x&lt;\pi$` 残留 →
+  Confluence 把 `<x` 当标签解析，标签内遇到 `&` 报 400。
+- **修复**：仅 `scripts/md_import.py` 两处放宽（`_protect_math_blocks` 与 `_convert_math_blocks`，
+  `[^$<>\n]` → `[^$\n]`）。md 阶段是纯文本无标签，放宽安全；HTML 阶段 md 源不含
+  storage span 结构，放宽可接受。**`scripts/math_upgrade.py` 不放宽**：它处理 Confluence
+  storage 格式，`<` 已转义为 `&lt;` 实体，能通过旧正则 `[^$<>\n]`，本来就可匹配；
+  放宽反而让 `$PWD</span>...<span>$OLDPWD` 跨 span 配对（回归
+  `test_shell_variables_not_math`）。错误放宽后已回滚（见下方"踩坑"）。
+- **排查方法**：400 报 `Unexpected character '&' ... expected space, or '>' or '/>'` +
+  调试 HTML 存在裸 `<x` 即此类；selftest 有
+  `test_inline_math_inequality_protected`（md_import，裸 `<` 形式）与
+  `test_inline_math_inequality_converts`（math_upgrade，storage 实体 `&lt;` 形式）覆盖。
+- **踩坑**：曾把 math_upgrade.py 同步放宽，导致 `TestMathUpgrade.test_shell_variables_not_math`
+  失败（`$PWD</span>...<span>$OLDPWD` 被跨标签配对）——storage 与 markdown 文本的
+  `<` 存在形式不同（实体 vs 裸字符），两脚本的正则规则**不能盲目统一**，需按输入格式区分。
+
+
+## [2026-08-02] mathblock CDATA 内 LaTeX `](0)` 被图片正则误判
+
+- **现象**：导入含 `$$...\\left[e^{-sX}\\right](0)....$$` 的 md 时，结束时误报
+  `⚠️ 图片未能上传: 0（本地文件不存在: .../0）`，页面内容本身未损坏。
+- **根因**：`_convert_md_links` 图片正则 `!\[(.*?)\]\((.*?)\)` 匹配了 mathblock 宏的
+  `<![CDATA[` 前缀（字面 `![`），非贪婪 `(.*?)\]\(` 又恰好吞到 LaTeX 的 `\\right](`，
+  `0` 被当成图片路径。该函数对**整个 HTML**（含已转换宏）做正则，未保护宏区域。
+- **修复**：`scripts/md_import.py` `_convert_md_links` 先 `re.split` 保护
+  `<ac:structured-macro>`/`<code>`/`<pre>` 区域（复用 `_convert_math_blocks` 既有模式），
+  图片正则只作用于非保护部分。
+- **排查方法**：导入结束报"本地文件不存在: <数字/短串>"且页面无此图即此类；selftest 有
+  `test_md_links_ignores_macro_cdata` 覆盖。
+
+## [2026-08-02] 更新页面时同名附件上传 400，图片引用被覆盖为原始 markdown 路径
+
+- **现象**：对已导入页面重跑 md_import（更新场景），4 张图片全部
+  `附件上传失败: 400 ... /child/attachment`，结束时图片引用被写成
+  `./Laplace transform - Wikipedia.assets/...`（原始 md 相对路径），页面图片变死链。
+- **根因**：`_upload_attachment` 只用 POST `/child/attachment` 创建附件；同名附件已存在时
+  Confluence 返回 400 `Cannot add a new attachment with same file name`（Server/DC 不允许
+  重复创建），上传失败后 `_convert_md_links` 退回 `match.group(0)` 原始引用，
+  **覆盖**首次导入的正确 `<ri:attachment>` 引用。
+- **修复**：`scripts/md_import.py` `_upload_attachment` 遇 400/409 时
+  `GET /child/attachment?filename=<name>` 查附件 id，再
+  `POST /child/attachment/{id}/data` 更新数据。注意端点区分：**Server/DC 用 POST**，
+  Cloud 文档是 PUT（实测 DC 9.2.1 POST 返回 200，PUT 返回 405）。
+- **排查方法**：更新导入报"附件上传失败: 400 ... same file name"即此类；selftest 有
+  `test_upload_attachment_updates_existing` 覆盖（mock session.request 按
+  create 400 → GET 200 → update 200 顺序）。
