@@ -599,6 +599,23 @@ class TestMdImport(unittest.TestCase):
         html = importer._convert_md_to_storage(md)
         self.assertNotIn('ac:name="toc"', html)
 
+    def test_self_closing_macro_does_not_swallow_images(self):
+        # 自闭合宏（toc，无 </ac:structured-macro>）后紧跟图片：保护段不应把图片吞掉。
+        # 历史 bug：旧正则 .*?</ac:structured-macro> 从自闭合宏开始跨段匹配到下一个
+        # 成对宏的闭合标签，中间图片被跳过转换（TECS 页面 3 张图缺失即此因）。
+        html = ('<ac:structured-macro ac:name="toc" ac:schema-version="1" data-layout="default"/>'
+                '<p><img src="./a.png" alt="a" /></p>'
+                '<ac:structured-macro ac:name="mathinline" ac:schema-version="1">'
+                '<ac:parameter ac:name="body">$x$</ac:parameter></ac:structured-macro>')
+        with tempfile.TemporaryDirectory() as td:
+            md_dir = Path(td)
+            (md_dir / 'a.png').write_bytes(b'x')
+            md_file = md_dir / 'doc.md'
+            md_file.write_text('# t', encoding='utf-8')
+            with patch.object(self.importer, '_upload_attachment', return_value='http://fake'):
+                final = self.importer._convert_md_links(html, str(md_file), '999')
+        self.assertIn('ri:filename="a.png"', final)
+
 
 class TestMathUpgrade(unittest.TestCase):
 

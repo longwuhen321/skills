@@ -306,7 +306,7 @@ class ConfluenceMathUpdater:
             report.append("  ✅ 宏数量正确")
 
         unprotected_after = re.sub(
-            r'<ac:structured-macro\b.*?</ac:structured-macro>|<code[^>]*>.*?</code>|<pre[^>]*>.*?</pre>',
+            r'<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>|<code[^>]*>.*?</code>|<pre[^>]*>.*?</pre>',
             '', after, flags=re.DOTALL)
         remaining_inline = len(re.findall(
             r'(?<![$])[$](?![\s$])([^$<>\n]+?)(?<![$\s])[$](?![$])', unprotected_after))

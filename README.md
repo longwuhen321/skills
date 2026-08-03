@@ -16,15 +16,16 @@
 
 ## md2zh
 
-**英文 Markdown → 中文 Markdown，格式零损失。**
+**英文 Markdown → 中文 Markdown，字节级保护 + 确定性校验。**
 
 ### 核心能力
 
-- 保留所有 Markdown 格式（代码块、表格、链接、列表、引用块等）
-- 智能处理不应翻译的内容：代码、LaTeX 公式、URL、专有名词/品牌名
-- 翻译代码块内注释、图片 alt 文本、链接显示文本
-- 术语一致性保障：翻译前扫描高频术语并建立映射表
-- 翻译后自动校验：结构对比（标题/表格/代码块/图片/链接数量） + 随机段落抽查
+- **分块编排翻译**：pipeline 把长文档分为约 10–20 个 heading-aware 块，AI 助手逐块翻译，字节级 `PROTECT` 标记保护代码/公式/链接/标识符
+- **确定性渲染**：merge → render → verify 全流程校验，源文件 source hash 比对，译文与源字节级一致
+- **失败隔离**：单块失败只改该块（最多 2 轮修正），已接受块保留，支持断点续传
+- **模糊内容决策**：user / ai 两种决策者模式，全部决策记录到 `decision_logs/*.jsonl`
+- **术语一致性**：任务级术语表跨块保留；树形翻译时树级共享术语表（跨子页面一致）
+- **树形目录批量翻译**：指定目录且树内可翻译 `.md` ≥ 2 个（多页面收集结构，忽略 `.assets/`）时按树逐文件翻译，镜像输出 `<根名>_zh/`，可直接对接 confluence-tools `--dir` 导入（流水线：web2md 抓取 → md2zh 翻译 → Confluence 页面树）；目录内仅 1 个 `.md`（如抓取单页的"标题文件夹 + 同名 .md + .assets"）按**单文件流程**输出 `<stem>_zh.md` 平级文件
 
 ### 使用方式
 
@@ -32,11 +33,16 @@
 /md2zh
 ```
 
-然后指定要翻译的 `.md` 文件路径。输出文件为 `原文件名_zh.md`，放在同目录下。
+首次运行走配置向导（skill 级 `scripts/config.py` 的 Python 路径 + 项目级 `.md2zh_tools/config.json` 的决策者/解释器模式）。之后指定要翻译的 `.md` 文件路径，输出 `<stem>_zh.md` 放在源文件旁。
 
 ### 技术参考
 
-翻译技术术语时优先参考全国科学技术名词审定委员会 (cnterm.cn) 的审定名词与相关国标（GB/T 2900.56-2008 等）。
+翻译技术术语时优先参考全国科学技术名词审定委员会 (cnterm.cn) 的审定名词与相关国标（GB/T 2900.56-2008 等），具体规则见 `md2zh/references/translation-rules.md`。
+
+### 质量保障
+
+- `scripts/tests/selftest.py`：离线黑盒测试（配置写入、分块保护、端到端 roundtrip、契约违规拒绝），修改脚本后必须全绿
+- 决策日志、任务产物清理（`cleanup-run`）、脚本完整性检查 + git 恢复（先确认再恢复）
 
 ---
 
@@ -89,18 +95,13 @@
 
 #### 阶段 C 伪公式分类（AI 助手逐条判断）
 
-脚本无法区分表格粗体和数学符号——由 AI 助手通读全文，根据上下文识别以下类别：
+脚本无法区分表格粗体和数学符号——由 AI 助手通读全文，按分类索引识别（**完整转换规则见 `web2md/references/formula-conversion-rules.md`**，涉及 LaTeX 语法转换时读取对应章节）：
 
-- **斜体+数字** → 下标/上标：`*a*1` → `$a_{1}$`、`*x*2` → `$x^{2}$`
-- **斜体+运算符** → 行内公式：`*x* = *y*` → `$x=y$`
-- **粗体+数字/运算符** → 向量公式：`**i** ⋅ **j** = **k**` → `$\mathbf{i}\cdot\mathbf{j}=\mathbf{k}$`
-- **粗体数域记号**：`**R**` → `$\mathbf{R}$`、`**C**` → `$\mathbf{C}$` 等
-- **Unicode 运算符**（±, ⋅, ×, ∗, −）→ LaTeX
-- **Unicode 不等号/集合/箭头**（≤, ∈, →, ⇒, …）→ LaTeX
-- **混合粗体+斜体**：`*a* + *b* **i** + *c* **j**` → `$a+b\mathbf{i}+c\mathbf{j}$`
-- **函数+斜体参数**：`cos(*φ*)` → `$\cos(\varphi)$`
+- **斜体+数字** → 下标/上标（`*a*1` → `$a_{1}$`）、**斜体+运算符** → 行内公式（`*x* = *y*` → `$x=y$`）
+- **粗体+数字/运算符** → 向量公式（`**i** ⋅ **j** = **k**`）、**粗体数域记号**（`**R**` → `$\mathbf{R}$`）
+- **Unicode 运算符/不等号/集合/箭头**（±, ⋅, ≤, ∈, →, …）→ LaTeX、**混合粗体+斜体**（四元数）、**函数+斜体参数**（`cos(*φ*)`）
 
-> 判断边界：表格 `| **i** | **j** | **k** |` 保留 bold；维度 `2 × 2` 保留 Unicode。
+> 判断边界：表格 `| **i** | **j** | **k** |` 保留 bold；维度 `2 × 2` 保留 Unicode；分类索引与全部规则表见参考文件 §1–§4。
 
 #### 收尾验证
 
@@ -116,6 +117,8 @@ web2md/                            # skill 目录（本仓库）
 ├── KNOWN_ISSUES.md                # 已知问题与修复记录（排查时读）
 ├── OPTIMIZATION_SUMMARY.md        # 优化交接摘要（优化前读）
 ├── config.example.py              # 配置模板（占位符）
+├── references/
+│   └── formula-conversion-rules.md  # 公式转换规则（阶段 C 按需读取）
 └── scripts/
     ├── config.py                  # 真实配置（gitignore 排除）：python_path、timeout、collect_children
     ├── web2md.py                  # 主抓取脚本（DOM 规范化、导航收集、--children-from）
@@ -125,7 +128,7 @@ web2md/                            # skill 目录（本仓库）
     ├── find_all_missed.py         # 阶段 C：伪公式扫描辅助
     ├── final_verify.py            # 收尾验证
     └── tests/                     # 本地测试（git 不追踪）
-        ├── selftest.py            # 测试入口（28 用例）
+        ├── selftest.py            # 测试入口（41 用例）
         ├── test_formula_integrity.py
         └── test_sphinx_conversion.py
 
@@ -157,6 +160,8 @@ web2md/                            # skill 目录（本仓库）
 - **数学公式升级** — 已有页面的 `$...$` / `$$...$$` / `\`\`\`latex` 升级为原生 `mathinline` / `mathblock` 宏，支持单页、递归子页、整空间批量
 - **公式对齐可配置** — 导入与升级统一支持左对齐 / 居中（原生 `mathblock + alignment` 参数，已在 Confluence 9.2.1 实测），`--align` 可临时覆盖
 - **自动查重更新** — 空间内标题内存匹配（大小写不敏感），同标题自动更新为新版本，409 版本冲突自动重试
+- **文件夹树批量导入** — `--dir` 模式把 web2md/md2zh 输出的目录结构整棵导入，保留层级（子文件夹 = 子页面，任意深度）；命中已有页面按 `fix_hierarchy` 策略处理（confirm 预览确认 / auto 移动 / off 不移动）
+- **自动目录宏** — 页面子标题（H2~H6）达阈值时自动在正文顶部插入 Confluence 目录宏（`toc_enabled` / `toc_min_headings` 可配）
 - **容错机制** — 429 限流指数退避重试（尊重 `Retry-After`）、批量遇错继续 + 末尾失败汇总（`--stop-on-error` 可停）、全请求超时保护
 - **首次配置向导** — 必需项（地址 / Token / 空间）缺失即中断、禁止预填历史配置、Python 路径先问后找
 - **凭据安全** — Token 只存 `config.py`（gitignore 排除），支持 `CONFLUENCE_TOKEN` 环境变量覆盖
@@ -167,7 +172,7 @@ web2md/                            # skill 目录（本仓库）
 /confluence-tools
 ```
 
-首次运行走配置向导，之后选择：导入 Markdown 或升级数学公式。两个脚本也支持独立命令行运行。
+首次运行走配置向导，之后选择：导入 Markdown、批量导入文件夹树（`--dir`，需开启 tree_import）或升级数学公式。两个脚本也支持独立命令行运行。
 
 ### 技术要点
 
@@ -178,7 +183,7 @@ web2md/                            # skill 目录（本仓库）
 
 ### 质量保障
 
-- `scripts/selftest.py`：42 个离线用例（转换管线、版本号流程、限流重试、对齐、base64 图片等），mock 配置与网络，**修改脚本后必须全绿**
+- `scripts/selftest.py`：58 个离线用例（转换管线、版本号流程、限流重试、对齐、base64 图片、树导入、toc 等），mock 配置与网络，**修改脚本后必须全绿**
 - `KNOWN_ISSUES.md`：已知问题与修复记录（现象 / 根因 / 修复 / 排查方法），排查前先读
 - 真实环境验证产物（测试页 / 临时脚本）用后即清
 
@@ -188,6 +193,7 @@ web2md/                            # skill 目录（本仓库）
 confluence-tools/
 ├── SKILL.md
 ├── KNOWN_ISSUES.md           # 已知问题与修复记录
+├── OPTIMIZATION_SUMMARY.md   # 优化交接总结（优化前读、优化后追加）
 ├── config.example.py         # 配置模板（占位符）
 ├── scripts/
 │   ├── config.py             # 真实配置（gitignore 排除）
@@ -195,7 +201,7 @@ confluence-tools/
 │   ├── debug_utils.py        # 调试日志清理
 │   ├── md_import.py          # Markdown → Confluence
 │   ├── math_upgrade.py       # 数学公式升级
-│   └── selftest.py           # 离线自测（42 用例）
+│   └── selftest.py           # 离线自测（58 用例）
 └── debug/                    # 导入/升级调试快照（自动清理）
 ```
 

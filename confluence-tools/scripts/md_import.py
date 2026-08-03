@@ -259,7 +259,7 @@ class MarkdownImporter:
 
         # 安全网：保护 HTML <code> 和 <pre> 标签内的内容
         protected_parts = re.split(
-            r'(<code[^>]*>.*?</code>|<pre[^>]*>.*?</pre>|<ac:structured-macro\b.*?</ac:structured-macro>)',
+            r'(<code[^>]*>.*?</code>|<pre[^>]*>.*?</pre>|<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>)',
             html_content, flags=re.DOTALL
         )
 
@@ -341,7 +341,7 @@ class MarkdownImporter:
 
     def _convert_highlight_marks(self, html_content):
         """将==highlight==语法转换为加粗"""
-        parts = re.split(r'(<ac:structured-macro.*?</ac:structured-macro>)',
+        parts = re.split(r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>)',
                          html_content, flags=re.DOTALL)
         converted_parts = []
         for part in parts:
@@ -361,7 +361,7 @@ class MarkdownImporter:
         # 保护宏 / 代码区域：mathblock 宏的 <![CDATA[ 前缀含字面 ![，LaTeX ]( 会被图片正则误判
         # 为图片链接（历史 bug：CDATA 内 \right](0) 把 0 当图片路径）。只对非保护部分做转换。
         protected_parts = re.split(
-            r'(<ac:structured-macro\b.*?</ac:structured-macro>|<code[^>]*>.*?</code>|<pre[^>]*>.*?</pre>)',
+            r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>|<code[^>]*>.*?</code>|<pre[^>]*>.*?</pre>)',
             html_content, flags=re.DOTALL
         )
 
@@ -412,7 +412,7 @@ class MarkdownImporter:
 
     def _clean_unnecessary_backslashes(self, html_content):
         """清理 markdown2 在 HTML 转换过程中产生的多余反斜杠转义"""
-        parts = re.split(r'(<ac:structured-macro.*?</ac:structured-macro>)', html_content, flags=re.DOTALL)
+        parts = re.split(r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>)', html_content, flags=re.DOTALL)
         cleaned_parts = []
         for i, part in enumerate(parts):
             if i % 2 == 1:
