@@ -646,10 +646,16 @@ def _clean_invisible_chars(text):
 
 
 def _norm_nav_url(u):
-    """导航 URL 规范化：去尾部 /，去 index.html，便于目录形式与 index.html 形式互相匹配"""
+    """导航 URL 规范化：先去 fragment（锚点），再去尾部 / 与 .html / index.html / index
+    （无扩展名），便于目录形式、.html 文件形式、服务器重定向去扩展名的形式互相匹配"""
+    u = _strip_fragment(u)
     u = u.rstrip('/')
     if u.endswith('/index.html'):
         u = u[:-len('/index.html')]
+    elif u.endswith('/index'):
+        u = u[:-len('/index')]
+    elif u.endswith('.html'):
+        u = u[:-len('.html')]
     return u.rstrip('/')
 
 
@@ -659,6 +665,63 @@ def _strip_fragment(u):
         return urlsplit(u)._replace(fragment='').geturl()
     except ValueError:
         return u.split('#')[0]
+
+
+def _is_descendant_of(elm, ancestor):
+    """elm 是否位于 ancestor 子树内"""
+    n = elm.parent
+    while n is not None:
+        if n is ancestor:
+            return True
+        n = n.parent
+    return False
+
+
+def _child_nav_container(a):
+    """current_a 所在的子页面导航容器。
+
+    - VitePress 分组结构：current_a 在 div.item 里 → 所在 section（level-N）内的
+      其他 div.item 链接即子页面，返回该 section。
+    - Sphinx 嵌套结构：current_a 在 li/section 里 → 其内的嵌套 ul / div.items 为子页面。
+    - 无子页面容器（叶子页面、顶层平铺页面——导航树中的相邻链接只是兄弟页面或
+      整棵文档树）返回 None，调用方视为无导航子页面。
+    """
+    parent = a.parent
+    if parent is not None and parent.name == 'div' and 'item' in (parent.get('class') or []):
+        node = parent.parent
+        while node is not None:
+            if node.name == 'section':
+                if any(l is not a for l in node.find_all('a', href=True)):
+                    return node
+                return None
+            node = node.parent
+        return None
+    node = parent
+    while node is not None:
+        name = getattr(node, 'name', None)
+        if name in ('li', 'section'):
+            for sub in node.find_all('ul'):
+                if not _is_descendant_of(a, sub) and sub.find('a', href=True):
+                    return sub
+            for sub in node.find_all('div'):
+                cls = sub.get('class', []) if hasattr(sub, 'get') else []
+                if 'items' in cls and not _is_descendant_of(a, sub) and sub.find('a', href=True):
+                    return sub
+            return None
+        node = node.parent
+    return None
+
+
+def _same_doc_tree(href, base_url, base_dir):
+    """href 是否与 base_url 同域且共享目录前缀（排除外部站点、版本/语言切换等非子页面链接）"""
+    try:
+        h = urlsplit(href)
+        b = urlsplit(base_url)
+    except ValueError:
+        return False
+    if h.netloc != b.netloc:
+        return False
+    return h.path.startswith(base_dir)
 
 
 def collect_children(soup, base_url):
@@ -676,46 +739,75 @@ def collect_children(soup, base_url):
     base_norm = _norm_nav_url(base_url)
     base_stripped = _strip_fragment(base_norm)
     for a in soup.find_all('a', href=True):
-        href = _norm_nav_url(urljoin(base_url, a.get('href', '')))
+        # 纯锚点链接（#VPContent、#章节标题等）不参与当前节点定位——
+        # 它们去 fragment 后与当前页 URL 相同，会把 current_a 误定位到布局/正文锚点
+        href_raw = a.get('href', '').strip()
+        if href_raw.startswith(('#', 'javascript:', 'mailto:')):
+            continue
+        href = _norm_nav_url(urljoin(base_url, href_raw))
         if _strip_fragment(href) == base_stripped:
             current_a = a
             break
     if current_a is None:
         return []
 
-    # 找最小容器：包含 current_a 且还包含其它链接的最近祖先
-    container = None
-    node = current_a
-    while node is not None:
-        if any(l is not current_a for l in node.find_all('a', href=True)):
-            container = node
-            break
-        node = node.parent
+    # 子页面容器：current_a 所在项（li/section）内的嵌套导航 ul/div.items。
+    # 无嵌套容器说明当前页面是叶子页或顶层平铺页（导航树中的相邻链接是兄弟页面或
+    # 整棵文档树，不是子页面），视为无导航子页面。
+    container = _child_nav_container(current_a)
     if container is None:
         return []
 
     def nav_level(a):
-        """a 与 container 之间经过的层级容器数（ul 或 div.items；当前页=0，子=1，孙=2）"""
+        """a 与 container 之间的层级容器数（ul / div.item / 嵌套 div.items；当前页=0，子=1，孙=2）。
+
+        - ul：Sphinx 嵌套层级容器。
+        - div.item：VitePress 链接容器（每个链接一个）。
+        - div.items：VitePress 内容容器——仅当不是 container 的直接子级时计一层
+          （container 直接子级的 div.items 是顶层内容列表，不是嵌套层级）。
+        container 本身是 ul/div.items/div.item 时补计 1 级。
+        """
         depth = 0
         n = a.parent
         while n is not None and n is not container:
             name = getattr(n, 'name', None)
             cls = n.get('class', []) if hasattr(n, 'get') else []
-            if name == 'ul' or (name == 'div' and 'items' in cls):
+            if name == 'ul' or (name == 'div' and 'item' in cls):
                 depth += 1
+            elif name == 'div' and 'items' in cls:
+                if n.parent is not container:
+                    depth += 1
             n = n.parent
+        cname = getattr(container, 'name', None)
+        ccls = container.get('class', []) if hasattr(container, 'get') else []
+        if cname == 'ul' or (cname == 'div' and ('items' in ccls or 'item' in ccls)):
+            depth += 1
         return depth
 
     seen = set()
     accepted_stripped = set()   # 已接受链接去 fragment 后的 URL，用于识别同页锚点变体
     items1 = []   # (a, title, url) 子页面
     items2 = []   # (a, title, url) 孙页面
+    base_dir = ''
+    try:
+        _p = urlsplit(base_norm).path
+        if _p.endswith('/index'):
+            # 服务器把 index.html 重定向为 /index：最后一段是目录名
+            base_dir = _p[:-len('/index')] + '/'
+        else:
+            # 普通页面：最后一段是文件名，取所在目录
+            base_dir = _p.rsplit('/', 1)[0] + '/'
+    except ValueError:
+        pass
     for a in container.find_all('a', href=True):
         if a is current_a:
             continue
         title = a.get_text(strip=True)
         href = urljoin(base_url, a.get('href', ''))
         if not title or href.startswith(('#', 'javascript:', 'mailto:')):
+            continue
+        # 只接受同域且共享目录前缀的链接（排除外部站点、版本/语言切换等）
+        if not _same_doc_tree(href, base_url, base_dir):
             continue
         # 指向当前页面自身的链接（单页文档的章节锚点 commands.html#xxx）不是子页面
         stripped = _strip_fragment(_norm_nav_url(href))
@@ -736,10 +828,26 @@ def collect_children(soup, base_url):
             items2.append((a, title, href))
 
     def _item_section(a):
-        """a 向上第一个含链接的 section/li 祖先（其"项容器"）"""
+        """a 的"项容器"（孙页面挂载锚点）。
+
+        - Sphinx：a 所在 li（其嵌套 ul 是孙页面）。
+        - VitePress：a 所在 div.item 的包裹容器 VPSidebarItem（level-N div），
+          其嵌套 div.items 是孙页面；div.item 本身太窄，孙页面不在其内。
+        """
         n = a.parent
         while n is not None and n is not container:
-            if getattr(n, 'name', None) in ('section', 'li'):
+            name3 = getattr(n, 'name', None)
+            cls3 = n.get('class', []) if hasattr(n, 'get') else []
+            if name3 in ('section', 'li'):
+                return n
+            if name3 == 'div' and 'item' in cls3:
+                p3 = n.parent
+                # VitePress: 返回包裹 div.item 的 VPSidebarItem 容器——普通子页面是
+                # div.level-N（is-link），可展开分组是 section.level-N（collapsible），
+                # 两者都带 level- class；div.item 本身太窄，孙页面不在其内
+                if (p3 is not None and p3 is not container and p3.name in ('div', 'section')
+                        and any('level-' in c for c in (p3.get('class') or []))):
+                    return p3
                 return n
             n = n.parent
         return None
@@ -831,6 +939,56 @@ def process_page(soup, final_url, raw_html, title_text, output_root, cfg, sessio
         return None
 
 
+def parse_children_list(path):
+    """解析 AI 助手写的子页面清单文件，返回与 collect_children 相同的嵌套 dict 列表。
+
+    清单格式（AI 助手生成，可读可编辑；脚本只做机械解析）：
+        # 注释行（忽略）
+        - 子页面标题 | https://.../child.html
+          - 孙页面标题 | https://.../grand.html    （2 空格缩进 = 孙页面，最多 2 级）
+        - 另一个子页面 | https://.../other.html | 备注（| 后的备注忽略）
+
+    列表标记支持 - / *；URL 可带 <> 包裹；缩进超过 2 级、缺 URL 的行跳过并警告。
+    标题仅用于展示，落盘文件夹名仍以页面实际标题为准（与 collect_children 行为一致）。
+    """
+    items = []
+    try:
+        lines = open(path, encoding='utf-8').read().splitlines()
+    except OSError as e:
+        raise ValueError(f'无法读取子页面清单: {e}')
+    parents = {}   # depth -> 当前该深度的最后节点
+    for lineno, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        m = re.match(r'^(\s*)[-*]\s+(.*)$', raw)
+        if not m:
+            print(f'  ⚠️ 清单第 {lineno} 行格式无效，跳过: {raw[:60]}')
+            continue
+        depth = len(m.group(1)) // 2
+        body = m.group(2).strip()
+        parts = body.split('|')
+        title = parts[0].strip()
+        url = parts[1].strip().strip('<>') if len(parts) > 1 else ''
+        if not url:
+            print(f'  ⚠️ 清单第 {lineno} 行缺少 URL，跳过: {raw[:60]}')
+            continue
+        node = {'title': title or url, 'url': url, 'children': []}
+        if depth == 0:
+            items.append(node)
+        elif depth == 1:
+            parent = parents.get(0)
+            if parent is None:
+                print(f'  ⚠️ 清单第 {lineno} 行孙页面缺少父页面，跳过: {raw[:60]}')
+                continue
+            parent['children'].append(node)
+        else:
+            print(f'  ⚠️ 清单第 {lineno} 行缩进超过 2 级（孙页面最深层级），忽略: {raw[:60]}')
+            continue
+        parents[depth] = node
+    return items
+
+
 def _fetch_child_tree(node, output_root, cfg, session, depth):
     """抓取导航树中的一个子/孙节点，落盘到 output_root 下（标题文件夹嵌套），递归孙页面"""
     pad = '  ' * depth
@@ -849,8 +1007,12 @@ def _fetch_child_tree(node, output_root, cfg, session, depth):
         _fetch_child_tree(grand, output_root / folder, cfg, session, depth + 1)
 
 
-def fetch_and_process(url, output_root, cfg, session, children_mode=False):
-    """抓取一个页面并按标题文件夹落盘；children_mode 时递归抓取导航子/孙页面"""
+def fetch_and_process(url, output_root, cfg, session, children_mode=False, children_list=None):
+    """抓取一个页面并按标题文件夹落盘。
+
+    children_mode: 解析侧边栏导航递归抓取子/孙页面（规则路径）。
+    children_list: AI 助手提供的子页面清单（--children-from），非 None 时优先于规则解析。
+    """
     print(f"🌐 获取: {url}")
     try:
         soup, final_url, raw_html = fetch_page(url, session, cfg['timeout'])
@@ -859,12 +1021,20 @@ def fetch_and_process(url, output_root, cfg, session, children_mode=False):
         return False
     title_text = extract_title(soup)
     # 先收集导航子页面：process_page 内部的 html_to_markdown 会删除 <nav>，必须在处理页面之前解析
-    children = collect_children(soup, final_url) if children_mode else []
+    if children_list is not None:
+        children = children_list
+    elif children_mode:
+        children = collect_children(soup, final_url)
+    else:
+        children = []
     result = process_page(soup, final_url, raw_html, title_text, output_root, cfg, session)
     if result is None:
         return False
     folder, _ = result
-    if not children_mode:
+    if children_list is not None and not children:
+        print("  (清单无有效子页面)")
+        return True
+    if not children_mode and children_list is None:
         return True
 
     if not children:
@@ -885,12 +1055,22 @@ def main():
                         help='收集导航子页面（覆盖 config.py 的 collect_children）')
     parser.add_argument('--no-children', action='store_false', dest='children',
                         help='不收集导航子页面（覆盖 config.py 的 collect_children）')
+    parser.add_argument('--children-from', metavar='FILE',
+                        help='从 AI 助手写的子页面清单文件抓取子/孙页面（优先于规则解析；格式见 SKILL.md）')
     args = parser.parse_args()
 
     url = args.url
     output_root = Path(args.output_root)
     cfg = load_config()
     collect = args.children if args.children is not None else bool(cfg.get('collect_children', False))
+    children_list = None
+    if args.children_from:
+        try:
+            children_list = parse_children_list(args.children_from)
+        except ValueError as e:
+            print(f"❌ {e}")
+            sys.exit(1)
+        collect = True
 
     session = requests.Session()
     session.headers.update({
@@ -902,10 +1082,13 @@ def main():
 
     print("=" * 60)
     print(f"🌐 web2md: {url}")
-    print(f"   导航子页面收集: {'开启' if collect else '关闭'}")
+    if children_list is not None:
+        print(f"   子页面清单: {args.children_from}（{len(children_list)} 项，优先于规则解析）")
+    else:
+        print(f"   导航子页面收集: {'开启' if collect else '关闭'}")
     print("=" * 60)
 
-    ok = fetch_and_process(url, output_root, cfg, session, children_mode=collect)
+    ok = fetch_and_process(url, output_root, cfg, session, children_mode=collect, children_list=children_list)
     sys.exit(0 if ok else 1)
 
 

@@ -36,7 +36,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
   7. **收集导航子页面** → `web2md_config.collect_children`（选填，默认 `false`）
      - `true`：抓取页面时解析侧边栏导航，**批量抓取当前页面在导航树下的直接子页面（含孙页面）**，按页面标题文件夹嵌套落盘
      - `false`（默认）：只抓当前页面，行为不变
-     - 可被 CLI 参数 `--children` / `--no-children` 临时覆盖
+     - 可被 CLI 参数 `--children` / `--no-children` 临时覆盖；`--children-from <file>` 以 AI 助手清单为准（见第三步）
 
 > `scripts/config.py` 是 Python 路径的唯一配置源（全 skill 共享一份）。如需为脚本执行配置免确认白名单，请按当前 AI 助手平台的方式设置；**不要**通过平台环境变量存储 Python 路径——避免与 config.py 形成双配置源导致漂移。
 
@@ -63,7 +63,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 
 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量存在时自动使用。页面抓取与图片下载的超时均从 `scripts/config.py` 的 `timeout` 读取（默认 30 秒）。
 
-**导航子页面收集**（`config.py` 的 `collect_children=true` 或 CLI `--children` 时）：
+**导航子页面收集**（`config.py` 的 `collect_children=true` 或 CLI `--children` 时按规则解析侧边栏导航；也可用 CLI `--children-from <file>` 按 AI 助手清单抓取，见下文「AI 助手判断通道」）：
 
 1. 抓取父页面后，解析侧边栏导航（toctree），定位当前页面节点
 2. 收集其**严格导航子页面**（直接子级），若子页面在导航中还有子页面（孙页面）也一并收集（深度最多 2 级）；子页面正文里引用的其他页面不处理
@@ -80,6 +80,35 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 ```
 
 > 文件夹名默认取页面标题（经文件系统命名规范化，非法字符如 `/` 替换）；AI 助手可酌情调整，但必须符合文件夹命名规范。
+
+#### AI 助手判断通道（`--children-from <file>`）
+
+规则解析（`collect_children`）只覆盖已知导航结构（Sphinx li/ul、VitePress div.item/section 等）。
+遇到以下情况时，由 **AI 助手接管子/孙页面判断**（脚本退化为按清单抓取）：
+
+1. 脚本输出"该页面无严格导航子页面"，但 AI 助手访问页面（web_fetch）时在侧边栏导航中
+   明显看到子页面（新站点主题漏识别）
+2. 规则收集的候选异常（数量过多、含外部站点/版本切换链接等，疑似整树误抓）
+
+流程：
+
+1. AI 助手 web_fetch 父页面 → 从页面导航文本识别子/孙页面（URL 核对：与父页面同域、
+   同版本路径前缀；孙页面在导航中嵌套于子页面之下）
+2. 写清单到 `{项目根目录}/.web2md_tools/intermediate/children_list.md`（格式见下）
+3. 执行 `& "<python路径>" "<skill-directory>/scripts/web2md.py" "<URL>" "{项目根目录}" --children-from "{清单路径}"`
+   → 脚本按清单逐个抓取子/孙页面落盘（文件夹名仍以页面实际标题为准）
+
+清单格式（AI 助手生成，脚本只做机械解析；`--children-from` 优先于规则解析）：
+
+```markdown
+# 子页面清单 — 页面标题（`#` 开头为注释行，忽略）
+- 子页面标题 | https://.../child.html
+  - 孙页面标题 | https://.../grand.html    （2 空格缩进 = 孙页面，最多 2 级）
+- 另一个子页面 | https://.../other.html | 备注（`|` 后第一段为 URL，再后的备注忽略）
+```
+
+- 列表标记 `-` / `*` 均可；URL 可用 `<>` 包裹；缩进超过 2 级、缺 URL、无父页面的孙页面行跳过并警告
+- 标题仅用于展示，落盘文件夹名以页面实际标题为准（与规则路径行为一致）
 
 `web2md.py` 在提取公式前会做**窄范围的 DOM 规范化**（`normalize_document_html`）：
 
@@ -366,12 +395,12 @@ Sphinx 页面（`class="math"` 的 `\(...\)` / `\[...\]`）转换后仍需人工
 
 ## 各项目工作文件
 
-- `{项目根目录}/.web2md_tools/intermediate/` — AI 助手清单 `fix_list_roundN.md`
+- `{项目根目录}/.web2md_tools/intermediate/` — AI 助手清单 `fix_list_roundN.md`（公式/结构审核轮次）、`children_list.md`（子页面清单，`--children-from` 读取）
 - `{项目根目录}/.web2md_tools/_archive/` — 一次性调试/诊断文件（含抓取失败快照 `fetch_*.html`）
 
 ### 产物清理约定
 
-- `intermediate/`：每轮转换的清单按 `fix_list_roundN.md` 追加，**只保留最近 5 轮**，更早的移入 `_archive/` 或删除
+- `intermediate/`：每轮转换的清单按 `fix_list_roundN.md` 追加，**只保留最近 5 轮**，更早的移入 `_archive/` 或删除；`children_list.md` 为固定名覆盖式（每次 AI 生成新清单直接覆盖），不参与轮次清理
 - `_archive/`：**最多保留最近 20 个文件/目录**，超出后删除最旧的（调试快照排查用完后可手动删除）
 
 ### 目录结构规范
@@ -415,7 +444,7 @@ Sphinx 页面（`class="math"` 的 `\(...\)` / `\[...\]`）转换后仍需人工
 
 ## 测试（本地，git 不追踪）
 
-`scripts/tests/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化），**不随仓库分发**：
+`scripts/tests/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、导航解析 collect_children、`--children-from` 清单解析），**不随仓库分发**：
 
 ```powershell
 & "<python路径>" "<skill-directory>/scripts/tests/selftest.py"
@@ -474,6 +503,7 @@ Sphinx 页面（`class="math"` 的 `\(...\)` / `\[...\]`）转换后仍需人工
 | `$$` 独占一行 | `html_to_markdown` | `([^\n])\$\$` → 前插 `\n\n`，`\$\$([^\n])` → 后插 `\n\n`，确保 Typora 识别 |
 | 图片名截断 `max_len=60` | `sanitize_filename` | 避免超长文件名 |
 | 同页锚点过滤 | `collect_children` | 单页文档章节锚点（`commands.html#xxx`）与孙级锚点（`父页.html#xxx`）经 `_strip_fragment` 去 fragment 后与当前页/直接父页 URL 相同 → 跳过，避免重复抓取同一页面互相覆盖 |
+| 清单解析容错 | `parse_children_list` | `--children-from` 清单：注释/空行/备注列忽略，深层级缩进、缺 URL、无父页面的孙页面行跳过并警告——单行格式错误不中断整批抓取 |
 | `_clean_invisible_chars` 含 U+F0C1 | `extract_title` | Sphinx 标题锚点图标 ``（U+F0C1）与零宽/NBSP/BOM 一并清除，防止混入文件夹名与 md 标题 |
 | Wikimedia 限流退避 | `download_images` | HTTP 429 时递增等待 2/4/6 秒，Wikimedia 图片间加 0.3s 间隔 |
 

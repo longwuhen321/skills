@@ -48,8 +48,9 @@
 
 - 抓取任意网页，提取正文并转为 Markdown（`markdownify` + `BeautifulSoup`）
 - 图片自动下载到本地 `.assets` 文件夹，支持 Wikimedia 限流退避
-- 数学公式四路识别：Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>` MathML、Sphinx `class="math"`
+- 数学公式五路识别：Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>` MathML、Sphinx `class="math"`、MathJax SVG `<mjx-container>`
 - **三阶段公式审核流水线**：脚本机械修复 + AI 助手上下文判断，确保每个公式正确渲染
+- **导航子页面批量获取**：规则解析侧边栏导航（Sphinx li/ul、VitePress div.item/section）批量抓取子/孙页面并按标题文件夹嵌套落盘；规则失效时由 AI 助手判断兜底（`--children-from` 清单）
 
 ### 使用方式
 
@@ -59,15 +60,20 @@
 
 首次使用时会引导配置 Python 环境（自动搜索或手动指定），同时写入 Bash allow 规则避免后续重复确认。之后记住路径不再询问。
 
+导航子页面批量获取（可选）：`config.py` 的 `collect_children` 开关或 CLI `--children` 按规则解析侧边栏导航抓取子/孙页面；`--children-from <file>` 则按 AI 助手写的清单抓取（规则解析对新站点主题失效时的兜底通道）。
+
 ### 输出结构
 
 ```
 ./{页面标题}/
 ├── {页面标题}.md
-└── {页面标题}.assets/
-    ├── image1.png
-    ├── image2.jpg
-    └── ...
+├── {页面标题}.assets/
+│   ├── image1.png
+│   └── ...
+├── {子页面标题}/              ← 子页面（--children / --children-from 时）
+│   ├── {子页面标题}.md + .assets/
+│   └── {孙页面标题}/          ← 孙页面（深度最多 2 级）
+└── ...
 ```
 
 ### 公式审核流水线（第四步）
@@ -107,29 +113,32 @@
 ```
 web2md/                            # skill 目录（本仓库）
 ├── SKILL.md
+├── KNOWN_ISSUES.md                # 已知问题与修复记录（排查时读）
+├── OPTIMIZATION_SUMMARY.md        # 优化交接摘要（优化前读）
 ├── config.example.py              # 配置模板（占位符）
 └── scripts/
-    ├── config.py                  # 真实配置（gitignore 排除）：python_path、timeout
-    ├── web2md.py                  # 主抓取脚本（含 DOM 规范化）
+    ├── config.py                  # 真实配置（gitignore 排除）：python_path、timeout、collect_children
+    ├── web2md.py                  # 主抓取脚本（DOM 规范化、导航收集、--children-from）
     ├── markdown_code.py           # 代码掩码工具（各脚本共用）
     ├── fix_escapes.py             # 阶段 A：\_ \* 修复
     ├── list_display_fixes.py      # 阶段 B：$→$$ 自动升级 + 候选列表
     ├── find_all_missed.py         # 阶段 C：伪公式扫描辅助
     ├── final_verify.py            # 收尾验证
     └── tests/                     # 本地测试（git 不追踪）
-        ├── selftest.py            # 测试入口（19 用例）
+        ├── selftest.py            # 测试入口（28 用例）
         ├── test_formula_integrity.py
         └── test_sphinx_conversion.py
 
 <项目根目录>/
 └── .web2md_tools/
-    ├── intermediate/              # AI 助手清单 fix_list_roundN.md
+    ├── intermediate/              # AI 助手清单 fix_list_roundN.md、children_list.md（--children-from 读取）
     └── _archive/                  # 调试脚本等一次性文件
 ```
 
 ### 设计原则
 
 - **AI 助手做判断，脚本做执行**——`**i**` → `$\mathbf{i}$` 这类转换，脚本只能做 AI 助手手写的精确 `str.replace`，不能自动判断上下文
+- **导航收集双通道**——规则解析（`collect_children`）覆盖已知导航主题，新主题漏识别或规则异常时，AI 助手 web_fetch 页面读导航、写清单（`--children-from`）接管子/孙页面判断，脚本退化为按清单抓取
 - **脚本单份化**——可复用脚本只存在 `scripts/`，不复制进项目，避免版本漂移；各脚本通过 `markdown_code.py` 掩码忽略代码内容
 - **配置用 config.py**——仿 confluence-tools：`config.example.py` 模板 → `scripts/config.py` 真实值（gitignore 排除），`load_config()` 读取
 - **不碰 `\{` `\}`**——它们是 `\left\{` `\right\}` 的合法 LaTeX 组件

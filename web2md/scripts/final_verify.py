@@ -289,11 +289,33 @@ report('表格失败项', sum('表格' in item for item in failures))
 report('表格语义复核项', len(reviews), reviews)
 
 # 本地图片引用
-image_pattern = re.compile(r'!\[[^\]]*\]\((?:<([^>]+)>|([^)]+))\)')
+# 注意：路径可能含成对括号（如 ./Acro Mode (Fixed-Wing).assets/x.png），
+# 不能用 [^)]+ 截断；用括号深度扫描找到真正的闭合 )。
+image_start_pattern = re.compile(r'!\[[^\]]*\]\(')
 missing_images = []
 remote_relative = []
-for match in image_pattern.finditer(text):
-    target = (match.group(1) or match.group(2)).strip()
+for m in image_start_pattern.finditer(text):
+    i = m.end()
+    if i < len(text) and text[i] == '<':
+        j = text.find('>', i)
+        if j == -1:
+            continue
+        target = text[i + 1:j]
+    else:
+        depth = 0
+        j = i
+        while j < len(text):
+            c = text[j]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                if depth == 0:
+                    break
+                depth -= 1
+            j += 1
+        target = text[i:j]
+    # 剥离 Markdown 图片 title 后缀（如 ![](path "title")），只保留路径本身
+    target = re.sub(r'\s+["\x27][^"\x27]*["\x27]\s*$', '', target).strip()
     lowered = target.lower()
     if lowered.startswith(('http://', 'https://', 'data:')):
         continue
