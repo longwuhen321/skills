@@ -7,6 +7,7 @@
   - common:        429 限流重试、分页收集、token 环境变量覆盖
   - md_import:     占位符保护/还原、公式/代码转换、版本号流程、标题内存匹配
   - math_upgrade:  $/$$/```latex``` 转换、旧宏升级、原生 alignment、span 限制删除、verify
+  - md_export:     storage → Markdown（宏还原、图片引用改写、树导出结构）
 
 所有用例 mock 掉配置与网络，不触碰真实 config.py 和服务器。
 """
@@ -25,8 +26,10 @@ import requests
 
 from common import (load_config, request_with_retry, collect_space_pages,
                     build_block_template)
+from debug_utils import cleanup_debug
 from md_import import MarkdownImporter
 from math_upgrade import ConfluenceMathUpdater
+from md_export import ConfluenceExporter
 
 MOCK_CFG = {
     'common_config': {
@@ -36,6 +39,8 @@ MOCK_CFG = {
     'import_config': {'space': 'TEST', 'math_align': 'left'},
     'upgrade_config': {'math_align': 'left', 'auto_update': True,
                        'ai_verify': False, 'recursive': True, 'max_depth': 0},
+    'export_config': {'output_dir': 'confluence_export', 'recursive': True,
+                      'space': ''},
     'debug_config': {'max_size_mb': 50, 'keep_recent': 20},
 }
 
@@ -91,6 +96,42 @@ class TestCommon(unittest.TestCase):
         with patch('common.time.sleep') as fake_sleep:
             request_with_retry(session, 'GET', 'http://x')
         self.assertEqual(fake_sleep.call_args[0][0], 1)  # 2**0 = 1s
+
+    def test_get_timestamp_dirs_sorted_by_name_across_subdirs(self):
+        # 跨功能子目录（import/upgrade/export）的时间戳目录必须按时间戳名排序，
+        # 不能按完整路径（字母序 export < import < upgrade 会干扰"最旧优先"）
+        from debug_utils import _get_timestamp_dirs
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'upgrade' / '20260801_000000').mkdir(parents=True)
+            (root / 'export' / '20260804_000000').mkdir(parents=True)
+            (root / 'import' / '20260802_000000').mkdir(parents=True)
+            dirs = _get_timestamp_dirs(str(root))
+            names = [os.path.basename(d) for d in dirs]
+            self.assertEqual(names, ['20260801_000000', '20260802_000000',
+                                     '20260804_000000'])
+
+    def test_cleanup_debug_by_count_when_size_ok(self):
+        # 数量超（>keep_recent）但大小未超阈值 → 也触发清理（二选一即清理）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for i in range(5):
+                d = root / f'2026080{i}_000000'
+                d.mkdir()
+                (d / 'a.html').write_text('x' * 100, encoding='utf-8')
+            cleanup_debug(str(root), max_size_mb=50, keep_recent=2)
+            remaining = [p for p in root.iterdir() if p.is_dir()]
+            self.assertEqual(len(remaining), 2)  # 保留最近 2 个
+
+    def test_cleanup_debug_keeps_min_when_count_low(self):
+        # 数量少于 keep_recent 时，即使大小超标也不删（保留下限）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = root / '20260801_000000'
+            d.mkdir()
+            (d / 'big.html').write_text('x' * 100, encoding='utf-8')
+            cleanup_debug(str(root), max_size_mb=0, keep_recent=2)
+            self.assertTrue(d.exists())  # 未删除
 
     def test_collect_space_pages_pagination(self):
         session = mock.Mock()
@@ -804,6 +845,206 @@ class TestMathUpgrade(unittest.TestCase):
             self.updater._run_batch([(1, 'a', 0), (2, 'b', 0), (3, 'c', 0)],
                                     stop_on_error=True)
         self.assertEqual(ps.call_count, 2)
+
+
+class TestMdExport(unittest.TestCase):
+
+    def setUp(self):
+        self.load_patcher = patch('md_export.load_config', return_value=MOCK_CFG)
+        self.load_patcher.start()
+        self.tmp = tempfile.TemporaryDirectory()
+        # 隔离 debug 目录：SKILL_ROOT 指向临时目录，避免测试写真实 skill 的 debug/
+        self.skill_root_patcher = patch('md_export.SKILL_ROOT', self.tmp.name)
+        self.skill_root_patcher.start()
+        self.exporter = ConfluenceExporter(output_dir=self.tmp.name)
+        self.att_patcher = patch.object(self.exporter, 'fetch_attachments',
+                                        return_value=[])
+        self.att_patcher.start()
+
+    def tearDown(self):
+        self.att_patcher.stop()
+        self.skill_root_patcher.stop()
+        self.load_patcher.stop()
+        self.tmp.cleanup()
+
+    def _convert(self, storage_html, page_name='测试页', page_id='1'):
+        return self.exporter._convert_storage_to_markdown(
+            storage_html, Path(self.tmp.name) / page_name, page_id)
+
+    def _mathblock(self, content):
+        return ('<ac:structured-macro ac:name="mathblock" ac:schema-version="1">'
+                f'<ac:parameter ac:name="alignment">left</ac:parameter>'
+                f'<ac:plain-text-body><![CDATA[{content}]]></ac:plain-text-body>'
+                '</ac:structured-macro>')
+
+    def test_mathblock_to_block_math(self):
+        md = self._convert(self._mathblock('E=mc^2'))
+        self.assertIn('$$E=mc^2$$', md)
+
+    def test_mathblock_multiline_cdata_stripped(self):
+        md = self._convert(self._mathblock('\nE = mc^2\n'))
+        self.assertIn('$$E = mc^2$$', md)
+
+    def test_mathinline_unescape_to_inline_math(self):
+        html = ('<ac:structured-macro ac:name="mathinline" ac:schema-version="1">'
+                '<ac:parameter ac:name="body">a &lt; b</ac:parameter>'
+                '</ac:structured-macro>')
+        md = self._convert(html)
+        self.assertIn('$a < b$', md)
+
+    def test_old_mathjax_macros_compat(self):
+        html = ('<ac:structured-macro ac:name="mathjax-inline-macro" ac:schema-version="1">'
+                '<ac:parameter ac:name="equation">x^2</ac:parameter>'
+                '</ac:structured-macro>')
+        md = self._convert(html)
+        self.assertIn('$x^2$', md)
+
+    def test_code_macro_to_fence(self):
+        html = ('<ac:structured-macro ac:name="code" ac:schema-version="1">'
+                '<ac:parameter ac:name="language">python</ac:parameter>'
+                '<ac:plain-text-body><![CDATA[print("hi")]]></ac:plain-text-body>'
+                '</ac:structured-macro>')
+        md = self._convert(html)
+        self.assertIn('```python', md)
+        self.assertIn('print("hi")', md)
+
+    def test_toc_macro_to_marker(self):
+        html = '<ac:structured-macro ac:name="toc" ac:schema-version="1" data-layout="default"/>'
+        md = self._convert(html)
+        self.assertIn('[toc]', md)
+
+    def test_note_macro_to_blockquote(self):
+        html = ('<ac:structured-macro ac:name="note" ac:schema-version="1">'
+                '<ac:rich-text-body><p>注意内容</p></ac:rich-text-body>'
+                '</ac:structured-macro>')
+        md = self._convert(html)
+        self.assertIn('> 注意内容', md)
+
+    def test_unknown_macro_to_comment(self):
+        html = ('<ac:structured-macro ac:name="unknown-macro" ac:schema-version="1">'
+                '<ac:parameter ac:name="x">1</ac:parameter>'
+                '</ac:structured-macro>')
+        md = self._convert(html)
+        self.assertIn('<!-- 未处理的宏: unknown-macro -->', md)
+        self.assertIn('unknown-macro', self.exporter.stats['skipped_macros'])
+
+    def test_image_download_rewrites_reference(self):
+        html = ('<ac:image><ri:attachment ri:filename="pic.png" '
+                'ri:version-at-save="1"/></ac:image>')
+        attachments = [{'id': '1', 'title': 'pic.png',
+                        '_links': {'download': '/download/attachments/5/pic.png'}}]
+        with patch.object(self.exporter, 'fetch_attachments',
+                          return_value=attachments), \
+             patch.object(self.exporter, '_download_attachment',
+                          return_value='1_pic.png') as dl:
+            md = self._convert(html, page_name='测试页', page_id='5')
+        self.assertIn('![pic.png](./测试页.assets/1_pic.png)', md)
+        dl.assert_called_once()
+
+    def test_no_assets_dir_without_images(self):
+        page_dir = Path(self.tmp.name) / '无图页'
+        md = self._convert('<p>hello</p>', page_name='无图页')
+        self.assertNotIn('![', md)
+        self.assertFalse((page_dir / '无图页.assets').exists())
+
+    def test_table_to_markdown_table(self):
+        html = ('<table><tbody><tr><th>H1</th><th>H2</th></tr>'
+                '<tr><td>a</td><td>b</td></tr></tbody></table>')
+        md = self._convert(html)
+        self.assertIn('| H1 | H2 |', md)
+        self.assertIn('| --- | --- |', md)
+        self.assertIn('| a | b |', md)
+
+    def test_table_with_code_kept_as_html(self):
+        # 表格单元格内含代码块 → 整体保留为原始 HTML（GFM 表格不能含多行围栏）
+        html = ('<table><tbody><tr><th>代码</th><th>说明</th></tr>'
+                '<tr><td><pre><code>if (a || b) {\n  x();\n}</code></pre></td>'
+                '<td>条件判断</td></tr></tbody></table>')
+        md = self._convert(html)
+        self.assertIn('<table>', md)
+        self.assertIn('if (a || b)', md)
+        self.assertNotIn('| 代码 |', md)
+
+    def test_table_html_code_placeholder_restored(self):
+        # HTML 表格内的代码占位符必须被还原为原文，且无占位符残留
+        html = ('<table><tbody><tr><td><pre><code>int x = 1;</code></pre></td>'
+                '<td>说明</td></tr></tbody></table>')
+        md = self._convert(html)
+        self.assertIn('int x = 1;', md)
+        self.assertNotIn('⟦', md)
+
+    def test_table_pipe_escaped_in_gfm(self):
+        # 纯文本表格单元格内的 | 需转义，防止被当成列分隔
+        html = ('<table><tbody><tr><th>H</th></tr>'
+                '<tr><td>a|b</td></tr></tbody></table>')
+        md = self._convert(html)
+        self.assertIn(r'a\|b', md)
+
+    def test_heading_and_list_conversion(self):
+        html = '<h1>标题</h1><ul><li>甲</li><li>乙</li></ul>'
+        md = self._convert(html)
+        self.assertIn('# 标题', md)
+        self.assertIn('- 甲', md)
+        self.assertIn('- 乙', md)
+
+    def test_front_matter_title_escaped(self):
+        page = {'title': 'A: B',
+                'raw': {'version': {'when': '2026-01-01T00:00:00.000Z'}}}
+        fm = self.exporter._front_matter(page)
+        self.assertIn('title: "A: B"', fm)
+        self.assertIn('date: 2026-01-01T00:00:00.000Z', fm)
+        self.assertIn('math: true', fm)
+
+    def test_export_page_creates_structure(self):
+        page = {'page_id': '5', 'title': '测试页', 'version': 3, 'space_key': 'TEST',
+                'storage': '<p>hello $x$</p>',
+                'raw': {'version': {'when': '2026-01-01T00:00:00.000Z'}}}
+        with patch.object(self.exporter, 'fetch_page', return_value=page), \
+             patch.object(self.exporter, 'get_child_pages', return_value=[]):
+            md_path = self.exporter.export_page('5')
+        md_path = Path(self.tmp.name) / '测试页' / '测试页.md'
+        self.assertTrue(md_path.exists())
+        text = md_path.read_text(encoding='utf-8')
+        self.assertIn('title: "测试页"', text)
+        self.assertIn('math: true', text)
+        self.assertIn('hello', text)
+
+    def test_export_saves_storage_debug(self):
+        # 导出时每页原始 storage 保存到 debug/export/<时间戳>/<page_id>_<标题>.html
+        page = {'page_id': '5', 'title': '测试页', 'version': 3, 'space_key': 'TEST',
+                'storage': '<p>原始内容</p>',
+                'raw': {'version': {'when': '2026-01-01T00:00:00.000Z'}}}
+        with patch.object(self.exporter, 'fetch_page', return_value=page), \
+             patch.object(self.exporter, 'get_child_pages', return_value=[]):
+            self.exporter.export_page('5')
+        export_dir = Path(self.tmp.name) / 'debug' / 'export'
+        self.assertTrue(export_dir.exists())
+        files = list(export_dir.glob('*/*.html'))
+        self.assertEqual(len(files), 1)
+        self.assertIn('5_测试页.html', files[0].name)
+        self.assertIn('原始内容', files[0].read_text(encoding='utf-8'))
+
+    def test_recursive_off_skips_children(self):
+        page = {'page_id': '5', 'title': '父页', 'version': 1, 'space_key': 'TEST',
+                'storage': '<p>parent</p>', 'raw': {'version': {'when': ''}}}
+        with patch.object(self.exporter, 'recursive', False), \
+             patch.object(self.exporter, 'fetch_page', return_value=page), \
+             patch.object(self.exporter, 'get_child_pages') as gc:
+            self.exporter.export_page('5')
+        gc.assert_not_called()
+
+    def test_recursive_on_exports_children(self):
+        page1 = {'page_id': '5', 'title': '父页', 'version': 1, 'space_key': 'TEST',
+                 'storage': '<p>parent</p>', 'raw': {'version': {'when': ''}}}
+        page2 = {'page_id': '6', 'title': '子页', 'version': 1, 'space_key': 'TEST',
+                 'storage': '<p>child</p>', 'raw': {'version': {'when': ''}}}
+        with patch.object(self.exporter, 'fetch_page', side_effect=[page1, page2]), \
+             patch.object(self.exporter, 'get_child_pages',
+                          side_effect=[[('6', '子页')], []]):
+            self.exporter.export_page('5')
+        root = Path(self.tmp.name)
+        self.assertTrue((root / '父页' / '父页.md').exists())
+        self.assertTrue((root / '父页' / '子页' / '子页.md').exists())
 
 
 if __name__ == '__main__':

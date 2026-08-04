@@ -20,7 +20,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 检查 `scripts/config.py` 是否存在。不存在时启动配置向导。
 
-**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/common.py`、`scripts/selftest.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
+**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/debug_utils.py`、`scripts/selftest.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
 
 ### 向导规则
 
@@ -83,10 +83,16 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 17. **默认递归** → `upgrade_config.recursive`（默认 `true`，有 page_id 时自动递归子页面）
 18. **递归最大层级** → `upgrade_config.max_depth`（默认 `0` 不限）
 
+**── md_export ──**
+
+19. **默认输出目录** → `export_config.output_dir`（选填，默认 `confluence_export`，相对当前工作目录，也支持绝对路径如 `D:/out`；可被 `--output` 覆盖）
+20. **默认递归导出** → `export_config.recursive`（默认 `true`，有 page_id 时自动递归子页面；可被 `--recursive` / `--no-recursive` 覆盖）
+21. **空间模式默认空间** → `export_config.space`（选填，跑 `--space` 模式时需要）
+
 **── Debug ──**
 
-19. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
-20. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
+22. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
+23. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
 
 配置确认后同时将 Python 路径写入 Bash allow 规则（Claude Code 为 `.claude/settings.local.json`，Reasonix 为 `reasonix.toml` 的 `[permissions].allow`），避免后续执行每次确认。
 
@@ -102,6 +108,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 > 1. **导入 Markdown** — 将 .md 文件上传为 Confluence 页面
 > 2. **批量导入文件夹树** — `--dir` 模式，保留文件夹层级（需开启 tree_import）
 > 3. **升级数学公式** — 升级已有页面的 $...$ / $$...$$ 为原生宏
+> 4. **导出 Markdown** — 从 Confluence 拉取页面为 Typora 兼容 Markdown
 
 ---
 
@@ -151,6 +158,31 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 ---
 
+### 三、导出 Markdown（md_export）
+
+把 Confluence 页面（storage format）导出为 **Typora 兼容 Markdown**：
+
+- 数学公式原生宏还原：`mathblock` → `$$...$$`、`mathinline` → `$...$`（旧 mathjax 宏兼容）
+- 代码宏 → ```` ```语言 ```` 围栏；`toc` 宏 → `[toc]`；note/info/warning 等提示宏 → 引用块
+- 图片附件下载到 `<标题>.assets/`，md 内引用改写为相对路径
+- 输出结构：`<标题>/<标题>.md + <标题>.assets/` —— 与 web2md 输出、`md_import --dir` 目录结构一致，**导出的目录树可直接用 `--dir` 反向导回 Confluence**
+
+```bash
+"<python_path>" "<SKILL_DIR>/scripts/md_export.py" --page-id <ID> [--recursive|--no-recursive] [--output <目录>]
+"<python_path>" "<SKILL_DIR>/scripts/md_export.py" --space <KEY> [--output <目录>]
+```
+
+**关键参数：**
+- `--page-id <ID>`：导出单页；`--recursive`（默认从 config 读）时递归导出子页面，子页面文件夹嵌套在父页面目录下
+- `--space <KEY>`：批量导出整个空间（平铺，每页一个文件夹）
+- `--output <目录>`：输出根目录（默认 `export_config.output_dir`，相对当前工作目录，也支持绝对路径）
+- 页面无图时不产生 `.assets/` 文件夹；图片下载失败在 md 中保留注释
+- 未知宏降级为 `<!-- 未处理的宏: xxx -->` 注释，结束时汇总提示
+
+**依赖**：`beautifulsoup4` + `markdownify`（缺失时脚本启动会明确提示安装；配置向导阶段可确认环境已装）。
+
+---
+
 ## 独立运行（不依赖 AI 助手）
 
 脚本直接从 `scripts/config.py` 读取配置，无需任何环境变量或 AI 助手依赖：
@@ -158,6 +190,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 ```bash
 python scripts/md_import.py my_doc.md --space ES
 python scripts/math_upgrade.py --page-id 12345 --align left
+python scripts/md_export.py --page-id 12345
 ```
 
 首次使用：复制 `config.example.py` → `scripts/config.py`，填入真实值即可。
@@ -187,11 +220,13 @@ python scripts/math_upgrade.py --page-id 12345 --align left
 <SKILL_DIR>/debug/
 ├── import/              # md_import
 │   └── YYYYMMDD_HHMMSS/before_upload.html
-└── upgrade/             # math_upgrade
-    └── YYYYMMDD_HHMMSS/{before,after}.html + info.txt
+├── upgrade/             # math_upgrade
+│   └── YYYYMMDD_HHMMSS/{before,after}.html + info.txt
+└── export/              # md_export
+    └── YYYYMMDD_HHMMSS/{page_id}_<标题>.html（原始 storage 快照）
 ```
 
-超过 `max_size_mb` 阈值自动清理最旧的时间戳目录。
+总大小超过 `max_size_mb` **或** 时间戳目录数超过 `keep_recent` 时自动清理（大小/数量**二选一即清理**），从最旧删起、至少保留最近 `keep_recent` 个（配置见 `debug_config`）。
 
 ---
 
@@ -209,10 +244,12 @@ confluence-tools/
 │   ├── debug_utils.py          # 公共：日志清理
 │   ├── md_import.py            # Markdown → Confluence
 │   ├── math_upgrade.py         # 数学公式升级
+│   ├── md_export.py            # Confluence → Markdown 导出
 │   └── selftest.py             # 离线自测（不依赖服务器，mock 配置运行）
 └── debug/
     ├── import/
-    └── upgrade/
+    ├── upgrade/
+    └── export/
 
 忽略规则（.gitignore）位于仓库根目录（见根目录 `.gitignore`）
 ```

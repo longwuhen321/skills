@@ -33,6 +33,46 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-04：debug 清理策略调整 + md_export 原始 storage 快照
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | `debug_utils.py`：清理触发改"大小/数量二选一即清理"（原需双条件同时超，实际从不触发）；`_get_timestamp_dirs` 改 `os.walk` 递归扫描 `YYYYMMDD_HHMMSS` 时间戳目录（原只扫 debug_root 直接子目录，嵌套的时间戳目录从未被统计）；排序改按时间戳名（修复完整路径排序被功能子目录字母序干扰、误删 export 快照的 bug，见 KNOWN_ISSUES 2026-08-04） |
+| 脚本改动 | `md_export.py`：每页原始 storage 存 `debug/export/<时间戳>/<page_id>_<标题>.html`（同一次运行共用一个时间戳目录），纳入统一 cleanup_debug 清理 |
+| 测试 | selftest +4 用例（数量超即清理 / 保留下限 / 跨目录按时间戳排序 / export 快照生成），79 → 83 全绿；TestMdExport 隔离 `md_export.SKILL_ROOT` 到临时目录防污染真实 debug/ |
+| 验证 | 真实运行：debug/import 43→0、upgrade 37→20（保留最近 20 个）、export 快照 `73596957_...html` 生成且保留 |
+
+**过程要点**：
+- 用户质疑"keep_recent=20 但目录超过 20"引出排查：根因是时间戳目录嵌套在功能子目录下、旧 `_get_timestamp_dirs` 只扫一层 + 双条件触发，两因素叠加导致清理从未真正执行
+- 排序 bug 在真实验证中暴露（export 最新快照被误删），说明真实验证能发现离线用例覆盖不到的组合问题；已补跨目录排序回归用例
+- 旁路发现：直接 `python -c` 调 debug_utils 打印 🗑️ emoji 会 GBK `UnicodeEncodeError`（无 UTF-8 wrap 的入口）；真实脚本入口（md_import/math_upgrade/md_export）顶部均有 wrap，不受影响
+
+**遗留事项更新**：
+- （原）无
+- （新增）无
+
+### 2026-08-04：md_export 新增——Confluence → Markdown 导出（基于原型工程化）
+
+| 类别 | 内容 |
+|------|------|
+| 新功能 | `scripts/md_export.py`：把 Confluence 页面（storage XHTML）导出为 Typora 兼容 Markdown——mathblock/mathinline 原生宏 → `$$...$$`/`$...$`（旧 mathjax 宏兼容）、code → ```语言 围栏、toc → `[toc]`、note/info/warning → 引用块、未知宏 → 注释保留；图片下载到 `<标题>.assets/`（`{附件id}_{原名}` 防重名，页面无图不建目录）；输出 `<标题>/<标题>.md + .assets/` 与 web2md / `md_import --dir` 目录结构对齐，导出树可闭环反向导入 |
+| 脚本改动 | `common.py` 新增 `fetch_page`（md_export / math_upgrade 共用，429/5xx 重试）；`math_upgrade.py` 的 fetch_page 改为委托 common.fetch_page（行为与返回结构不变，无回归） |
+| 配置 | `export_config` 分组：output_dir（默认 confluence_export，相对 cwd）/ recursive（默认 true）/ space；同步 config.example.py + scripts/config.py + SKILL.md（配置向导 19-21 项、子命令第 4 项、md_export 章节、文件结构） |
+| CLI | `--page-id` / `--space` / `--recursive` / `--no-recursive` / `--output`；默认值走 config.py，CLI 覆盖 |
+| 测试 | selftest +16 用例（TestMdExport：宏还原/CDATA 反转义/图片引用与 .assets 懒创建/树导出结构/递归开关/front-matter），60 → 76 全绿 |
+| 验证 | 真实页面导出：73596957（TECS，34 mathblock + 190 mathinline + 7 图）、12714011（apriltag，74 code + 5 图）——front-matter/[toc]/`$$...$$`/`$...$`/表格/图片引用/代码围栏全部正确，`\frac` 未被 markdownify 转义 |
+
+**过程要点**：
+- 原型 `E:\study_data\code\python\test\confluence_to_markdown.py` 只认 v8 第三方 mathjax 宏、Basic Auth、独立配置；正式版改 PAT Bearer + 原生 mathblock/mathinline 支持 + 复用 common.py + `export_config` 配置
+- markdownify 两个坑：① `convert()` 接收 **HTML 字符串**而非 soup（内部重新解析，传 soup 会 `'NoneType' object is not callable`）；② 新版默认**无** `language-` 提取且 `code_language_callback` 收到的是 `<pre>` 元素——需自定义回调从内部 `<code class="language-xx">` 提取
+- CDATA 用占位符保护（html.parser 不解析 CDATA）；公式/代码/[toc]/未知宏注释全部走「占位符 → markdownify 后还原」，避免被 markdownify 转义（`\frac`、`_` 等）
+- 真实页面边缘情况（均为源数据如此，转换忠实）：toc 宏嵌在 `<h1>` 内 → 输出 `# [toc] ...`；code 宏无 language 参数 → 空语言围栏
+- 依赖：新增 beautifulsoup4 + markdownify（目标环境已装；脚本实例化时检测缺失并提示）
+
+**遗留事项更新**：
+- （原）无
+- （新增）md_export 首版未知宏统一降级为注释（Confluence 内置 panel/lorem 等未专门处理）；toc 嵌标题内未做提取到标题外；`\_` 转义为 markdownify 默认行为（Typora 渲染正常）
+
 ### 2026-08-04：selftest 重复用例清理 + 文档数字/参数同步
 
 | 类别 | 内容 |
@@ -171,7 +211,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 - mathblock `alignment=left` 在 Confluence 9.2.1 服务器实测支持
 - toc 自动目录宏真实验证：73596940（Commands）重跑导入，标题多自动补目录宏
 - 多轮真实页面导入/升级/修复验证（含 --dir 树导入、同名附件更新、自闭合宏修复后回归），全部闭环
-- selftest：60 用例全绿（2026-08-04 实测；08-03 条目记 58 为更早时点遗留，本次去重后含 08-04 base64 高亮保护用例）
+- selftest：83 用例全绿（2026-08-04 实测；76 为 debug 清理调整前时点，本次新增 cleanup/排序/export 快照 4 用例）
 
 ## 三、过程中的 bug 序列（按时间）
 
@@ -214,4 +254,4 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 - Confluence：9.2.x（http://<confluence-server>:8090），PAT Bearer 认证
 - Python：`<python 解释器路径>`（需安装 requests / markdown2）
-- 测试命令：`"<python>" scripts/selftest.py` → 全部用例全绿（截至 2026-08-04 为 60 用例）
+- 测试命令：`"<python>" scripts/selftest.py` → 全部用例全绿（截至 2026-08-04 为 83 用例）

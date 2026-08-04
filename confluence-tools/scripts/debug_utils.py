@@ -1,11 +1,13 @@
 """
 调试日志自动清理工具
 
-扫描 debug/ 目录，超过阈值时自动删除最旧的时间戳子目录。
-供 md_import / math_upgrade 共用。
+扫描 debug/ 目录，总大小或时间戳目录数超标时自动删除最旧的时间戳子目录
+（大小/数量二选一即清理，至少保留最近 keep_recent 个）。
+供 md_import / math_upgrade / md_export 共用。
 """
 
 import os
+import re
 import shutil
 
 
@@ -21,44 +23,64 @@ def _get_dir_size_mb(dir_path: str) -> float:
 
 
 def _get_timestamp_dirs(debug_root: str) -> list:
-    """返回 debug_root 下所有子目录，按名称排序（时间戳格式 YYYYMMDD_HHMMSS）"""
+    """返回 debug_root 下所有时间戳子目录（递归，名称匹配 YYYYMMDD_HHMMSS），按名称排序
+
+    时间戳目录嵌套在功能子目录（import/ / upgrade/ / export/）之下，
+    必须递归扫描才能真正统计到；功能子目录本身非时间戳格式，不会误入。
+    """
     dirs = []
     if not os.path.isdir(debug_root):
         return dirs
-    for name in os.listdir(debug_root):
-        full = os.path.join(debug_root, name)
-        if os.path.isdir(full):
-            dirs.append(full)
-    dirs.sort()  # 按名称升序 = 旧的在前
+    for root, subdirs, _files in os.walk(debug_root):
+        for name in subdirs:
+            if re.fullmatch(r'\d{8}_\d{6}', name):
+                dirs.append(os.path.join(root, name))
+    dirs.sort(key=lambda d: os.path.basename(d))  # 按时间戳名升序 = 旧的在前
     return dirs
 
 
 def cleanup_debug(debug_root: str = 'debug',
                   max_size_mb: int = 50,
                   keep_recent: int = 20):
-    """清理调试目录：总大小超过 max_size_mb 则删除最旧的目录
+    """清理调试目录：总大小超过 max_size_mb **或** 子目录数超过 keep_recent 即清理
+
+    触发条件为"二选一"（任一超标即清理）：
+    - 从最旧的目录开始删，直到大小与数量都达标；
+    - 下限保护：最多删到只剩最近 keep_recent 个（数量少于 keep_recent 时即使
+      大小超标也不删，保证"至少保留最近 N 个"语义）。
 
     Args:
         debug_root:   调试根目录路径
-        max_size_mb:  触发清理的阈值（MB）
-        keep_recent:  至少保留最近 N 个子目录
+        max_size_mb:  大小触发阈值（MB）
+        keep_recent:  数量触发上限（子目录数超过即清理）；也是保留下限
     """
     if not os.path.isdir(debug_root):
         return
 
-    total_mb = _get_dir_size_mb(debug_root)
-    if total_mb <= max_size_mb:
-        return  # 未超阈值，无需清理
-
     all_dirs = _get_timestamp_dirs(debug_root)
-    if len(all_dirs) <= keep_recent:
-        return  # 数量不足，不清理
+    if not all_dirs:
+        return
 
-    # 目标：保留最近 keep_recent 个
-    dirs_to_delete = all_dirs[:-keep_recent]
+    total_mb = _get_dir_size_mb(debug_root)
+    if total_mb <= max_size_mb and len(all_dirs) <= keep_recent:
+        return  # 大小与数量都未超，无需清理
+
+    # 从最旧开始删，直到大小与数量都达标，或已到保留下限（剩 keep_recent 个）
+    dirs_to_delete = []
+    remaining_mb = total_mb
+    excess_count = len(all_dirs) - keep_recent  # 数量需删的最少个数（≤0 表示数量未超）
+    max_deletable = len(all_dirs) - keep_recent  # 保留下限：最多删到剩 keep_recent 个
+    for d in all_dirs:
+        if excess_count <= 0 and remaining_mb <= max_size_mb:
+            break  # 数量与大小都达标
+        if len(dirs_to_delete) >= max_deletable:
+            break  # 已到保留下限
+        dirs_to_delete.append(d)
+        remaining_mb -= _get_dir_size_mb(d)
+        excess_count -= 1
+
     deleted = 0
     freed_mb = 0.0
-
     for d in dirs_to_delete:
         size_mb = _get_dir_size_mb(d)
         shutil.rmtree(d, ignore_errors=True)

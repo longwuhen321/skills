@@ -25,6 +25,20 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-04] debug 清理失效：时间戳目录扫描不到 + 完整路径排序误删最新快照
+
+- **现象**：`debug/import` 子目录累积 43 个仍不清理（`keep_recent=20` 形同虚设）；改为递归扫描后 `debug/export` 最新快照被误删（export 目录时间戳最新却被当"最旧"优先删）。
+- **根因**：两处——① `_get_timestamp_dirs` 只列 `debug_root` 直接子目录（`import/`/`upgrade/`/`export/` 3 个），时间戳目录嵌套在其下**从未被统计**；叠加原清理需"大小超 **且** 数量超"双条件，实际从不触发；② 递归修复后按**完整路径**排序，功能子目录字母序（`export`<`import`<`upgrade`）优先于时间戳，`export` 目录总排最前被误删。
+- **修复**：`scripts/debug_utils.py`——清理触发改"大小/数量**二选一**即清理"（从最旧删到都达标，保留下限 keep_recent）；`_get_timestamp_dirs` 改 `os.walk` 递归扫描 `YYYYMMDD_HHMMSS` 格式目录；排序改按时间戳名（`sort(key=basename)`）。
+- **排查方法**：debug 目录长期不清理时，先确认时间戳目录是否嵌套在功能子目录下（旧版只扫一层）；删除异常时检查排序键是否混入路径前缀；selftest 有 `test_cleanup_debug_by_count_when_size_ok` / `test_get_timestamp_dirs_sorted_by_name_across_subdirs` 覆盖。
+
+## [2026-08-04] md_export：表格单元格含代码块 → GFM 围栏破坏表格结构（导出乱码）
+
+- **现象**：md_export 导出含代码表格的页面（apriltag 方案精准降落实测），Typora 打开表格乱码——行列错乱、`|` 被误判列分隔；md 中表格单元格出现 ` ``` ` 围栏横跨多行。
+- **根因**：GFM/Typora 表格单元格不能含多行围栏代码块。markdownify 把表格内的 `<pre><code>` 直接输出为围栏（` ``` `），围栏横跨单元格结构；代码内 `|`（如 `||`）未转义，进一步破坏列分割。
+- **修复**：`scripts/md_export.py` 新增 `_protect_complex_tables`（宏/图片转换后、markdownify 前调用）：含 `pre`/`code`/`ac:` 的表格整体保留为**原始 HTML**（占位符还原，Typora 原生渲染 HTML 表格，代码/图片/公式引用不丢）；纯文本表格走 GFM 且单元格文本 `|` → `\|`。同时修正占位符还原顺序——HTML 表格先还原（其内部含 CODE/MI/MB 占位符），其余占位符随后全局替换，否则表格内占位符残留。
+- **排查方法**：导出的 md 中表格单元格出现 ` ``` ` 围栏或行列错乱即此类；selftest 有 `test_table_with_code_kept_as_html` / `test_table_pipe_escaped_in_gfm` / `test_table_html_code_placeholder_restored` 覆盖。
+
 ## [2026-08-04] ==高亮== 正则误配 base64 图片 padding，`<strong>` 进入 src 属性 → 导入 400
 
 - **现象**：含内嵌 base64 图片（`![](data:image/png;base64,...== "title")`）的页面导入报

@@ -95,6 +95,28 @@ def collect_space_pages(session, base_url, space_key, headers=None, page_size=20
     return all_pages
 
 
+def fetch_page(session, base_url, page_id, expand='body.storage,version,space'):
+    """拉取单个页面详情（storage 正文 + 版本 + 空间），返回 dict
+
+    md_export / math_upgrade 共用。429 与瞬时 5xx 自动重试。
+    返回键：page_id / title / version / space_key / storage / raw
+    """
+    url = f"{base_url}/rest/api/content/{page_id}"
+    params = {'expand': expand}
+    resp = request_with_retry(session, 'GET', url, params=params,
+                              retry_on=(429, 500, 502, 503, 504))
+    resp.raise_for_status()
+    data = resp.json()
+    return {
+        'page_id': data['id'],
+        'title': data['title'],
+        'version': data['version']['number'],
+        'space_key': data['space']['key'],
+        'storage': data['body']['storage']['value'],
+        'raw': data,
+    }
+
+
 def load_config():
     """从 scripts/config.py 读取配置，返回 dict
 

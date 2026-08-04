@@ -7,9 +7,10 @@
 #   3. scripts/config.py 不提交到 git（已在 .gitignore 中排除）
 #
 # 配置分组说明：
-#   common_config      — 通用配置（两个脚本共用）
+#   common_config      — 通用配置（三个脚本共用）
 #   import_config      — md_import 专属配置
 #   upgrade_config     — math_upgrade 专属配置
+#   export_config      — md_export 专属配置
 #   debug_config       — 调试日志配置（共用）
 # ============================================================
 
@@ -95,6 +96,20 @@ upgrade_config = {
 
     # 递归最大层级，0 = 不限制。可被 --max-depth 参数覆盖。
     "max_depth": 0,
+}
+
+
+# ==================== md_export 配置 ====================
+export_config = {
+    # 默认导出输出根目录（相对当前工作目录；也支持绝对路径，如 "D:/out"；
+    # 可被 --output 参数覆盖）。
+    "output_dir": "confluence_export",
+
+    # --page-id 时默认是否递归导出子页面（可被 --recursive / --no-recursive 覆盖）。
+    "recursive": True,
+
+    # 空间模式（--space 未传时）的默认空间 Key。
+    "space": "",
 }
 
 

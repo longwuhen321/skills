@@ -29,7 +29,7 @@ if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 from common import (SKILL_ROOT, load_config, request_with_retry,
-                    collect_space_pages, build_block_template)
+                    collect_space_pages, build_block_template, fetch_page)
 from debug_utils import cleanup_debug
 
 
@@ -71,20 +71,8 @@ class ConfluenceMathUpdater:
 
     # ── 1. 拉取页面 ──
     def fetch_page(self, page_id):
-        url = f"{self.base_url}/rest/api/content/{page_id}"
-        params = {'expand': 'body.storage,version,space'}
-        resp = request_with_retry(self.session, 'GET', url, params=params,
-                                  retry_on=(429, 500, 502, 503, 504))
-        resp.raise_for_status()
-        data = resp.json()
-        return {
-            'page_id': data['id'],
-            'title': data['title'],
-            'version': data['version']['number'],
-            'space_key': data['space']['key'],
-            'storage': data['body']['storage']['value'],
-            'raw': data,
-        }
+        """拉取页面详情（委托 common.fetch_page，429/5xx 已内置重试）"""
+        return fetch_page(self.session, self.base_url, page_id)
 
     # ── 2. 转换引擎 ──
     def _upgrade_old_macros(self, storage_html):
