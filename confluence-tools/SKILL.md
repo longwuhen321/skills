@@ -144,6 +144,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 **关键参数：**
 - `--align left`：左对齐（推荐默认，原生 mathblock + alignment=left），`--align center`：居中
 - `--ai-verify` / `--no-ai-verify`：覆盖是否暂停等人工审核
+- `--confirm <debug目录>`：AI 助手验证 debug 文件后确认更新（配合 `ai_verify` 使用；`--confirm latest` 取最近一次 debug 目录）
 - `--recursive` / `--no-recursive`：覆盖是否递归子页面
 - `--no-auto-update`：仅生成 debug 文件，不更新页面
 - `--stop-on-error`：批量模式遇错即停（默认遇错继续，末尾汇总失败页面）
@@ -213,7 +214,7 @@ confluence-tools/
     ├── import/
     └── upgrade/
 
-忽略规则（.gitignore）位于仓库根目录，见 `skills/.gitignore`
+忽略规则（.gitignore）位于仓库根目录（见根目录 `.gitignore`）
 ```
 
 ---

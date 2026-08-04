@@ -279,38 +279,6 @@ class TestMdImport(unittest.TestCase):
         lookup_resp = make_resp(200, json_data={'results': [{'id': '999'}]})
         update_resp = make_resp(200)
 
-        with mock.patch.object(self.importer.session, 'post', side_effect=[create_resp, update_resp]) as mp, \
-             mock.patch.object(self.importer.session, 'get', return_value=lookup_resp) as mg:
-            result = self.importer._upload_attachment(page_id, file_path)
-        self.assertEqual(result, f'/download/attachments/{page_id}/existing.png')
-        self.assertIn('/child/attachment', mp.call_args_list[0][0][0])
-        self.assertIn('/child/attachment/999/data', mp.call_args_list[1][0][0])
-        mg.assert_called_once()
-        os.unlink(file_path)
-
-    def test_upload_attachment_updates_existing(self):
-        # 同名附件已存在（页面更新场景）：POST 创建 400 → GET 查到 id → POST /data 更新
-        from types import SimpleNamespace
-
-        def make_resp(status, json_data=None, text=""):
-            resp = SimpleNamespace(status_code=status, text=text)
-            if json_data is not None:
-                resp.json = lambda: json_data
-            def _raise():
-                if status >= 400:
-                    raise Exception(f"HTTP {status}")
-            resp.raise_for_status = _raise
-            return resp
-
-        page_id = '123'
-        file_path = os.path.join(tempfile.gettempdir(), 'existing.png')
-        with open(file_path, 'wb') as f:
-            f.write(b'x')
-
-        create_resp = make_resp(400, text='Cannot add a new attachment with same file name')
-        lookup_resp = make_resp(200, json_data={'results': [{'id': '999'}]})
-        update_resp = make_resp(200)
-
         # request_with_retry 内部走 session.request(method, url, ...)
         with mock.patch.object(self.importer.session, 'request',
                                side_effect=[create_resp, lookup_resp, update_resp]) as mreq:
@@ -616,6 +584,22 @@ class TestMdImport(unittest.TestCase):
                 final = self.importer._convert_md_links(html, str(md_file), '999')
         self.assertIn('ri:filename="a.png"', final)
 
+
+    def test_highlight_marks_ignore_base64_padding(self):
+        # base64 内嵌图片的 data URI 以 == 结尾（base64 padding），==高亮== 正则若
+        # 跨图配对会把 <strong> 写进 src 属性值 → XHTML 非法 → 导入 400
+        # （Altitude Mode (Fixed-Wing) 页面实测）。修复：转换前整体保护 <img> 标签。
+        html = ('<p>==真高亮==</p>'
+                '<p><img src="data:image/png;base64,AAAABBBB==" alt="" title="Easy to fly" />'
+                '&#160;<img src="data:image/svg+xml;base64,CCCCDDDD==" alt="" title="Manual" /></p>')
+        result = self.importer._convert_highlight_marks(html)
+        # 两个 img 的 src 保持完整 base64（== padding 不被吞，也无 <strong> 混入属性）
+        self.assertIn('src="data:image/png;base64,AAAABBBB=="', result)
+        self.assertIn('src="data:image/svg+xml;base64,CCCCDDDD=="', result)
+        # 真正的 ==高亮== 仍正常转换
+        self.assertIn('<strong>真高亮</strong>', result)
+        # 不产生畸形结构（base64 截断 + <strong> 混入 src 属性值）
+        self.assertNotIn('BBB<strong>', result)
 
 class TestMathUpgrade(unittest.TestCase):
 

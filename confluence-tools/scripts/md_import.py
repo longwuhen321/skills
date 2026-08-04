@@ -341,11 +341,11 @@ class MarkdownImporter:
 
     def _convert_highlight_marks(self, html_content):
         """将==highlight==语法转换为加粗"""
-        parts = re.split(r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>)',
+        parts = re.split(r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>|<img\b[^>]*>)',
                          html_content, flags=re.DOTALL)
         converted_parts = []
         for part in parts:
-            if part.startswith('<ac:structured-macro'):
+            if part.startswith('<ac:structured-macro') or part.startswith('<img'):
                 converted_parts.append(part)
             else:
                 # ==高亮== 不跨行，防未闭合 == 吞掉后续内容

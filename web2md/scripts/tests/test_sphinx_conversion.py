@@ -452,6 +452,171 @@ class SphinxConversionTests(unittest.TestCase):
         self.assertEqual(children[0]['title'], 'The NSH Library')
         self.assertEqual(children[0]['children'], [])
 
+    # ── 2026-08-04 补：AI 判断通道（--children-from 清单解析）──
+
+    def _write_children_list(self, tmpdir, content):
+        from web2md import parse_children_list
+        path = Path(tmpdir) / 'children_list.md'
+        path.write_text(content, encoding='utf-8')
+        return parse_children_list(str(path))
+
+    def test_parse_children_list_basic_nesting(self):
+        # 子页面 + 2 空格缩进孙页面：嵌套结构、标题/URL 提取正确
+        with tempfile.TemporaryDirectory() as tmp:
+            items = self._write_children_list(tmp, (
+                '- 子页面一 | https://x.com/a.html\n'
+                '  - 孙页面一 | https://x.com/a1.html\n'
+                '  - 孙页面二 | https://x.com/a2.html\n'
+                '- 子页面二 | https://x.com/b.html\n'
+            ))
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]['title'], '子页面一')
+        self.assertEqual(items[0]['url'], 'https://x.com/a.html')
+        self.assertEqual(len(items[0]['children']), 2)
+        self.assertEqual(items[0]['children'][1]['title'], '孙页面二')
+        self.assertEqual(items[1]['children'], [])
+
+    def test_parse_children_list_ignores_comments_and_notes(self):
+        # # 注释行、空行、`|` 后的备注列全部忽略；标题缺失时回退用 URL 展示
+        with tempfile.TemporaryDirectory() as tmp:
+            items = self._write_children_list(tmp, (
+                '# 子页面清单 — 注释行\n'
+                '\n'
+                '- 子页面 | https://x.com/a.html | 备注文字忽略\n'
+                '  - 孙页面 | https://x.com/a1.html\n'
+                '- | https://x.com/b.html\n'
+            ))
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]['title'], '子页面')
+        self.assertEqual(items[0]['url'], 'https://x.com/a.html')
+        self.assertEqual(items[0]['children'][0]['title'], '孙页面')
+        self.assertEqual(items[1]['title'], 'https://x.com/b.html')
+
+    def test_parse_children_list_deep_indent_skipped(self):
+        # 4 空格缩进（超过孙页面层级）→ 跳过并警告，不中断其余行的解析
+        with tempfile.TemporaryDirectory() as tmp:
+            items = self._write_children_list(tmp, (
+                '- 子页面 | https://x.com/a.html\n'
+                '  - 孙页面 | https://x.com/a1.html\n'
+                '    - 曾孙页面 | https://x.com/a1a.html\n'
+                '- 子页面二 | https://x.com/b.html\n'
+            ))
+        self.assertEqual(len(items), 2)
+        self.assertEqual(len(items[0]['children']), 1)
+        self.assertEqual(items[1]['title'], '子页面二')
+
+    def test_parse_children_list_missing_url_or_parent_skipped(self):
+        # 缺 URL 的行跳过；首行即缩进（无父页面的孙页面）跳过
+        with tempfile.TemporaryDirectory() as tmp:
+            items = self._write_children_list(tmp, (
+                '  - 无父孙页面 | https://x.com/orphan.html\n'
+                '- 子页面 | https://x.com/a.html\n'
+                '  - 孙页面 |\n'
+            ))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['title'], '子页面')
+        self.assertEqual(items[0]['children'], [])
+
+    def test_parse_children_list_star_angle_and_errors(self):
+        # * 列表标记与 <> 包裹 URL 可解析；文件缺失抛 ValueError；空清单返回 []
+        from web2md import parse_children_list
+        with tempfile.TemporaryDirectory() as tmp:
+            items = self._write_children_list(tmp, (
+                '* 子页面 | <https://x.com/a.html>\n'
+                '  * 孙页面 | <https://x.com/a1.html>\n'
+            ))
+            self.assertEqual(items[0]['url'], 'https://x.com/a.html')
+            self.assertEqual(items[0]['children'][0]['url'], 'https://x.com/a1.html')
+            empty = Path(tmp) / 'empty.md'
+            empty.write_text('', encoding='utf-8')
+            self.assertEqual(parse_children_list(str(empty)), [])
+            with self.assertRaises(ValueError):
+                parse_children_list(str(Path(tmp) / 'missing.md'))
+
+    # ── 2026-08-04 补：collect_children 回归（纯锚点 / .html 重定向 / collapsible 分组）──
+
+    def test_collect_children_layout_anchor_not_interfering(self):
+        # VitePress 布局锚点 #VPContent / 正文标题锚点先于导航出现时，不得把 current_a
+        # 误定位到锚点（去 fragment 后与当前页 URL 相同）→ 子页面仍正常收集
+        from web2md import collect_children
+        html = """
+        <div class="Layout"><a href="#VPContent">Skip to content</a></div>
+        <nav><ul>
+        <li><a href="/docs/topic/index.html" class="active">Topic</a>
+          <ul>
+            <li><a href="/docs/topic/child1.html">Child 1</a></li>
+            <li><a href="/docs/topic/child2.html">Child 2</a></li>
+          </ul>
+        </li>
+        </ul></nav>
+        """
+        soup = BeautifulSoup(html, 'lxml')
+        children = collect_children(soup, 'https://docs.example.com/docs/topic/index.html')
+        self.assertEqual(len(children), 2)
+        self.assertEqual(children[0]['title'], 'Child 1')
+        self.assertEqual(
+            children[1]['url'],
+            'https://docs.example.com/docs/topic/child2.html',
+        )
+
+    def test_collect_children_plain_page_html_redirect(self):
+        # 普通页面（非 index）被服务器重定向为去 .html 形式：导航链接 modules_main
+        # （无后缀）与 base_url modules_main.html 归一化后必须匹配，否则误报"无导航子页面"
+        from web2md import collect_children
+        html = """
+        <nav><ul>
+        <li><a href="/modules/modules_main" class="active">Modules Main</a>
+          <ul>
+            <li><a href="/modules/sub/a.html">Sub A</a></li>
+            <li><a href="/modules/sub/b.html">Sub B</a></li>
+          </ul>
+        </li>
+        </ul></nav>
+        """
+        soup = BeautifulSoup(html, 'lxml')
+        children = collect_children(soup, 'https://docs.example.com/modules/modules_main.html')
+        self.assertEqual(len(children), 2)
+        self.assertEqual(children[0]['title'], 'Sub A')
+        self.assertEqual(
+            children[0]['url'],
+            'https://docs.example.com/modules/sub/a.html',
+        )
+
+    def test_collect_children_collapsible_group_grandchild(self):
+        # VitePress 可展开分组（section.VPSidebarItem level-2 collapsible，非 div.level-2）：
+        # 分组下的孙页面必须正确挂载到分组子页面（Drivers）下，而非漏挂
+        from web2md import collect_children
+        html = """
+        <aside class="VPSidebar"><nav class="nav"><div class="group">
+        <section class="VPSidebarItem level-1">
+          <div class="item"><a href="/modules/index.html" class="active">Modules</a></div>
+          <div class="items">
+            <section class="VPSidebarItem level-2 collapsible">
+              <div class="item"><a href="/modules/drivers/index.html">Drivers</a></div>
+              <div class="items">
+                <div class="item"><a href="/modules/drivers/uart.html">UART</a></div>
+                <div class="item"><a href="/modules/drivers/gpio.html">GPIO</a></div>
+              </div>
+            </section>
+            <div class="item"><a href="/modules/sched.html">Scheduler</a></div>
+          </div>
+        </section>
+        </div></nav></aside>
+        """
+        soup = BeautifulSoup(html, 'lxml')
+        children = collect_children(soup, 'https://docs.example.com/modules/index.html')
+        self.assertEqual(len(children), 2)
+        drivers = children[0]
+        self.assertEqual(drivers['title'], 'Drivers')
+        self.assertEqual(len(drivers['children']), 2)
+        self.assertEqual(drivers['children'][0]['title'], 'UART')
+        self.assertEqual(
+            drivers['children'][1]['url'],
+            'https://docs.example.com/modules/drivers/gpio.html',
+        )
+        self.assertEqual(children[1]['title'], 'Scheduler')
+        self.assertEqual(children[1]['children'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

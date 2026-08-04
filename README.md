@@ -64,7 +64,7 @@
 /web2md <URL>
 ```
 
-首次使用时会引导配置 Python 环境（自动搜索或手动指定），同时写入 Bash allow 规则避免后续重复确认。之后记住路径不再询问。
+首次使用时会引导配置 Python 环境（自动搜索或手动指定）。之后记住路径不再询问。
 
 导航子页面批量获取（可选）：`config.py` 的 `collect_children` 开关或 CLI `--children` 按规则解析侧边栏导航抓取子/孙页面；`--children-from <file>` 则按 AI 助手写的清单抓取（规则解析对新站点主题失效时的兜底通道）。
 
@@ -128,7 +128,7 @@ web2md/                            # skill 目录（本仓库）
     ├── find_all_missed.py         # 阶段 C：伪公式扫描辅助
     ├── final_verify.py            # 收尾验证
     └── tests/                     # 本地测试（git 不追踪）
-        ├── selftest.py            # 测试入口（41 用例）
+        ├── selftest.py            # 测试入口（49 用例）
         ├── test_formula_integrity.py
         └── test_sphinx_conversion.py
 
@@ -183,7 +183,7 @@ web2md/                            # skill 目录（本仓库）
 
 ### 质量保障
 
-- `scripts/selftest.py`：58 个离线用例（转换管线、版本号流程、限流重试、对齐、base64 图片、树导入、toc 等），mock 配置与网络，**修改脚本后必须全绿**
+- `scripts/selftest.py`：60 个离线用例（转换管线、版本号流程、限流重试、对齐、base64 图片、树导入、toc 等），mock 配置与网络，**修改脚本后必须全绿**
 - `KNOWN_ISSUES.md`：已知问题与修复记录（现象 / 根因 / 修复 / 排查方法），排查前先读
 - 真实环境验证产物（测试页 / 临时脚本）用后即清
 
@@ -201,7 +201,7 @@ confluence-tools/
 │   ├── debug_utils.py        # 调试日志清理
 │   ├── md_import.py          # Markdown → Confluence
 │   ├── math_upgrade.py       # 数学公式升级
-│   └── selftest.py           # 离线自测（58 用例）
+│   └── selftest.py           # 离线自测（60 用例）
 └── debug/                    # 导入/升级调试快照（自动清理）
 ```
 

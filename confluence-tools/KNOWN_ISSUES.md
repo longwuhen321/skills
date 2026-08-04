@@ -25,6 +25,23 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-04] ==高亮== 正则误配 base64 图片 padding，`<strong>` 进入 src 属性 → 导入 400
+
+- **现象**：含内嵌 base64 图片（`![](data:image/png;base64,...== "title")`）的页面导入报
+  `400 Error parsing xhtml: Unexpected character '<' (code 60) in attribute value`；
+  调试 HTML 中 `<img src="data:...base64<strong>"`，`<strong>` 混入 src 属性值
+  （Altitude Mode (Fixed-Wing) 页面实测，首次 --dir 导入 12 页仅此页失败）。
+- **根因**：`_convert_highlight_marks` 的 `==高亮==` 正则 `==([^\n]*?)==` 把 base64
+  data URI 的 `==` 结尾（base64 padding）当作高亮标记；同一行内两个 base64 图片的
+  `==` 被配对成高亮，中间整段（含 `<img>` 标签）被包成 `<strong>` 并写进 `src`
+  属性，生成畸形 XHTML，Confluence 拒绝解析（报错特征：code 60 = 裸 `<` 出现在属性值）。
+- **修复**：`scripts/md_import.py` `_convert_highlight_marks` 的 re.split 保护模式增加
+  `<img\b[^>]*>` 分支（与既有宏/代码保护一致），`<img>` 标签整体跳过高亮转换；
+  该函数在 `_convert_md_links` 之前执行，img 随后由后者正常处理（data: URI 保留原始引用）。
+- **排查方法**：导入 400 报 `Unexpected character '<' (code 60) in attribute value` 且
+  md 含 base64 内嵌图片时，查 `debug/import/*/before_upload.html` 是否 `<strong>` 出现在
+  `<img src="...">` 属性内；selftest 有 `test_highlight_marks_ignore_base64_padding` 覆盖。
+
 ## [2026-08-03] 自闭合宏（toc 目录宏）破坏保护段分割，图片被吞不转换
 
 - **现象**：TECS 页面（73596957）导入后 3 张图片不显示，storage 中 `<ri:attachment>` 引用

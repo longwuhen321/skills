@@ -33,6 +33,22 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-04：selftest 重复用例清理 + 文档数字/参数同步
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | `scripts/selftest.py` 删除 `TestMdImport` 内重复定义的 `test_upload_attachment_updates_existing`（旧版 session.post/get mock 与新版 session.request 版本共存，旧版被覆盖成死代码），仅保留新版 |
+| 测试 | 60 用例全绿（实测，2026-08-04；文档原 58 为更早时点遗留） |
+| 文档同步 | README / SKILL.md / OPTIMIZATION_SUMMARY 用例数统一为 60；SKILL.md「升级数学公式」补 `--confirm` 参数说明（math_upgrade.py:525 已有该参数，与 config.example.py 注释对齐）；SKILL.md 文件结构"见 skills/.gitignore"笔误改为"见根目录 .gitignore" |
+
+**过程要点**：
+- 08-04 未提交的 base64 高亮保护修复（KNOWN_ISSUES 条目 + `md_import.py` `<img>` 保护 + selftest highlight 用例）保留不动，本次仅清理重复用例与同步文档
+- 实测基线：confluence 60 / web2md 49 / md2zh 10 全绿
+
+**遗留事项更新**：
+- （原）无
+- （新增）无
+
 ### 2026-08-03：md_import 自动目录宏（toc）
 
 | 类别 | 内容 |
@@ -155,7 +171,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 - mathblock `alignment=left` 在 Confluence 9.2.1 服务器实测支持
 - toc 自动目录宏真实验证：73596940（Commands）重跑导入，标题多自动补目录宏
 - 多轮真实页面导入/升级/修复验证（含 --dir 树导入、同名附件更新、自闭合宏修复后回归），全部闭环
-- selftest：58 用例全绿（截至 2026-08-03，含 toc +3 用例）
+- selftest：60 用例全绿（2026-08-04 实测；08-03 条目记 58 为更早时点遗留，本次去重后含 08-04 base64 高亮保护用例）
 
 ## 三、过程中的 bug 序列（按时间）
 
@@ -198,4 +214,4 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 - Confluence：9.2.x（http://<confluence-server>:8090），PAT Bearer 认证
 - Python：`<python 解释器路径>`（需安装 requests / markdown2）
-- 测试命令：`"<python>" scripts/selftest.py` → 全部用例全绿（截至 2026-08-03 为 58 用例）
+- 测试命令：`"<python>" scripts/selftest.py` → 全部用例全绿（截至 2026-08-04 为 60 用例）

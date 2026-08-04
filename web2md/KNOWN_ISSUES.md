@@ -33,7 +33,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
   2. **普通页面 `.html` 后缀不归一化**：服务器把 `modules_main.html` 重定向为 `modules_main`（去扩展名），导航链接却带 `.html`——`_norm_nav_url` 只处理 `index.html`/`index`（目录页场景），普通页面两种形式不匹配。
   3. **带 fragment 的 URL 不触发 `.html` 归一化**：`commands.html#mount` 的 `.html` 被 `#mount` 挡住 → 与 base（纯 URL）归一化结果不一致，单页文档锚点误判（selftest S4/S5/S6 回归失败暴露）。
   4. **可展开分组孙页面挂载失败**：Drivers 是 `section.VPSidebarItem level-2 collapsible`（可展开分组）而非普通子页面的 `div.level-2`——`_item_section` 只接受 `p3.name == 'div'`，对分组返回过窄的 `div.item`，孙页面（10 个驱动分类）inside 检查失败全部漏挂。
-- **修复**：`scripts/web2md.py`——① current_a 定位循环跳过 `href` 以 `#`/`javascript:`/`mailto:` 开头的链接；② `_norm_nav_url` 增加 `.html` 后缀归一化（`elif u.endswith('.html')`）；③ `_norm_nav_url` 开头先 `_strip_fragment` 再去扩展名（保证带锚点 URL 与纯 URL 归一化一致）；④ `_item_section` 的包裹容器条件放宽为 `p3.name in ('div', 'section')` 且带 level- class（兼容 collapsible 分组）。回归测试 V5（纯锚点不干扰）/V6（普通页 .html 重定向）/V7（可展开分组孙页面挂载）新增，selftest 28 用例全绿。
+- **修复**：`scripts/web2md.py`——① current_a 定位循环跳过 `href` 以 `#`/`javascript:`/`mailto:` 开头的链接；② `_norm_nav_url` 增加 `.html` 后缀归一化（`elif u.endswith('.html')`）；③ `_norm_nav_url` 开头先 `_strip_fragment` 再去扩展名（保证带锚点 URL 与纯 URL 归一化一致）；④ `_item_section` 的包裹容器条件放宽为 `p3.name in ('div', 'section')` 且带 level- class（兼容 collapsible 分组）。回归测试 `test_collect_children_layout_anchor_not_interfering`（纯锚点不干扰）/`test_collect_children_plain_page_html_redirect`（普通页 .html 重定向）/`test_collect_children_collapsible_group_grandchild`（可展开分组孙页面挂载）新增，selftest 49 用例全绿（2026-08-04 实测）。
 - **排查方法**：VitePress 站点规则路径误报"无子页面"时，先核对 `final_url` 是否被重定向为去 `.html` 形式（普通页 vs index 页）；再检查页面 DOM 中是否存在 `#VPContent` 类布局锚点先于导航出现；孙页面缺失时检查分组是否为 `section.level-N collapsible`（非 `div.level-N`）。
 
 ## [2026-08-03] final_verify 图片路径含括号被正则截断误报缺失（已修复）

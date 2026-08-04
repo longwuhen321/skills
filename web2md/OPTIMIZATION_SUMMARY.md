@@ -33,6 +33,24 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-04：补 --children-from 与 collect_children 回归测试 + 文档同步
+
+| 类别 | 内容 |
+|------|------|
+| 测试 | `test_sphinx_conversion.py` +8 用例：`parse_children_list` 清单解析 5 用例（嵌套 / 注释备注 / 深层级 / 缺 URL 与无父孙页 / `*` 与 `<>` 与错误路径）+ `collect_children` 3 用例（`#VPContent` 纯锚点不干扰 current_a、普通页 `.html` 重定向归一化、collapsible 分组孙页面挂载）——对应 08-03 KNOWN_ISSUES 声称已加但实际丢失的 C1-C5 / V6 / V7 |
+| 测试 | selftest 49 用例全绿（实测，2026-08-04） |
+| 文档同步 | OPTIMIZATION_SUMMARY / KNOWN_ISSUES 用例数统一为 49、历史编号 V5/V6/V7 改为实际描述性测试名；README web2md 用例数 41→49、删除"同时写入 Bash allow 规则"句（与 SKILL.md 第一步"按平台方式设置免确认白名单"一致）；遗留事项双轨合并 |
+
+**过程要点**：
+- 丢失原因推测：08-04 早间测试文件被整批恢复（时间戳 08:39:55 一致）时，未提交的新增用例随工作区丢失；代码 `parse_children_list`（web2md.py:942）、`_norm_nav_url` `.html` 归一化、`_item_section` div/section 放宽均仍在
+- 测试命名沿用现有描述性风格（非历史编号），KNOWN_ISSUES 中的 V5/V6/V7 引用已改为实际测试名
+- 顺带修复：新增用例中 `empty.md` 写入曾因缩进错误掉出 `TemporaryDirectory` 块导致 FileNotFoundError，已修正缩进（与测试本身无关）
+
+**遗留事项更新**：
+- （原）`--children-from` 依赖站点静态渲染侧边栏 → 不变
+- （原）清单是 AI 手工维护的产物，多页批量抓取时 AI 需逐个页面写清单 → 不变
+- （新增）无
+
 ### 2026-08-03：阶段 C 公式规则外置（references/formula-conversion-rules.md）
 
 | 类别 | 内容 |
@@ -57,7 +75,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 | 新功能 | `--children-from <file>`：AI 助手写子/孙页面清单（`{项目}/.web2md_tools/intermediate/children_list.md`），脚本解析后按清单抓取落盘——规则解析（`collect_children`）降级为默认快速路径，AI 通道为并行完整通道（新主题漏识别/规则异常时 AI 接管，不再依赖改规则） |
 | 脚本改动 | `web2md.py` 新增 `parse_children_list()`（清单机械解析：注释/备注忽略、缩进=层级≤2、缺 URL/无父孙页面跳过并警告、`-`/`*` 标记、`<>` 剥除）；`fetch_and_process` 支持外部 children_list（优先于规则）；`main` 新增 `--children-from` 参数 |
 | 流程改动 | `SKILL.md` 新增「AI 助手判断通道」小节（web_fetch 读导航 → 写清单 → `--children-from` 执行），同步修正触发条件表述、intermediate 说明、清理约定、测试说明、防御性表 |
-| 测试 | `test_sphinx_conversion.py` 新增 C1-C5 共 5 用例（清单解析：嵌套/注释/备注/深层级/缺 URL/星号/<>/无父孙页面/文件缺失/空清单）→ selftest 25 用例全绿 |
+| 测试 | `test_sphinx_conversion.py` 新增 C1-C5 共 5 用例（清单解析：嵌套/注释/备注/深层级/缺 URL/星号/<>/无父孙页面/文件缺失/空清单）→ selftest 49 用例全绿（2026-08-04 实测校正） |
 | 验证 | 真实端到端：清单（2 子 + 1 孙）→ 嵌套落盘正确（`父/子/孙` 三层文件夹，孙页面挂在子页面下） |
 
 **过程要点**：
@@ -90,7 +108,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 - PX4 `config_fw/` 端到端：父 + 4 子页面抓取、标题文件夹嵌套落盘正确
 - Wikipedia 单页：58 公式、429 退避、13/13 图片
-- selftest 34 用例全绿
+- selftest 49 用例全绿（2026-08-04 实测：formula 13 + sphinx 36）
 
 ## 三、过程中的 bug 序列
 
@@ -106,7 +124,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 ## 五、遗留事项
 
-- `collect_children` 只按导航树收集子+孙，不递归子页面正文引用（设计如此）
+- 导航收集范围限定侧边栏导航树（子+孙，**不递归子页面正文引用**，设计如此）；规则失效/新主题漏识别时由 `--children-from` AI 通道兜底（已实现，2026-08-03）
 - 导航解析已验证 Sphinx li/ul 与 VitePress div/section；纯 JS 渲染导航的站点可能需要扩展
 - 标题文件夹命名由 AI 助手酌情调整（须符合规范），脚本默认 `sanitize_filename`
 - `config.py` 的 `collect_children` 默认 false，需用户开启
