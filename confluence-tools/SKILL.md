@@ -98,6 +98,8 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 后续调用直接从 `scripts/config.py` 读取，不再询问。配置失效（401/403/连接超时）时提示用户重新走配置向导。
 
+**运行期配置补齐**：运行期发现 config.py 缺 `export_config` 配置项时，咨询用户该参数的配置值，然后补齐到 config.py 中。
+
 ---
 
 ## 子命令

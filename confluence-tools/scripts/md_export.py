@@ -233,7 +233,14 @@ class ConfluenceExporter:
                 tocs.append(p)
                 div = soup.new_tag('div')
                 div.string = p
-                macro.replace_with(div)
+                # toc 宏常嵌在 h1 内（<h1><ac:toc/><br/>标题</h1>）：占位 div 移到
+                # 父元素之前，保证 markdownify 输出时 [toc] 独占一行（Typora 目录要求）
+                parent = macro.parent
+                if parent is not None and parent.name not in ('[document]', 'html', 'body'):
+                    parent.insert_before(div)
+                    macro.decompose()
+                else:
+                    macro.replace_with(div)
             elif name in ('note', 'info', 'warning', 'error', 'tip', 'success'):
                 # 提示宏 → 引用块（保留宏内部内容）
                 body = macro.find(['ac:rich-text-body', 'ac:plain-text-body'])
@@ -254,6 +261,52 @@ class ConfluenceExporter:
                 self.stats['skipped_macros'].add(name)
 
         return math_blocks, math_inlines, codes, tocs, unknowns
+
+    def _drop_empty_pres(self, soup):
+        """删除空 <pre>（仅 <br>/空白，页面作者留白用）——避免 markdownify 输出空代码围栏"""
+        for pre in soup.find_all('pre'):
+            if not pre.get_text(strip=True):
+                pre.decompose()
+
+    def _convert_links(self, soup):
+        """ac:link（内链/外链/附件/用户链接）→ <a> 标签，由 markdownify 转 markdown 链接
+
+        ri:url → 外链；ri:page / ri:child-page → 有 content-id 时生成页面 URL，
+        仅有 content-title（无 id）则保留标题文本（无法构造可靠 URL）。
+        显示文本优先取 ac:link-body，缺失时用标题/URL 兜底。
+        """
+        for link in soup.find_all('ac:link'):
+            body = link.find('ac:link-body')
+            text = body.get_text(strip=True) if body else ''
+            href = ''
+            ri = link.find(['ri:page', 'ri:child-page', 'ri:url',
+                            'ri:attachment', 'ri:user'])
+            if ri is None:
+                link.decompose()
+                continue
+            if ri.name == 'ri:url':
+                href = ri.get('ri:value', '')
+                if not text:
+                    text = href
+            elif ri.name in ('ri:page', 'ri:child-page'):
+                cid = ri.get('ri:content-id', '')
+                title = ri.get('ri:content-title', '')
+                if not text:
+                    text = title or '页面'
+                if cid:
+                    href = f"{self.base_url}/pages/viewpage.action?pageId={cid}"
+            elif ri.name == 'ri:attachment':
+                if not text:
+                    text = ri.get('ri:filename', '附件')
+            else:  # ri:user
+                if not text:
+                    text = ri.get('ri:userkey', '用户')
+            if not text:
+                link.decompose()
+                continue
+            a = soup.new_tag('a', href=href) if href else soup.new_tag('span')
+            a.string = text
+            link.replace_with(a)
 
     def _code_language_callback(self, el):
         """markdownify 的 convert_pre 把 <pre> 元素传给回调，需从内部
@@ -336,7 +389,9 @@ class ConfluenceExporter:
         html_content = self._protect_cdata(storage_html)
         soup = BeautifulSoup(html_content, 'html.parser')
 
+        self._drop_empty_pres(soup)
         math_blocks, math_inlines, codes, tocs, unknowns = self._convert_macros(soup)
+        self._convert_links(soup)
         self._convert_images(soup, page_id, page_dir)
         tables = self._protect_complex_tables(soup)
 

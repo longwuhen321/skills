@@ -120,10 +120,11 @@ def fetch_page(session, base_url, page_id, expand='body.storage,version,space'):
 def load_config():
     """从 scripts/config.py 读取配置，返回 dict
 
-    配置文件定义了四个分组字典：
+    配置文件定义了五个分组字典：
         common_config   — 通用（url、token、python_path 等）
         import_config   — md_import 专属（space）
         upgrade_config  — math_upgrade 专属（对齐、递归、页面等）
+        export_config   — md_export 专属（输出目录、递归、空间）
         debug_config    — 调试日志（阈值、保留数）
 
     返回值即为这四个 dict 组成的 dict，脚本按需取用。
@@ -158,5 +159,6 @@ def load_config():
         'common_config': common,
         'import_config': ns.get('import_config', {}),
         'upgrade_config': ns.get('upgrade_config', {}),
+        'export_config': ns.get('export_config', {}),
         'debug_config': ns.get('debug_config', {}),
     }

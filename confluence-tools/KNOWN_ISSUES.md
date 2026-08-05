@@ -25,6 +25,21 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-05] load_config 漏组装 export_config 分组：md_export 配置永远不生效
+
+- **现象**：config.py 补写了 `export_config`（output_dir=绝对路径），但导出仍输出到默认相对目录 `confluence_export`；`python -c "import config"` 能看到配置，`load_config()` 却返回 `export_config=None`。
+- **根因**：`scripts/common.py` `load_config()` 的 return dict 只组装了 4 个分组（common/import/upgrade/debug），**漏了后来新增的 `export_config`**——md_export 的 `cfg.get('export_config', {})` 永远拿到空 dict 走代码默认值。selftest 未暴露：TestMdExport 用 `patch('md_export.load_config', return_value=MOCK_CFG)`，mock 配置里有 export_config，绕过真实加载路径。
+- **修复**：`scripts/common.py` `load_config()` return 增加 `'export_config': ns.get('export_config', {})`，docstring 同步为"五个分组"。
+- **排查方法**：config.py 有配置但脚本行为像没读到（用默认值）时，先 `load_config()` 打印分组是否齐全，再查 `common.py` 的 return 组装是否漏了新分组；selftest 有 `test_load_config_returns_export_config` 覆盖（真实写临时 config.py 走 load_config 全路径）。
+- **教训**：新增配置分组时，`common.py` 的 `load_config()` 组装、`config.example.py` 模板、SKILL.md 配置向导三处要同步——本 bug 正是"模板与向导已同步、加载器漏了"的典型。
+
+## [2026-08-05] md_export：toc 宏嵌在 h1 内被并成一行、空 pre 导出为空代码围栏、ac:link 内链丢失
+
+- **现象**：导出 rcS 页面（73597027）后：① `[toc]` 目录失效——md 中出现 `# [toc] 前提：`（toc 与标题合并成一行，Typora 要求 `[toc]` 独占一行才渲染目录）；② 4 个空代码围栏（``` 空 ```）——页面上是作者留白用的空等宽块，用户误以为"折叠的代码丢失"；③ 内链丢失——"查看： 。"处 `ac:link` 链接文字消失（`<ac:link><ri:page ri:content-title="rcS脚本解读"/></ac:link>`）。
+- **根因**：① 原始 storage 为 `<h1><ac:structured-macro ac:name="toc" .../><br/>前提：</h1>`——toc 宏嵌在 h1 **内部**，`_convert_macros` 用占位 `<div>` **原位替换**，markdownify 把 h1 内全部内容合并输出一行；② 页面含 `<pre><br /></pre>`（无文本的空 pre），markdownify 转成空代码围栏；③ `ac:link` 宏（内链/外链/附件/用户）完全未处理，标签被 markdownify 剥掉后文字也丢。
+- **修复**：`scripts/md_export.py`——① toc 分支：占位 div 不再原位替换，父元素非 document/body 时 `parent.insert_before(div)` + `macro.decompose()`，`[toc]` 独占一行；② 新增 `_drop_empty_pres`（`pre.get_text(strip=True)` 为空 → decompose），在 `_convert_macros` 前调用；③ 新增 `_convert_links`：`ac:link` → `<a>` 标签（markdownify 转 markdown 链接），ri:url → 外链、ri:page/ri:child-page → 有 content-id 生成 `${base_url}/pages/viewpage.action?pageId={id}`、无 id 保留标题文本、ri:attachment/ri:user 保留兜底文本；显示文本优先 `ac:link-body`。
+- **排查方法**：md 出现 `# [toc] xxx`（toc 与标题同行）、` ``` ` 后紧跟 ` ``` ` 的空围栏、正文中链接文字消失（原文 `<ac:link>` 结构）即此类；selftest 有 `test_toc_inside_h1_stays_on_own_line` / `test_empty_pre_dropped_no_empty_fence` / `test_ac_link_page_with_id_to_markdown_link` / `test_ac_link_page_without_id_keeps_title` / `test_ac_link_url_with_body_to_markdown_link` 覆盖。
+
 ## [2026-08-04] debug 清理失效：时间戳目录扫描不到 + 完整路径排序误删最新快照
 
 - **现象**：`debug/import` 子目录累积 43 个仍不清理（`keep_recent=20` 形同虚设）；改为递归扫描后 `debug/export` 最新快照被误删（export 目录时间戳最新却被当"最旧"优先删）。

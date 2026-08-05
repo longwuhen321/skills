@@ -173,6 +173,21 @@ class TestCommon(unittest.TestCase):
                 cfg = load_config()
         self.assertEqual(cfg['common_config']['confluence_token'], 'file-token')
 
+    def test_load_config_returns_export_config(self):
+        # 回归：load_config 曾漏组装 export_config 分组，导致 md_export
+        # 永远拿不到 config.py 中的导出配置（输出目录/递归/空间）
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, 'config.py')
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                f.write("common_config = {'confluence_url': 'http://x',"
+                        " 'confluence_token': 't'}\n")
+                f.write("export_config = {'output_dir': 'E:/out',"
+                        " 'recursive': False, 'space': 'ES'}\n")
+            with patch('common.CONFIG_PATH', cfg_path):
+                cfg = load_config()
+        self.assertEqual(cfg['export_config']['output_dir'], 'E:/out')
+        self.assertEqual(cfg['export_config']['space'], 'ES')
+
 
 class TestMdImport(unittest.TestCase):
 
@@ -912,6 +927,41 @@ class TestMdExport(unittest.TestCase):
         html = '<ac:structured-macro ac:name="toc" ac:schema-version="1" data-layout="default"/>'
         md = self._convert(html)
         self.assertIn('[toc]', md)
+
+    def test_toc_inside_h1_stays_on_own_line(self):
+        # toc 宏嵌在 h1 内（<h1><ac:toc/><br/>标题</h1>）时，[toc] 必须独占一行，
+        # 否则 Typora 不渲染目录（回归：曾导出为 "# [toc] 前提："）
+        html = ('<h1><ac:structured-macro ac:name="toc" ac:schema-version="1"/>'
+                '<br/>前提：</h1><p>正文</p>')
+        md = self._convert(html)
+        self.assertIn('[toc]\n\n# 前提：', md)
+
+    def test_empty_pre_dropped_no_empty_fence(self):
+        # 页面留白用的空 <pre><br/></pre> 不应导出为空代码围栏
+        html = '<p>文字</p><pre><br/></pre><pre>   </pre><p>更多</p>'
+        md = self._convert(html)
+        self.assertNotIn('```', md)
+
+    def test_ac_link_page_with_id_to_markdown_link(self):
+        html = ('<p>查看：<ac:link><ri:page ri:content-id="12345" '
+                'ri:content-title="rcS脚本解读"/></ac:link>。</p>')
+        md = self._convert(html)
+        self.assertIn('[rcS脚本解读](http://test:8090/pages/viewpage.action?pageId=12345)', md)
+
+    def test_ac_link_page_without_id_keeps_title(self):
+        # 无 content-id 的内链无法构造 URL：至少保留页面标题文本，不丢内容
+        html = ('<p>参数详情可查看 <ac:link>'
+                '<ri:page ri:content-title="控制分配(Control Allocation) 相关参数"/>'
+                '</ac:link>，</p>')
+        md = self._convert(html)
+        self.assertIn('控制分配(Control Allocation) 相关参数', md)
+        self.assertNotIn('ac:link', md)
+
+    def test_ac_link_url_with_body_to_markdown_link(self):
+        html = ('<p><ac:link><ri:url ri:value="https://example.com/a"/>'
+                '<ac:link-body>示例</ac:link-body></ac:link></p>')
+        md = self._convert(html)
+        self.assertIn('[示例](https://example.com/a)', md)
 
     def test_note_macro_to_blockquote(self):
         html = ('<ac:structured-macro ac:name="note" ac:schema-version="1">'
