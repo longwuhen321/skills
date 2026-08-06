@@ -19,10 +19,24 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 CONFIG_VALUES = {"user", "ai"}
-PYTHON_MODES = {"auto", "explicit"}
 MINIMUM_PYTHON = (3, 8)
-DEFAULT_TARGET_BLOCK_BYTES = 8000
-DEFAULT_MAX_BLOCK_BYTES = 10000
+CONFIG_PY_TEMPLATE = (
+    "# ============================================================\n"
+    "# md2zh — 真实配置（本机路径，已被 .gitignore 排除，禁止提交）\n"
+    "# 配置来源：/md2zh 配置向导（用户输入）。\n"
+    "# ============================================================\n"
+    "\n"
+    "# ==================== md2zh 配置 ====================\n"
+    "md2zh_config = {{\n"
+    '    "python_path": {python_path!r},\n'
+    '    "ambiguous_content_decider": {decider!r},\n'
+    '    "output_dir": {output_dir!r},\n'
+    '    "tree_translation": {tree_translation!r},\n'
+    '    "max_block_chars": {max_block_chars!r},\n'
+    "}}\n"
+)
+DEFAULT_MAX_BLOCK_CHARS = 16000
+ARCHIVE_MAX_ENTRIES = 20
 MAX_BLOCK_ATTEMPTS = 3
 TOKEN_RE = re.compile(r"(?:@@MD2ZH:PROTECT:[A-Za-z0-9_-]+:[0-9]+@@|⟦MD2ZH:[^⟧]+⟧)")
 SEGMENT_LINE_RE = re.compile(r"^@@MD2ZH:SEG:(block-[0-9]+):([0-9]+)@@$")
@@ -101,43 +115,9 @@ def load_json(path: Path) -> Any:
         return json.load(handle)
 
 
-def project_config_path(project_root: Path) -> Path:
-    return Path(project_root) / ".md2zh_tools" / "config.json"
-
-
-def python_candidates(
-    project_root: Path,
-    which=shutil.which,
-    platform_name: Optional[str] = None,
-    current_executable: Optional[str] = sys.executable,
-) -> List[Dict[str, Any]]:
-    project_root = Path(project_root)
-    platform_name = platform_name or os.name
-    suffix = Path("Scripts") / "python.exe" if platform_name == "nt" else Path("bin") / "python"
-    candidates: List[Dict[str, Any]] = []
-    seen = set()
-
-    def add(command: Sequence[str], source: str) -> None:
-        command = [str(item) for item in command]
-        key = (os.path.normcase(os.path.abspath(command[0])),) + tuple(command[1:])
-        if key not in seen:
-            seen.add(key)
-            candidates.append({"command": command, "source": source})
-
-    for directory in (".venv", "venv"):
-        executable = project_root / directory / suffix
-        if executable.is_file():
-            add([str(executable)], "project:{}".format(directory))
-    for name in ("python", "python3"):
-        executable = which(name)
-        if executable:
-            add([str(executable)], "path:{}".format(name))
-    launcher = which("py")
-    if launcher:
-        add([str(launcher), "-3"], "path:py -3")
-    if current_executable and Path(current_executable).is_file():
-        add([str(Path(current_executable).resolve())], "current-interpreter")
-    return candidates
+def global_config_path() -> Path:
+    """Path to the single skill-level config file (<skill>/scripts/config.py)."""
+    return Path(__file__).resolve().parent / "config.py"
 
 
 def probe_python(command: Sequence[str], runner=subprocess.run) -> Dict[str, Any]:
@@ -175,16 +155,10 @@ def probe_python(command: Sequence[str], runner=subprocess.run) -> Dict[str, Any
 
 
 def resolve_python(
-    project_root: Path,
-    mode: str,
     python_path: Optional[str] = None,
     runner=subprocess.run,
 ) -> Dict[str, Any]:
-    if mode not in PYTHON_MODES:
-        raise ValueError("python mode must be 'auto' or 'explicit'")
-    if mode == "explicit":
-        if not python_path:
-            raise ValueError("python_path is required in explicit mode")
+    if python_path:
         path = Path(python_path).expanduser()
         if not path.is_absolute():
             raise ValueError("python_path must be absolute")
@@ -193,20 +167,13 @@ def resolve_python(
         resolved = probe_python([str(path.resolve())], runner=runner)
         resolved["source"] = "explicit"
         return resolved
-    if python_path:
-        raise ValueError("python_path is not allowed in auto mode")
 
-    errors = []
-    for candidate in python_candidates(project_root):
-        try:
-            resolved = probe_python(candidate["command"], runner=runner)
-            resolved["source"] = candidate["source"]
-            return resolved
-        except PythonRuntimeError as exc:
-            errors.append("{}: {}".format(candidate["source"], exc))
-    if not errors:
-        raise PythonRuntimeError("no Python candidates were found; md2zh requires Python 3.8+")
-    raise PythonRuntimeError("no compatible Python 3.8+ runtime was found: {}".format("; ".join(errors)))
+    # 缺省自动探测：只探测当前解释器（AI 正用它运行 pipeline，
+    # 满足"全程同一个 Python"约束）；候选扫描是 AI 向导的工作，脚本不做。
+    current = Path(sys.executable).resolve()
+    resolved = probe_python([str(current)], runner=runner)
+    resolved["source"] = "current-interpreter"
+    return resolved
 
 
 def same_executable(left: str, right: str) -> bool:
@@ -216,13 +183,13 @@ def same_executable(left: str, right: str) -> bool:
         return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
 
 
-def ensure_current_python(project_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
-    python_config = config["python"]
-    resolved = resolve_python(
-        project_root,
-        python_config["mode"],
-        python_config.get("path"),
-    )
+def ensure_current_python(config: Dict[str, Any]) -> Dict[str, Any]:
+    python_path = config.get("python_path")
+    if not isinstance(python_path, str) or not python_path:
+        raise ConfigRequiredError(
+            "md2zh_config has no python_path; run the /md2zh configuration wizard"
+        )
+    resolved = resolve_python(python_path)
     if not same_executable(sys.executable, resolved["executable"]):
         raise PythonRuntimeError(
             "md2zh must run with {}; current interpreter is {}".format(
@@ -232,63 +199,100 @@ def ensure_current_python(project_root: Path, config: Dict[str, Any]) -> Dict[st
     return resolved
 
 
+def _read_config_value(path: Path, key: str, default: Any = None) -> Any:
+    """Leniently read one md2zh_config key from a config file (missing/broken → default)."""
+    try:
+        namespace: Dict[str, Any] = {}
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
+        config = namespace.get("md2zh_config")
+        if isinstance(config, dict):
+            return config.get(key, default)
+    except (OSError, SyntaxError, ValueError):
+        pass
+    return default
+
+
 def configure_project(
-    project_root: Path,
     decider: str,
-    python_mode: str,
     python_path: Optional[str] = None,
+    config_path: Optional[Path] = None,
+    output_dir: Optional[str] = None,
+    tree_translation: Optional[bool] = None,
+    max_block_chars: Optional[int] = None,
 ) -> Path:
     if decider not in CONFIG_VALUES:
         raise ValueError("ambiguous_content_decider must be 'user' or 'ai'")
-    path = project_config_path(Path(project_root))
-    resolved = resolve_python(project_root, python_mode, python_path)
+    path = Path(config_path) if config_path else global_config_path()
+    resolved = resolve_python(python_path)
     if not same_executable(sys.executable, resolved["executable"]):
         raise PythonRuntimeError(
             "configure md2zh with {}; current interpreter is {}".format(
                 resolved["executable"], sys.executable
             )
         )
-    data: Dict[str, Any] = {}
-    if path.exists():
-        existing = load_json(path)
-        if isinstance(existing, dict):
-            data.update(existing)
-    data["ambiguous_content_decider"] = decider
-    data["python"] = {"mode": python_mode}
-    if python_mode == "explicit":
-        data["python"]["path"] = str(Path(resolved["executable"]).resolve())
-    write_json_atomic(path, data)
+    if output_dir is None:
+        output_dir = _read_config_value(path, "output_dir", "")
+    if not isinstance(output_dir, str):
+        output_dir = ""
+    if tree_translation is None:
+        tree_translation = _read_config_value(path, "tree_translation", True)
+    if not isinstance(tree_translation, bool):
+        tree_translation = True
+    if max_block_chars is None:
+        max_block_chars = _read_config_value(path, "max_block_chars", DEFAULT_MAX_BLOCK_CHARS)
+    if not isinstance(max_block_chars, int) or isinstance(max_block_chars, bool):
+        max_block_chars = DEFAULT_MAX_BLOCK_CHARS
+    payload = CONFIG_PY_TEMPLATE.format(
+        python_path=str(Path(resolved["executable"]).resolve()),
+        decider=decider,
+        output_dir=output_dir,
+        tree_translation=tree_translation,
+        max_block_chars=max_block_chars,
+    )
+    write_bytes_atomic(path, payload.encode("utf-8"))
     return path
 
 
-def load_project_config(project_root: Path) -> Dict[str, Any]:
-    path = project_config_path(Path(project_root))
+def load_global_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
+    path = Path(config_path) if config_path else global_config_path()
     if not path.exists():
         raise ConfigRequiredError(
-            "missing {}; ask once for the ambiguity decider and Python runtime mode".format(path)
+            "missing {}; run the /md2zh configuration wizard once".format(path)
         )
-    data = load_json(path)
-    decider = data.get("ambiguous_content_decider") if isinstance(data, dict) else None
+    namespace: Dict[str, Any] = {}
+    try:
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise PipelineError("cannot load {}: {}".format(path, exc)) from exc
+    config = namespace.get("md2zh_config")
+    if not isinstance(config, dict):
+        raise ConfigRequiredError("missing md2zh_config dict in {}".format(path))
+    decider = config.get("ambiguous_content_decider")
     if decider not in CONFIG_VALUES:
-        raise PipelineError("invalid ambiguous_content_decider in {}".format(path))
-    python_config = data.get("python")
-    if not isinstance(python_config, dict):
         raise ConfigRequiredError(
-            "missing Python runtime selection in {}; ask only for explicit or auto mode".format(path)
+            "missing ambiguous_content_decider in {}; run the /md2zh configuration wizard".format(path)
         )
-    mode = python_config.get("mode")
-    if mode not in PYTHON_MODES:
-        raise PipelineError("invalid Python runtime mode in {}".format(path))
-    if mode == "explicit":
-        configured_path = python_config.get("path")
-        if not isinstance(configured_path, str) or not configured_path:
-            raise PipelineError("missing explicit Python path in {}".format(path))
-        python_config = {"mode": mode, "path": configured_path}
-    else:
-        if "path" in python_config:
-            raise PipelineError("auto Python mode must not contain a path in {}".format(path))
-        python_config = {"mode": mode}
-    return {"ambiguous_content_decider": decider, "python": python_config}
+    python_path = config.get("python_path")
+    if not isinstance(python_path, str) or not python_path:
+        raise ConfigRequiredError(
+            "missing python_path in {}; run the /md2zh configuration wizard".format(path)
+        )
+    output_dir = config.get("output_dir")
+    if not isinstance(output_dir, str):
+        output_dir = ""
+    tree_translation = config.get("tree_translation")
+    if not isinstance(tree_translation, bool):
+        tree_translation = True
+    max_block_chars = config.get("max_block_chars")
+    if not isinstance(max_block_chars, int) or isinstance(max_block_chars, bool):
+        max_block_chars = DEFAULT_MAX_BLOCK_CHARS
+    return {
+        "ambiguous_content_decider": decider,
+        "python_path": python_path,
+        "output_dir": output_dir,
+        "tree_translation": tree_translation,
+        "max_block_chars": max_block_chars,
+    }
 
 
 def ensure_state_runtime(state: Dict[str, Any]) -> None:
@@ -302,6 +306,22 @@ def ensure_state_runtime(state: Dict[str, Any]) -> None:
                 executable, sys.executable
             )
         )
+
+
+def default_tools_root() -> Path:
+    """日志产物根目录：skill 根目录下的 debug/（skill 根 = scripts 的父目录）。
+
+    旧版为 {项目根}/.md2zh_tools/，2026-08-06 起迁移到 <skill>/debug/。
+    """
+    return Path(__file__).resolve().parent.parent / "debug"
+
+
+def state_tools_root(state: Dict[str, Any]) -> Path:
+    """state 中记录的日志根目录；旧 state 无 tools_root 时回退 project_root/.md2zh_tools。"""
+    root = state.get("tools_root")
+    if isinstance(root, str) and root:
+        return Path(root).resolve()
+    return (Path(state["project_root"]) / ".md2zh_tools").resolve()
 
 
 def source_relative_path(source: Path, project_root: Path) -> str:
@@ -862,41 +882,61 @@ def segment_marker(block_id: str, number: int) -> str:
 def translation_block_surface(units: Sequence[Dict[str, Any]], block_id: str) -> str:
     lines: List[str] = []
     for number, unit in enumerate(units, 1):
-        lines.extend((segment_marker(block_id, number), unit["template"]))
+        lines.append(segment_marker(block_id, number))
+        lines.extend(unit["template"].split("\n"))   # 段落 unit 可含多行
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def translatable_chars(unit: Dict[str, Any]) -> int:
+    """可译字符数 = 模板去除保护标记后的可见文本长度（等待翻译的字符）。"""
+    return len(visible_template_text(unit["template"]))
 
 
 def build_translation_blocks(
     units: Sequence[Dict[str, Any]],
-    target_bytes: int = DEFAULT_TARGET_BLOCK_BYTES,
-    max_bytes: int = DEFAULT_MAX_BLOCK_BYTES,
+    max_chars: int = DEFAULT_MAX_BLOCK_CHARS,
 ) -> List[Dict[str, Any]]:
-    if target_bytes <= 0 or max_bytes < target_bytes:
-        raise ValueError("block byte budgets must satisfy 0 < target <= max")
+    """Group units into blocks with heading sections as the natural boundary.
 
+    Each heading section (a heading unit plus everything until the next
+    heading) becomes its own block when it fits within `max_chars`;
+    an over-sized section is split at unit boundaries (paragraph/line
+    edges), never inside a unit. The pre-heading file head is its own
+    section. Units keep source order.
+    """
+    if max_chars <= 0:
+        raise ValueError("block char budget must be positive")
+
+    # 1) section boundaries: every heading unit starts a new section
+    sections: List[Tuple[int, int]] = []
+    start = 0
+    for index, unit in enumerate(units):
+        if unit["kind"] == "heading" and index > start:
+            sections.append((start, index))
+            start = index
+    sections.append((start, len(units)))
+
+    # 2) each section is one group; split only when it exceeds max_chars
     groups: List[List[Dict[str, Any]]] = []
-    current: List[Dict[str, Any]] = []
-    current_bytes = 0
-    for unit in units:
-        estimated_marker = "@@MD2ZH:SEG:block-0000:0000@@"
-        entry_bytes = len((estimated_marker + "\n" + unit["template"] + "\n").encode("utf-8"))
-        starts_new_line = not current or unit["line_start"] != current[-1]["line_start"]
-        natural_boundary = unit["kind"] == "heading" and current_bytes >= target_bytes
-        hard_boundary = current_bytes + entry_bytes > max_bytes
-        if current and starts_new_line and (natural_boundary or hard_boundary):
+    for section_start, section_end in sections:
+        current: List[Dict[str, Any]] = []
+        current_chars = 0
+        for unit in units[section_start:section_end]:
+            unit_chars = translatable_chars(unit)
+            if current and current_chars + unit_chars > max_chars:
+                groups.append(current)
+                current = []
+                current_chars = 0
+            current.append(unit)
+            current_chars += unit_chars
+        if current:
             groups.append(current)
-            current = []
-            current_bytes = 0
-        current.append(unit)
-        current_bytes += entry_bytes
-    if current:
-        groups.append(current)
 
     blocks: List[Dict[str, Any]] = []
     for number, group in enumerate(groups, 1):
         block_id = "block-{:04d}".format(number)
         surface = translation_block_surface(group, block_id)
-        sections = [unit["section"] for unit in group if unit["section"]]
+        sections_seen = [unit["section"] for unit in group if unit["section"]]
         blocks.append(
             {
                 "id": block_id,
@@ -904,8 +944,9 @@ def build_translation_blocks(
                 "unit_count": len(group),
                 "line_start": group[0]["line_start"],
                 "line_end": group[-1]["line_end"],
-                "section_start": sections[0] if sections else "",
-                "section_end": sections[-1] if sections else "",
+                "section_start": sections_seen[0] if sections_seen else "",
+                "section_end": sections_seen[-1] if sections_seen else "",
+                "translatable_chars": sum(translatable_chars(unit) for unit in group),
                 "surface_bytes": len(surface.encode("utf-8")),
                 "surface_sha256": sha256_bytes(surface.encode("utf-8")),
             }
@@ -942,24 +983,23 @@ def extract_files(
     state_path: Path,
     units_path: Path,
     project_root: Path,
+    config_path: Optional[Path] = None,
+    tools_root: Optional[Path] = None,
     timestamp: Optional[str] = None,
-    target_block_bytes: int = DEFAULT_TARGET_BLOCK_BYTES,
-    max_block_bytes: int = DEFAULT_MAX_BLOCK_BYTES,
 ) -> Dict[str, Any]:
     source_path = Path(source_path).resolve(strict=True)
     state_path = Path(state_path)
     units_path = Path(units_path)
     project_root = Path(project_root).resolve(strict=True)
-    config = load_project_config(project_root)
-    runtime = ensure_current_python(project_root, config)
+    tools_root = Path(tools_root).resolve() if tools_root else default_tools_root()
+    config = load_global_config(config_path)
+    runtime = ensure_current_python(config)
     raw = source_path.read_bytes()
     bom = raw.startswith(b"\xef\xbb\xbf")
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise PipelineError("source must be UTF-8 or UTF-8 with BOM: {}".format(exc)) from exc
-    if RESERVED_NAMESPACE_RE.search(text):
-        raise PipelineError("source contains the reserved MD2ZH marker namespace")
 
     lines = split_lines(text)
     reference_ids = collect_reference_ids(lines)
@@ -981,6 +1021,15 @@ def extract_files(
         template, tokens = inline_template(original, tentative_id, reference_ids)
         if not LATIN_RE.search(visible_template_text(template)):
             return None
+        # 裸可见文本中的保留标记字样（非受保护 token 内）必须拒绝；
+        # 行内代码/公式等 token 内的标记字样会被整体保护，天然安全。
+        unprotected = template
+        for token in tokens:
+            unprotected = unprotected.replace(token["marker"], "", 1)
+        if RESERVED_NAMESPACE_RE.search(unprotected):
+            raise PipelineError(
+                "source contains the reserved MD2ZH marker namespace in translatable text"
+            )
         unit_number += 1
         item = {
             "id": tentative_id,
@@ -999,11 +1048,29 @@ def extract_files(
         units.append(item)
         return item
 
+    paragraph_buffer: Optional[Dict[str, int]] = None
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_buffer
+        if paragraph_buffer is not None:
+            item = add_unit(
+                paragraph_buffer["start"],
+                paragraph_buffer["end"],
+                "text",
+                paragraph_buffer["line_start"],
+                section,
+            )
+            if item:
+                item["line_end"] = paragraph_buffer["line_end"]
+            paragraph_buffer = None
+
     for index, line in enumerate(lines):
         content = line["content"]
         if index in protected_lines:
+            flush_paragraph()
             continue
         if index in footnote_continuations:
+            flush_paragraph()
             leading = len(content) - len(content.lstrip(" \t"))
             end = len(content.rstrip(" \t"))
             if leading < end:
@@ -1017,6 +1084,7 @@ def extract_files(
             continue
         footnote = FOOTNOTE_DEFINITION_RE.match(content)
         if footnote:
+            flush_paragraph()
             start = line["start"] + len(footnote.group(1))
             end = line["start"] + len(content.rstrip(" \t"))
             if start < end:
@@ -1024,6 +1092,7 @@ def extract_files(
             continue
         directive = DIRECTIVE_RE.match(content)
         if directive and LATIN_RE.search(directive.group("payload")):
+            flush_paragraph()
             region_number += 1
             payload_start = line["start"] + directive.start("payload")
             payload_end = line["start"] + directive.end("payload")
@@ -1049,6 +1118,7 @@ def extract_files(
             )
             continue
         if index in table_lines:
+            flush_paragraph()
             for cell_start, cell_end in table_cell_spans(content):
                 add_unit(
                     line["start"] + cell_start,
@@ -1060,24 +1130,44 @@ def extract_files(
             continue
         span = line_payload_span(content)
         if not span:
+            flush_paragraph()   # 空行/纯结构行 = 段落边界
             continue
         relative_start, relative_end, kind, is_heading = span
         if index in setext_headings:
             kind = "heading"
             is_heading = True
-        item = add_unit(
-            line["start"] + relative_start,
-            line["start"] + relative_end,
-            kind,
-            line["number"],
-            section,
-        )
-        if is_heading:
+        if kind == "heading":
+            flush_paragraph()
+            item = add_unit(
+                line["start"] + relative_start,
+                line["start"] + relative_end,
+                kind,
+                line["number"],
+                section,
+            )
             heading_text = content[relative_start:relative_end]
             heading_template, _ = inline_template(heading_text, "section", reference_ids)
             section = visible_template_text(heading_template).strip() or section
             if item:
                 item["section"] = section
+            continue
+        # 普通文本：段落合并——连续文本行组成一个多行 unit
+        abs_start = line["start"] + relative_start
+        abs_end = line["start"] + relative_end
+        if paragraph_buffer is not None and line["start"] == paragraph_buffer["prev_line_end"]:
+            paragraph_buffer["end"] = abs_end
+            paragraph_buffer["line_end"] = line["number"]
+            paragraph_buffer["prev_line_end"] = line["end"]
+        else:
+            flush_paragraph()
+            paragraph_buffer = {
+                "start": abs_start,
+                "end": abs_end,
+                "line_start": line["number"],
+                "line_end": line["number"],
+                "prev_line_end": line["end"],
+            }
+    flush_paragraph()
 
     ordered_context = sorted(
         [(item["start"], item["template"]) for item in units]
@@ -1103,15 +1193,15 @@ def extract_files(
 
     timestamp = timestamp or make_timestamp()
     source_hash = sha256_bytes(raw)
-    log_directory = Path(".md2zh_tools") / "decision_logs"
+    log_directory = Path("decision_logs")
     log_name = "{}.{}.{}.jsonl".format(source_path.stem, source_hash[:8], timestamp)
     log_relative = log_directory / log_name
-    log_path = project_root / log_relative
+    log_path = tools_root / log_relative
     suffix = 2
     while log_path.exists():
         log_name = "{}.{}.{}.{}.jsonl".format(source_path.stem, source_hash[:8], timestamp, suffix)
         log_relative = log_directory / log_name
-        log_path = project_root / log_relative
+        log_path = tools_root / log_relative
         suffix += 1
     append_jsonl(
         log_path,
@@ -1130,11 +1220,12 @@ def extract_files(
 
     state_units = sorted(units, key=lambda item: item["start"])
     translation_blocks = build_translation_blocks(
-        state_units, target_bytes=target_block_bytes, max_bytes=max_block_bytes
+        state_units, max_chars=config["max_block_chars"]
     )
     state = {
-        "schema_version": 3,
+        "schema_version": 4,
         "project_root": str(project_root),
+        "tools_root": str(tools_root),
         "source": {
             "path": str(source_path),
             "relative_path": source_relative_path(source_path, project_root),
@@ -1152,7 +1243,7 @@ def extract_files(
         "ambiguous_regions": ambiguous,
     }
     packet = {
-        "schema_version": 2,
+        "schema_version": 3,
         "source": {
             "relative_path": state["source"]["relative_path"],
             "sha256": source_hash,
@@ -1176,12 +1267,13 @@ def extract_files(
         "unit_count": len(units),
         "block_count": len(translation_blocks),
         "ambiguous_count": len(ambiguous),
+        "max_block_chars": config["max_block_chars"],
         "decision_log": str(log_path),
     }
 
 
 def decision_log_path(state: Dict[str, Any]) -> Path:
-    return Path(state["project_root"]) / Path(state["decision_log"])
+    return state_tools_root(state) / Path(state["decision_log"])
 
 
 def validate_decision(
@@ -1345,11 +1437,9 @@ def plan_blocks(state_path: Path, run_dir: Path) -> Path:
     state = load_json(state_path)
     ensure_state_runtime(state)
     run_dir = Path(run_dir).resolve()
-    intermediate_root = (
-        Path(state["project_root"]) / ".md2zh_tools" / "intermediate"
-    ).resolve()
+    intermediate_root = (state_tools_root(state) / "intermediate").resolve()
     if run_dir == intermediate_root or not path_is_within(run_dir, intermediate_root):
-        raise PipelineError("block run directory must be a child of .md2zh_tools/intermediate")
+        raise PipelineError("block run directory must be a child of the tools intermediate directory")
 
     plan_sha256 = block_plan_fingerprint(state)
     manifest_path = run_dir / "manifest.json"
@@ -1417,26 +1507,35 @@ def parse_block_surface(
     if MOJIBAKE_RE.search(translated_surface):
         raise TranslationValidationError("{} contains likely mojibake".format(block["id"]))
     lines = translated_surface.splitlines()
-    expected_line_count = len(block["unit_ids"]) * 2
-    if len(lines) != expected_line_count:
-        raise TranslationValidationError(
-            "{} changed segment or physical-line boundaries".format(block["id"])
-        )
     units_by_id = {unit["id"]: unit for unit in state["units"]}
     translations: Dict[str, str] = {}
+    position = 0
     for index, unit_id in enumerate(block["unit_ids"]):
-        marker = lines[index * 2]
-        translated = lines[index * 2 + 1]
-        if marker != segment_marker(block["id"], index + 1):
+        marker = segment_marker(block["id"], index + 1)
+        if position >= len(lines) or lines[position] != marker:
             raise TranslationValidationError(
                 "{} must preserve segment lines in source order".format(block["id"])
             )
+        position += 1
+        content_lines: List[str] = []
+        while position < len(lines) and not SEGMENT_LINE_RE.match(lines[position]):
+            content_lines.append(lines[position])
+            position += 1
+        translated = "\n".join(content_lines)
         if not translated.strip():
             raise TranslationValidationError("{} has an empty translation".format(unit_id))
         if SEGMENT_ANY_RE.search(translated):
             raise TranslationValidationError("{} contains a misplaced segment marker".format(unit_id))
+        if "\n\n" in translated or translated.startswith("\n") or translated.endswith("\n"):
+            raise TranslationValidationError(
+                "{} must not change paragraph boundaries (no blank lines)".format(unit_id)
+            )
         validate_translated_template(units_by_id[unit_id], translated)
         translations[unit_id] = translated
+    if position < len(lines) and any(lines[j].strip() for j in range(position, len(lines))):
+        raise TranslationValidationError(
+            "{} has extra content after the last segment".format(block["id"])
+        )
     return translations
 
 
@@ -1562,9 +1661,7 @@ def cleanup_run(manifest_path: Path) -> Dict[str, Any]:
     state = load_json(state_path)
     run_dir = manifest_path.parent
     task_dir = run_dir.parent
-    intermediate_root = (
-        Path(state["project_root"]) / ".md2zh_tools" / "intermediate"
-    ).resolve()
+    intermediate_root = (state_tools_root(state) / "intermediate").resolve()
     if (
         manifest_path.name != "manifest.json"
         or run_dir.name != "run"
@@ -1573,12 +1670,22 @@ def cleanup_run(manifest_path: Path) -> Dict[str, Any]:
     ):
         raise PipelineError("refusing to clean an invalid block run path")
     if not path_is_within(run_dir, task_dir):
-        raise PipelineError("refusing to clean a block run outside .md2zh_tools/intermediate")
+        raise PipelineError("refusing to clean a block run outside the tools intermediate directory")
     unfinished = [block["id"] for block in manifest.get("blocks", []) if block["status"] != "accepted"]
     if unfinished:
         raise PipelineError("refusing to clean an unfinished block run: {}".format(unfinished[:10]))
-    shutil.rmtree(str(task_dir))
-    return {"removed": str(task_dir), "exists_after": task_dir.exists()}
+    # 归档而不是删除（web2md 风格，便于排查）：移入 .md2zh_tools/_archive/
+    archive_root = intermediate_root.parent / "_archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    target = archive_root / task_dir.name
+    if target.exists():
+        shutil.rmtree(str(target))
+    shutil.move(str(task_dir), str(target))
+    # 只保留最近 20 个归档条目，超出删最旧
+    entries = sorted(archive_root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True)
+    for old in entries[ARCHIVE_MAX_ENTRIES:]:
+        shutil.rmtree(str(old))
+    return {"archived": str(target), "exists_after": task_dir.exists()}
 
 
 def accepted_decisions(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -1597,8 +1704,6 @@ def accepted_decisions(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 
 def validate_translated_template(unit: Dict[str, Any], translated: str) -> str:
-    if "\n" in translated or "\r" in translated:
-        raise TranslationValidationError("{} translation must not change physical line boundaries".format(unit["id"]))
     expected = [token["marker"] for token in unit["tokens"]]
     actual = TOKEN_RE.findall(translated)
     if Counter(actual) != Counter(expected):
@@ -1639,8 +1744,22 @@ def validate_no_introduced_syntax(original: str, translated: str, label: str, ki
         if translated.count(marker) > original.count(marker):
             raise TranslationValidationError("{} introduced Markdown syntax outside protected markers".format(label))
     block_pattern = re.compile(r"^(?:#{1,6}[ \t]+|[-+][ \t]+|>[ \t]?|\d+[.)][ \t]+)")
-    if kind == "text" and block_pattern.match(translated) and not block_pattern.match(original):
-        raise TranslationValidationError("{} introduced a block-level Markdown marker".format(label))
+    if kind == "text":
+        translated_lines = translated.split("\n")
+        original_lines = original.split("\n")
+        if any(block_pattern.match(tline) for tline in translated_lines) and not any(
+            block_pattern.match(oline) for oline in original_lines
+        ):
+            raise TranslationValidationError("{} introduced a block-level Markdown marker".format(label))
+
+
+def line_ending_style(text: str) -> str:
+    """行尾风格：源区间使用 \\r\\n 还是 \\n（取第一个出现的换行）。"""
+    crlf = text.find("\r\n")
+    lf = text.find("\n")
+    if crlf >= 0 and (lf < 0 or crlf <= lf):
+        return "\r\n"
+    return "\n"
 
 
 def deterministic_render(state: Dict[str, Any], translations: Dict[str, str]) -> bytes:
@@ -1657,6 +1776,10 @@ def deterministic_render(state: Dict[str, Any], translations: Dict[str, str]) ->
         if unit_id not in translations:
             raise TranslationValidationError("missing translation for {}".format(unit_id))
         value = validate_translated_template(unit, translations[unit_id])
+        if "\n" in value:
+            style = line_ending_style(text[unit["start"] : unit["end"]])
+            if style != "\n":
+                value = value.replace("\n", style)
         replacements.append((unit["start"], unit["end"], value, unit_id))
 
     decisions = accepted_decisions(state)
@@ -1740,23 +1863,261 @@ def verify_file(state_path: Path, translations_path: Path, output_path: Path) ->
     return {"pass": not errors, "errors": errors, "failure_count": len(errors)}
 
 
+def copy_assets(source_path: Path, output_path: Path) -> Dict[str, Any]:
+    """Copy the source's sibling `<stem>.assets` folder next to an output file.
+
+    Markdown image references stay relative to the source file name
+    (e.g. `![](Guide.assets/x.png)`), so the copied folder keeps the
+    source stem. A missing assets folder is not an error.
+    """
+    source_path = Path(source_path).resolve()
+    assets_dir = source_path.parent / (source_path.stem + ".assets")
+    if not assets_dir.is_dir():
+        return {"source": str(assets_dir), "target": None, "copied": False, "files": 0}
+    target_dir = Path(output_path).resolve().parent / (source_path.stem + ".assets")
+    shutil.copytree(str(assets_dir), str(target_dir), dirs_exist_ok=True)
+    file_count = sum(1 for item in assets_dir.rglob("*") if item.is_file())
+    return {
+        "source": str(assets_dir),
+        "target": str(target_dir),
+        "copied": True,
+        "files": file_count,
+    }
+
+
+def summarize_document(state_path: Path, summary_path: Path) -> Dict[str, Any]:
+    """Write a structure summary md: heading tree, per-section translatable
+    char counts, code/math block positions, and the default block plan.
+
+    The summary is the AI planner's input: it confirms the default plan or
+    gives adjustment instructions before `plan-blocks`.
+    """
+    state = load_json(Path(state_path))
+    ensure_state_runtime(state)
+    source_path = Path(state["source"]["path"])
+    raw = source_path.read_bytes()
+    if sha256_bytes(raw) != state["source"]["sha256"]:
+        raise PipelineError("source changed after extraction")
+    text = raw.decode("utf-8-sig")
+    max_chars = state["config"].get("max_block_chars", DEFAULT_MAX_BLOCK_CHARS)
+
+    # 1) 扫描标题（ATX + setext）与代码围栏区间
+    lines = split_lines(text)
+    setext_indexes = setext_heading_indexes(lines)
+    headings: List[Dict[str, Any]] = []
+    fences: List[Tuple[int, int]] = []
+    in_fence: Optional[str] = None
+    fence_start = 0
+    for index, line in enumerate(lines):
+        content = line["content"]
+        fence = FENCE_RE.match(content)
+        if in_fence is not None:
+            if fence and fence.group(1)[0] == in_fence[0] and len(fence.group(1)) >= len(in_fence):
+                fences.append((fence_start, line["end"]))
+                in_fence = None
+            continue
+        if fence:
+            in_fence = fence.group(1)
+            fence_start = line["start"]
+            continue
+        if index in setext_indexes:
+            title = content.strip()
+            next_content = lines[index + 1]["content"] if index + 1 < len(lines) else ""
+            setext_match = SETEXT_RE.match(next_content)
+            level = 1 if setext_match and setext_match.group(1).startswith("=") else 2
+            if title:
+                headings.append(
+                    {
+                        "level": level,
+                        "text": title,
+                        "start": line["start"],
+                        "line": line["number"],
+                    }
+                )
+            continue
+        heading = re.match(r"^ {0,3}(#{1,6})[ \t]+(.*)$", content)
+        if heading:
+            level = len(heading.group(1))
+            title = re.sub(r"[ \t]+#+$", "", heading.group(2).rstrip())
+            headings.append(
+                {
+                    "level": level,
+                    "text": title,
+                    "start": line["start"],
+                    "line": line["number"],
+                }
+            )
+            continue
+    if in_fence is not None:
+        fences.append((fence_start, len(text)))
+
+    # 公式块（$$...$$ 配对区间，近似统计）
+    math_blocks: List[Tuple[int, int]] = []
+    positions = [match.start() for match in re.finditer(r"\$\$", text)]
+    for index in range(0, len(positions) - 1, 2):
+        math_blocks.append((positions[index], positions[index + 1] + 2))
+
+    # 2) 每个 unit 归属最近的标题节点（无标题 → 文件头节点）
+    nodes: List[Dict[str, Any]] = [
+        {"level": 0, "text": "(无标题头部)", "start": 0}
+    ] + headings
+    node_chars = [0] * len(nodes)
+    for unit in state["units"]:
+        owner = 0
+        for index, node in enumerate(nodes):
+            if node["start"] <= unit["start"]:
+                owner = index
+            else:
+                break
+        node_chars[owner] += translatable_chars(unit)
+
+    # 3) 汇总统计
+    total_chars = sum(node_chars)
+    heading_counts = {1: 0, 2: 0, 3: 0}
+    for heading in headings:
+        if heading["level"] in heading_counts:
+            heading_counts[heading["level"]] += 1
+    fence_chars = sum(end - start for start, end in fences)
+    math_chars = sum(end - start for start, end in math_blocks)
+    blocks = state.get("translation_blocks", [])
+
+    # 4) 章节行（≤3 级显示；4+ 级字符并入最近的 ≤3 级父节点）
+    section_chars: Dict[int, int] = {}
+    last_l3 = 0
+    for index, node in enumerate(nodes):
+        if node["level"] <= 3:
+            last_l3 = index
+            section_chars[index] = node_chars[index]
+        else:
+            section_chars[last_l3] = section_chars.get(last_l3, 0) + node_chars[index]
+    section_lines: List[str] = []
+    numbering = {1: 0, 2: 0, 3: 0}
+    for index, node in enumerate(nodes):
+        level = node["level"]
+        if level > 3:
+            continue
+        chars = section_chars.get(index, 0)
+        status = "✅ 整块" if chars <= max_chars else "⚠️ 超限需拆"
+        prefix = ""
+        if level >= 1:
+            numbering[level] += 1
+            numbering = {key: (numbering[key] if key <= level else 0) for key in numbering}
+            prefix = ".".join(str(numbering[key]) for key in range(1, level + 1))
+            line = "### {}{}. {}（{} 级，{} 字符）{}".format(
+                "  " * (level - 1), prefix, node["text"], level, chars, status
+            )
+        else:
+            line = "### {}（{} 字符）{}".format(node["text"], chars, status)
+        section_lines.append(line)
+
+    # 5) 默认分块方案表
+    plan_lines = [
+        "| 块 | 章节范围 | 可译字符 | 状态 |",
+        "|---|---|---|---|",
+    ]
+    for block in blocks:
+        section = block.get("section_start") or "(无标题)"
+        if len(section) > 40:
+            section = section[:37] + "..."
+        chars = block.get("translatable_chars", 0)
+        status = "✅ ≤ 上限" if chars <= max_chars else "⚠️ 超限"
+        plan_lines.append(
+            "| {} | {} | {} | {} |".format(block["id"], section, chars, status)
+        )
+
+    summary = "\n".join(
+        [
+            "# 分块结构摘要 — {}（共 {} 可译字符）".format(source_path.name, total_chars),
+            "",
+            "## 总体",
+            "- 标题：{} 个一级 / {} 个二级 / {} 个三级（四级及以下计入最近父级）".format(
+                heading_counts[1], heading_counts[2], heading_counts[3]
+            ),
+            "- 总可译字符：{}（等待翻译的字符，不含代码/公式/链接目标等保护内容）".format(total_chars),
+            "- 代码块：{} 个（共 {} 字符）｜公式块：{} 个（共 {} 字符）——保护区间，不参与翻译".format(
+                len(fences), fence_chars, len(math_blocks), math_chars
+            ),
+            "- 分块上限 max_block_chars：{} 字符".format(max_chars),
+            "- 分块数：{} 块".format(len(blocks)),
+            "",
+            "## 章节统计",
+        ]
+        + section_lines
+        + [
+            "",
+            "## 默认分块方案",
+            "",
+        ]
+        + plan_lines
+        + [
+            "",
+            "> AI 审阅：确认默认方案直接进入 plan-blocks；如需调整（如大章节拆点、紧邻小章节合并），给出调整指令。",
+        ]
+    ) + "\n"
+    write_bytes_atomic(Path(summary_path), summary.encode("utf-8"))
+    return {
+        "summary": str(Path(summary_path)),
+        "headings": len(headings),
+        "blocks": len(blocks),
+        "total_chars": total_chars,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    configure = subparsers.add_parser(
-        "configure", help="store the project ambiguity decider and Python runtime"
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--config",
+        help="path to the md2zh config file (default: <skill>/scripts/config.py)",
     )
-    configure.add_argument("project_root")
-    configure.add_argument("--decider", choices=sorted(CONFIG_VALUES), required=True)
-    configure.add_argument("--python-mode", choices=sorted(PYTHON_MODES), required=True)
-    configure.add_argument("--python-path")
 
-    extract = subparsers.add_parser("extract", help="extract translator-facing translation blocks")
+    configure = subparsers.add_parser(
+        "configure",
+        parents=[common],
+        help="store the ambiguity decider, Python runtime and output dir in the skill-level config",
+    )
+    configure.add_argument("--decider", choices=sorted(CONFIG_VALUES), required=True)
+    configure.add_argument(
+        "--python-path",
+        help="absolute path to the Python interpreter; omitted = auto-detect",
+    )
+    configure.add_argument(
+        "--output-dir",
+        help="output directory for translated files; empty = same directory as the source",
+    )
+    configure.add_argument(
+        "--tree-translation",
+        choices=["true", "false"],
+        help="enable tree translation for multi-file directories (default: true)",
+    )
+    configure.add_argument(
+        "--max-block-chars",
+        type=int,
+        help="max translatable characters per block (default: 16000, suggested 10000-24000)",
+    )
+
+    extract = subparsers.add_parser(
+        "extract",
+        parents=[common],
+        help="extract translator-facing translation blocks",
+    )
     extract.add_argument("source")
     extract.add_argument("--state", required=True)
     extract.add_argument("--blocks", "--units", dest="units", required=True)
     extract.add_argument("--project-root", required=True)
+    extract.add_argument(
+        "--tools-root",
+        help="tools/log root directory (default: <skill>/debug); internal override for tests",
+    )
+
+    summarize = subparsers.add_parser(
+        "summarize",
+        help="write a structure summary md for the AI block planner",
+    )
+    summarize.add_argument("state")
+    summarize.add_argument("output")
 
     decisions = subparsers.add_parser("record-decisions", help="validate and persist ambiguity decisions")
     decisions.add_argument("state")
@@ -1788,6 +2149,13 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("output")
     render.add_argument("--allow-overwrite", action="store_true")
 
+    copy_assets_cmd = subparsers.add_parser(
+        "copy-assets",
+        help="copy the source's sibling <stem>.assets folder next to an output file",
+    )
+    copy_assets_cmd.add_argument("source")
+    copy_assets_cmd.add_argument("output")
+
     verify = subparsers.add_parser("verify", help="verify a candidate against deterministic rendering")
     verify.add_argument("state")
     verify.add_argument("translations")
@@ -1802,10 +2170,14 @@ def main() -> int:
             result: Any = {
                 "config": str(
                     configure_project(
-                        Path(args.project_root),
                         args.decider,
-                        args.python_mode,
                         args.python_path,
+                        Path(args.config) if args.config else None,
+                        args.output_dir,
+                        args.tree_translation == "true"
+                        if args.tree_translation is not None
+                        else None,
+                        args.max_block_chars,
                     )
                 )
             }
@@ -1815,7 +2187,11 @@ def main() -> int:
                 Path(args.state),
                 Path(args.units),
                 Path(args.project_root),
+                config_path=Path(args.config) if args.config else None,
+                tools_root=Path(args.tools_root) if args.tools_root else None,
             )
+        elif args.command == "summarize":
+            result = summarize_document(Path(args.state), Path(args.output))
         elif args.command == "record-decisions":
             result = record_decisions(Path(args.state), Path(args.decisions))
         elif args.command == "plan-blocks":
@@ -1844,6 +2220,8 @@ def main() -> int:
                 Path(args.output),
                 allow_overwrite=args.allow_overwrite,
             )
+        elif args.command == "copy-assets":
+            result = copy_assets(Path(args.source), Path(args.output))
         else:
             result = verify_file(Path(args.state), Path(args.translations), Path(args.output))
             print(json.dumps(result, ensure_ascii=False, indent=2))

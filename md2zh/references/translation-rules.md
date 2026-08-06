@@ -1,46 +1,46 @@
-# Translation rules
+# 翻译规则
 
-## Content boundary
+## 内容边界
 
-Translate reader-visible natural language in:
+翻译读者可见的自然语言：
 
-- ATX and Setext heading text;
-- paragraphs, list-item prose, blockquotes, and table-cell prose;
-- text inside emphasis and ordinary inline HTML elements;
-- inline-link labels and image alt text;
-- footnote prose and prose surrounding citations.
+- ATX 与 Setext 标题文本；
+- 段落、列表项文本、引用块与表格单元格内容；
+- 强调标记与普通行内 HTML 元素内的文本；
+- 行内链接标签与图片替代文本；
+- 脚注文本及其周围的引用文字。
 
-Keep these source items unchanged:
+以下源内容保持原样：
 
-- fenced and indented code blocks, inline code, and code-like HTML elements;
-- LaTeX inside `$...$`, `$$...$$`, `\(...\)`, and `\[...\]`;
-- link destinations, image paths, raw URLs, autolinks, reference identifiers, citation keys, and footnote identifiers;
-- Markdown markers, indentation, hard-break whitespace, blank lines, and line endings;
-- YAML frontmatter, HTML tags and attributes, comments, entities, escapes, and template syntax;
-- formal bibliography titles and metadata.
+- 围栏与缩进代码块、行内代码及类代码的 HTML 元素；
+- `$...$`、`$$...$$`、`\(...\)` 与 `\[...\]` 内的 LaTeX；
+- 链接目标、图片路径、裸 URL、自动链接、引用标识符、引文键与脚注标识符；
+- Markdown 标记、缩进、硬换行空白、空行与行尾符；
+- YAML frontmatter、HTML 标签与属性、注释、实体、转义与模板语法；
+- 正式书目标题与元数据。
 
-Reference-style shortcut labels are also identifiers, so keep them unchanged. Translate full/collapsed reference-link labels only when their identifiers remain separately protected.
+引用式快捷标签同样是标识符，保持原样。仅当引用标识符被单独保护时，才翻译完整/折叠引用链接的标签文本。
 
-The pipeline represents protected source with ASCII `@@MD2ZH:PROTECT:...@@` markers. Keep every supplied marker exactly once. Markers may move with natural Chinese word order when doing so does not split formatting pairs. Never invent, edit, duplicate, or omit a marker.
+pipeline 用 ASCII `@@MD2ZH:PROTECT:...@@` 标记表示受保护的源内容。每个提供的标记恰好保留一次。标记可随中文自然语序移动，但不得拆散格式配对。绝不发明、修改、复制或遗漏任何标记。
 
-The model-facing input is a small set of complete translation blocks, not hundreds of JSON mapping entries. Each `@@MD2ZH:SEG:block-....:....@@` line identifies the position of the following single-line text segment. Preserve every segment line exactly and in order. Translate the content lines only; do not add wrappers, commentary, blank lines, or physical line breaks.
+面向模型的输入是一组完整的翻译块，而非数百条 JSON 映射。每个 `@@MD2ZH:SEG:block-....:....@@` 行开始一个翻译段；一段可跨多个物理行（段落级单元）。逐行原样保留每个段行且顺序不变。只翻译内容——段内可自由重排、调整换行与断句（物理行数不受限），但不得引入空行、行首或行尾换行，或任何以块级标记（`#`、`>`、`-`、有序列表）开头的行。不要在段外添加包装、注释或多余行。
 
-## Ambiguous content
+## 模糊内容
 
-Read `.md2zh_tools/config.json` to determine whether the user or the AI assistant decides ambiguous content. A translate decision must select exact source substrings inside the pipeline's suggested payload; it never authorizes rewriting an entire unknown construct.
+读取 skill 级配置（`<skill-directory>/scripts/config.py`，键 `ambiguous_content_decider`）以确定模糊内容由用户还是 AI 助手决定。translate 决策必须选择 pipeline 建议载荷内的精确源子串；它绝不授权重写整个未知结构。
 
-For AI-assistant decisions, use the complete supplied section and neighboring context. Record a concise reason. Let the pipeline persist all accepted, rejected, and retried decisions in `.md2zh_tools/decision_logs/*.jsonl` for later diagnosis and rule improvement.
+对于 AI 助手决策，使用所提供的完整章节与相邻上下文，并记录简明理由。让 pipeline 将全部 accepted、rejected 与 retried 决策持久化到 `.md2zh_tools/decision_logs/*.jsonl`，供后续诊断与规则改进。
 
-## Translation quality
+## 翻译质量
 
-- Preserve meaning, scope, tone, logical relations, and certainty. Do not add, omit, summarize, or editorialize.
-- Prefer natural Simplified Chinese over literal English word order.
-- Use established Chinese technical terms and keep recurring terminology consistent across sections.
-- Preserve personal names, product names, commands, identifiers, variables, bibliographic metadata, DOI, ISBN, URLs, and citation keys accurately.
-- Read all blocks once, establish the document context and shared glossary, then translate blocks in source order. Never treat a content line as context-free just because the safety pipeline stores it separately.
-- Keep formal cited-work titles in their source language unless the document consistently uses an established Chinese title.
-- Translate table cells independently without changing their surrounding pipes or whitespace.
+- 保持含义、范围、语气、逻辑关系与确定性不变。不增、不减、不概括、不加个人评论。
+- 优先使用自然简体中文，而非照搬英文语序。
+- 使用公认的中文技术术语，并保持各章节间术语一致。
+- 准确保留人名、产品名、命令、标识符、变量、书目元数据、DOI、ISBN、URL 与引文键。
+- 先通读全部块一次，建立文档上下文与共享术语表，再按源顺序翻译。绝不因安全 pipeline 将内容行单独存储，就把它当作无上下文的内容。
+- 正式引用文献标题保持源语言，除非文档一贯使用公认的中文标题。
+- 独立翻译表格单元格，不改变其周围的竖线与空白。
 
-## Semantic review
+## 语义复核
 
-Review all translated blocks for omissions, duplication, mistranslation, altered certainty, terminology drift, untranslated English prose, and unnatural Chinese. For long documents, review every heading, every table, every ambiguity decision, prose around formulas and figures, the introduction, the final section, and at least one complete paragraph under every level-1 heading.
+复核全部已翻译块，检查遗漏、重复、误译、确定性改变、术语漂移、未翻译的英文文本与不自然的中文。对长文档，复核每个标题、每个表格、每次模糊内容决策、公式与图表周围的文字、引言、结尾部分，以及每个一级标题下的至少一个完整段落。

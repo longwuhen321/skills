@@ -36,3 +36,7 @@ web2md/scripts/config.py
 
 # 其他 skill 如有需要，在此追加各自的前缀规则：
 # 例如：md2zh/xxx
+
+# md2zh：调试日志快照（decision_logs/intermediate/_archive）：
+md2zh/debug/
+reasonix.toml.bak

@@ -35,7 +35,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 ## [2026-08-03] cleanup-run 拒绝清理：state 不在任务目录内（已知行为）
 
 - **现象**：`cleanup-run` 报 `refusing to clean an invalid block run path`，任务目录残留无法自动清理。
-- **根因**：`md2zh_pipeline.py` `cleanup_run` 校验 `path_is_within(state_path, task_dir)`——state.json 放在项目外（如系统 TEMP）时校验失败；只有 state/blocks 等中间产物位于 `{项目根}/.md2zh_tools/intermediate/<task-id>/` 内才允许清理。
+- **根因**：`md2zh_pipeline.py` `cleanup_run` 校验 `path_is_within(state_path, task_dir)`——state.json 放在任务目录外（如系统 TEMP）时校验失败；只有 state/blocks 等中间产物位于 `<skill-directory>/debug/intermediate/<task-id>/` 内才允许清理。
 - **修复**：执行约定：extract 的 `--state`/`--blocks` 放任务目录内（`intermediate/<task>/`），随任务清理；已写入 SKILL.md「翻译执行注意事项」。
 - **排查方法**：cleanup 报 `invalid block run path` 时检查 state 文件路径是否在 `<task-id>/` 内（`manifest.state_path`）。
 

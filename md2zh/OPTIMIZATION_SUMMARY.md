@@ -33,6 +33,202 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-06：SKILL.md / KNOWN_ISSUES.md 审查修复（4 个问题）
+
+| 类别 | 内容 |
+|------|------|
+| 文档 | ① SKILL.md「文件结构」树补 `debug/` 目录（原遗漏，与「任务产物与清理」章节不一致）及 .gitignore 说明；② SKILL.md render 表述澄清：render 只写入 `<candidate.md>`，最终文件位置由 AI 读 output_dir 放置（原表述"render 输出位置读 output_dir"与实际实现不符）；③ SKILL.md UTF-8 直写补充：文件工具不可用时允许 .NET WriteAllText（UTF-8 无 BOM）直写，禁管道/Add-Content；④ SKILL.md 配置章节补 `--tools-root` 说明；⑤ KNOWN_ISSUES.md L38 旧路径 `{项目根}/.md2zh_tools/` 更新为 `<skill-directory>/debug/` |
+| 流程改动 | 用户发起"通读 skill 查遗漏/矛盾"审查；4 个问题（2 实质 + 1 表述 + 1 可选）全部修复 |
+| 测试 | 纯文档改动（SKILL.md / KNOWN_ISSUES.md），不涉及 scripts/*.py，无需 selftest |
+
+**过程要点**：
+- 审查方法：SKILL.md 全文 ↔ config.example.py / scripts/config.py / pipeline `--help` 实测子命令 / KNOWN_ISSUES.md 逐项比对
+- 确认一致项：配置 5 字段、11 个子命令、_archive 20 条、cleanup-run state 契约、debug/ 7 处路径统一
+- L230「历史遗留 config.json」与 extract 的 `--project-root` 是有意保留（历史事实/参数仍在用），不改
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （原）debug/ 已建但未有真实任务写入 → 本次仍未写入，待下次翻译验证日志落点
+
+
+### 2026-08-06：SKILL.md 补「残留任务清理」约定（对齐 web2md 日志清理纪律）
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | SKILL.md「任务产物与清理」新增「残留任务清理」条：`intermediate/` 中非本次任务/已确认弃用的任务目录，任务结束后人工清理（删除或移入 `_archive/`）；`cleanup-run` 拒收的 unfinished 任务先处理未完成块或确认弃用后人工删除 |
+| 文档 | 纯 SKILL.md 改动，不涉及 scripts/*.py（无需 selftest） |
+
+**过程要点**：
+- 触发：用户询问"web2md 中的日志删除逻辑你同步过来吗"——对照发现 web2md 有 intermediate 保留 5 轮 / _archive 保留 20 条的编排约定；md2zh 的 _archive 20 条已由 cleanup_run 脚本强制（更严格），但 intermediate 缺"残留任务清理"约定（unfinished 任务会被 cleanup 拒收而永久滞留）
+- 用户决策：方案 1（SKILL.md 编排约定，最小改动），不采用方案 2（pipeline 加清理子命令）
+- web2md 的"保留最近 5 轮"不照搬：md2zh 的 intermediate 是单次任务快照（cleanup 即归档），无"多轮清单"形态
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （原）debug/ 已建但未有真实任务写入 → 本次仍未写入，待下次翻译验证日志落点
+
+
+### 2026-08-06：日志产物迁移到 skill 根 debug/（覆盖"保持项目根"决策）
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | 日志产物根从 `{项目根}/.md2zh_tools/` 迁移到 `<skill-directory>/debug/`（`decision_logs/`、`intermediate/`、`_archive/` 三个子目录整体迁移）；旧日志保留项目根原处不迁移；debug/ 文件夹已建 |
+| 脚本改动 | `md2zh_pipeline.py`：新增 `default_tools_root()`（skill 根/debug）与 `state_tools_root()`（旧 state 无 tools_root 时回退 `project_root/.md2zh_tools`）；extract 的 decision_log 路径改用 tools_root 且 state 增 `tools_root` 字段；`decision_log_path` / `plan_blocks` / `cleanup_run` 改用 `state_tools_root`；extract CLI 增 `--tools-root`（selftest 隔离用，正常流程不用） |
+| 测试 | selftest：setUp 增 `self.tools`（临时目录下的隔离日志根）；全部 extract 调用加 `--tools-root self.tools`；archive 断言改 `self.tools/_archive` → 31 用例全绿（初始 3 失败为 `_extract_multi` 漏传参数，修复后通过） |
+| 文档 | SKILL.md 7 处 `{项目根}/.md2zh_tools` → `<skill-directory>/debug/`（run 目录/review.md/归档/中间产物/决策日志/产物树/验证清理）；历史遗留 config.json 说明保留；.gitignore 加 `md2zh/debug/` |
+
+**过程要点**：
+- 覆盖 2026-08-05"用户决策：位置保持项目根（web2md 同构）"——用户改主意，日志改放 skill 根 debug/
+- 兼容：旧 state（无 tools_root 字段）的 decision_log_path / plan / cleanup 回退到 `project_root/.md2zh_tools`，已归档/中断任务不受影响
+- 关键坑 1：selftest 若用写死的 tools_root 会污染真实 skill/debug/ → `--tools-root` 临时覆盖（与 `--config` 同模式）
+- 关键坑 2：`.gitignore` 追加时注释与规则写在同一行（`#` 开头导致规则失效）且中文乱码 → 拆两行、直接 UTF-8 写正确中文
+- `--project-root` 保留（仅用于记录源文件相对路径，决策日志可追溯源位置）
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （新增）debug/ 目录已建但尚未有真实任务写入，待下次翻译验证日志落点
+
+
+### 2026-08-05：分块/翻译/收尾三大改造（标题区间分块 + summarize + 段落级 unit + AI 终检 + 归档）
+
+| 类别 | 内容 |
+|------|------|
+| 新功能 | ① `max_block_chars` 配置项（字符单位，默认 16000，建议 10000–24000）：单块**可译内容**（可见文本，不含保护内容）上限；② 分块重写为**标题区间优先**——每个标题章节（含文件头）默认独立成块，超限章节在 unit 边界拆；③ `summarize` 子命令（主流程）：结构摘要 md（标题树到 3 级/每章节可译字符/代码公式块位置/默认分块方案表），AI 通读后确认默认方案或给调整指令；④ **段落级 unit**：普通段落合并为多行 unit，译文可自由断句/换行/重排（物理行数不受限），禁空行/禁行首块级标记/禁首尾换行，渲染按源区间行尾风格还原换行；⑤ AI 终检：render 后 AI 通读完整译文对照 translation-quality.md 四章检查，review.md 落盘，循环到干净；⑥ `cleanup-run` 改为**归档**到 `.md2zh_tools/_archive/`（最多 20 条目，超出删最旧） |
+| 脚本改动 | `md2zh_pipeline.py`：translatable_chars/build_translation_blocks 重写、summarize_document、extract 段落合并（paragraph_buffer + prev_line_end 连续性）、translation_block_surface/parse_block_surface 多行契约（按 SEG 切分）、validate_translated_template 删单行闸门、validate_no_introduced_syntax 逐行块级检查、deterministic_render 行尾还原（line_ending_style）、cleanup_run 归档、state schema 3→4、CONFIG_PY_TEMPLATE/configure/load/CLI 加 max_block_chars；`scan_visible.py`/`apply_translations.py` 按 SEG 切分多行段 |
+| 测试 | selftest 17→29 用例全绿：段落合并断言、多行 roundtrip 字节一致、重排译文 accepted、空行拒绝、cleanup 归档断言、summarize 要素断言、configure max_block_chars 3 用例、辅助脚本多行段 2 例 |
+| 文档 | SKILL.md：配置列表/流程（extract→summarize→AI 确认→plan→翻译→终检→cleanup 归档）/翻译注意事项/产物结构（_archive）/配置章节/容错与安全（结构摘要）；config.example.py 与 scripts/config.py 加 max_block_chars |
+
+**过程要点**：
+- 踩坑 1：段落合并连续性判断用 `abs_start == buffer.end` 永远不成立（行间有换行符）→ 改用 `line.start == prev_line_end`（含换行）
+- 踩坑 2：surface 解析（splitlines）剥离 `\r`，渲染后 Windows 行尾变 `\n` 字节不一致 → `line_ending_style` 按源区间首个换行风格还原译文 `\n`
+- 踩坑 3：`validate_translated_template` 残留单行闸门（"must not change physical line boundaries"）→ 删除，多行契约统一由 parse_block_surface 把关
+- 踩坑 4：summarize 的 heading_counts 用 str key 与 int level 不匹配 → 统一 int
+- 踩坑 5：cleanup 测试被既有契约拦截（state 必须在任务目录内，KNOWN_ISSUES 已记录）
+- 设计要点：行尾还原只对含 `\n` 的译文生效（单行 unit 不受影响）；段落边界保持（空行拒绝）保障结构；`_archive` 与 web2md 同构（intermediate + _archive + 保留上限）
+- 用户决策：位置保持项目根（web2md 同构）；组织方式 web2md 式（intermediate + _archive）；max_block_chars 按可译内容（源可见文本）计，系数 1
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）逐行断句的翻译质感：**已完成**（段落级 unit，2026-08-05 落地）→ 移除
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （原）既有项目旧版 `.md2zh_tools/config.json`：按 SKILL.md「历史遗留」说明直接删除
+- （新增）summarize 的 AI 调整指令通道（--plan-override）：摘要已产出，指令解析+校验未实现，当前靠 AI 读摘要后人工决定（无调整用默认方案）
+- （新增）引用块/列表项仍为行级 unit（第一版范围，prefix 方案列为后续）
+
+
+### 2026-08-05：新增翻译质量评判标准必读文件（translation-quality.md）
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | 新建 `references/translation-quality.md`：用户提供的"信达雅 + 硬性错误 / 流畅性 / 风格适配 / 自检方法"评判标准，整理为结构化文档；文件头注明"翻译前必读"及边界（评判译文文字本身，格式/公式/代码由 pipeline 保护，不因译文自由而改变） |
+| 文档 | SKILL.md 三处同步：契约章节必读清单（translation-rules.md + translation-quality.md）、第 6 步复核改为"按评判标准复核"、文件结构章节加新文件 |
+
+**过程要点**：
+- 用户原文本含对话性语句（"可以发出来帮你诊断"）与 emoji，整理时删除，保留全部标准要点
+- 不涉及 scripts/*.py，无需 selftest
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）逐行断句的翻译质感：不变（分块契约单行 segment 限制，段落级 unit 方案已提出待用户决策）
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （原）既有项目旧版 `.md2zh_tools/config.json`：按 SKILL.md「历史遗留」说明直接删除
+- （新增）无
+
+
+### 2026-08-05：新增 tree_translation 配置项（树形翻译开关）
+
+| 类别 | 内容 |
+|------|------|
+| 新功能 | `md2zh_config` 新增 `tree_translation`（bool，默认 true）：true = 指定目录且树内可翻译 .md ≥ 2 个时按树形流程镜像输出（现状行为）；false = 目录不再自动触发树形，遇多个可翻译 .md 时停下询问用户指定单个文件 |
+| 脚本改动 | `CONFIG_PY_TEMPLATE` 加 `tree_translation` 字段；`configure_project` 加参数（缺省用 `_read_config_value` 保留现值，非 bool 按 True 兜底）；`load_global_config` 返回 `tree_translation`（非 bool 按 True 兜底）；configure CLI 加 `--tree-translation {true,false}`（未提供 = None = 保留现值） |
+| 配置 | `config.example.py` 与真实 `scripts/config.py` 均加 `"tree_translation": True`（注释说明语义）；SKILL.md 配置列表/判定表注/配置章节/临时覆盖说明 4 处同步 |
+| 测试 | selftest +3 用例（写入 false 断言 / 缺省保留现值 / 默认 true）→ 17 用例全绿（exit=0） |
+
+**过程要点**：
+- 树形翻译本身是 AI 编排（SKILL.md 流程），pipeline 无树形逻辑——配置项只做读写承载，判定规则写入 SKILL.md（AI 读配置决定流程）
+- 沿用 output_dir 的"configure 临时覆盖 + 缺省保留现值"模式，selftest 断言 `assertIs` 区分 bool 与真值
+- 默认 true 保持现状行为：未配置过该键的旧 config.py 由 load 兜底（非 bool → True）
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）逐行断句的翻译质感：不变（分块契约限制，未改 pipeline）
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （原）既有项目旧版 `.md2zh_tools/config.json`：按 SKILL.md「历史遗留」说明直接删除
+- （新增）无
+
+
+### 2026-08-05：output_dir 由 CLI 参数改为配置项（修正上一条）
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | 用户澄清需求：输出目录是**配置项**而非调用参数。`md2zh_config` 新增 `output_dir`（选填）：留空 `""` = 输出在源文件同级（默认）；指定 = 输出到该目录（自动创建）+ 源旁 `<stem>.assets` 一并复制（图片引用不变）。SKILL.md 撤回"调用参数 --output-dir"描述（开头/触发/第 6 步/树形第 4 步全部改为读 `md2zh_config.output_dir`） |
+| 脚本改动 | `CONFIG_PY_TEMPLATE` 加 `output_dir` 字段；`configure_project` 加 `--output-dir`（可选，缺省时用 `_read_config_value` 宽松保留现有 config.py 的 output_dir 现值，损坏/缺失按 `""`）；`load_global_config` 返回 `output_dir`（非字符串按 `""` 兜底）；`copy-assets` 子命令不变（AI 读配置后决定是否调用） |
+| 配置 | `config.example.py` 与真实 `scripts/config.py` 均加 `"output_dir": ""`（注释说明语义） |
+| 测试 | selftest +2 用例：configure 写 output_dir（`--output-dir D:/out` 断言写入）；configure 不带 `--output-dir` 时保留现值（decider 改 ai 后 output_dir 仍为 D:/out）→ 14 用例全绿（exit=0） |
+
+**过程要点**：
+- 上一条（同日）误把需求实现为 CLI 调用参数 `--output-dir`；用户澄清"是配置项才对"。修正方向：配置为主，configure 向导的 `--output-dir` 作为临时覆盖保留（符合"CLI 参数只用于临时覆盖"）
+- `_read_config_value` 宽松读取：configure 重写整个 config.py 时必须保留 output_dir 现值，否则每次向导都会把用户设置清空
+- output_dir 不进 state.json（不影响 pipeline 渲染逻辑，仅 AI 编排层读取）
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）逐行断句的翻译质感：不变（分块契约限制，未改 pipeline）
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （原）既有项目旧版 `.md2zh_tools/config.json`：按 SKILL.md「历史遗留」说明直接删除
+- （新增）无
+
+
+### 2026-08-05：输出目录参数 + .assets 复制（copy-assets 子命令）
+
+| 类别 | 内容 |
+|------|------|
+| 新功能 | `/md2zh` 调用可带 `--output-dir <目录>`：留空 = 输出在源文件同级（默认，行为不变）；指定 = 输出到 `<目录>/<stem>_zh.md`（目录自动创建）。源旁存在 `<stem>.assets` 时**一并复制**到输出目录，保证 md 内相对图片引用（如 `![](Guide.assets/x.png)`）不失效 |
+| 脚本改动 | `md2zh_pipeline.py` 新增 `copy-assets <源.md> <输出.md>` 子命令：按**源文件同名** `<stem>.assets` 目录递归复制到输出位置（`shutil.copytree(dirs_exist_ok=True)`），目录名保持源 stem（不是 `_zh.assets`）以维持图片引用；无 assets 文件夹 → `{"copied": false}` 不算错误；输出 JSON 含 source/target/copied/files |
+| 测试 | `selftest.py` +2 用例（有 assets 递归复制且目录名保持源 stem；无 assets 不报错不动输出目录）→ 12 用例全绿（exit=0） |
+| 文档 | SKILL.md：开头输出说明 + 触发章节补 `--output-dir` 参数；单文件流程第 6 步补 render 输出位置约定与 `copy-assets` 命令；树形流程第 4 步补镜像树根位置（指定目录）与逐文件夹 `.assets` 复制 |
+
+**过程要点**：
+- 关键设计：复制目录名用**源 stem**（`doc.assets`）而非输出文件名 stem（`doc_zh.assets`）——md 内图片引用基于源文件名，改名会导致图片失效
+- copy-assets 不读配置、无 runtime 校验（纯文件操作），未挂 `--config`
+- 树形流程：镜像树根 = 指定目录；每个文件夹的 `.assets` 由 AI 逐文件调 `copy-assets` 复制（与单文件同命令）
+- 契约不变：输出已存在仍停下询问覆盖
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）逐行断句的翻译质感：不变（分块契约限制，未改 pipeline）
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （原）既有项目旧版 `.md2zh_tools/config.json`：按 SKILL.md「历史遗留」说明直接删除
+- （新增）无
+
+
+### 2026-08-05：配置全局化（废弃项目级 .md2zh_tools/config.json）
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | 配置从两级（skill 级 `scripts/config.py` + 项目级 `.md2zh_tools/config.json`）合并为**一份全局配置** `scripts/config.py`：`md2zh_config` = `python_path`（必填）+ `ambiguous_content_decider`（user/ai）；用户决策：configure 子命令保留（改写全局）、python 配置与 web2md 对齐（只留 `python_path`，无 mode；auto 探测仅向导兜底）、旧 config.json 删除 |
+| 脚本改动 | `md2zh_pipeline.py`：新增 `global_config_path()` / `load_global_config()`（exec 读取 config.py，缺失/损坏 → ConfigRequiredError 提示向导）/ `CONFIG_PY_TEMPLATE`（configure 原子写回）；删除 `project_config_path` / `load_project_config` / `python_candidates` / `PYTHON_MODES` 与 mode 分支；`resolve_python(python_path)` 显式路径校验 + 缺省探测当前解释器；`ensure_current_python(config)` 直接校验 sys.executable == config.python_path；`configure` 去掉 `project_root` 参数（无使用者）；`extract`/`configure` 加 `--config`（CLI 临时覆盖，selftest 隔离用） |
+| 配置 | `config.example.py` 增 `ambiguous_content_decider` 键 + 借鉴 web2md 注释质量（防坑说明）；真实 `scripts/config.py` 补 decider 默认 user、python_path 保留现值 |
+| 测试 | `selftest.py`：`--config` 指向临时文件隔离真实配置；`test_configure_writes_project_config` → `test_configure_writes_global_config`（exec 读回校验 python_path + decider）→ 10 用例全绿（exit=0） |
+| 文档 | SKILL.md 配置向导章节合并为单级、configure 命令去掉 `--python-mode`、产物结构图删 config.json、补"历史遗留 config.json 不再读取"；translation-rules.md 读配置表述改为 skill 级 |
+
+**过程要点**：
+- 踩坑 1：`CONFIG_PY_TEMPLATE` 用 `.format()` 时字面花括号 `{`/`}` 被当字段 → KeyError，转义为 `{{`/`}}` 后修复
+- 踩坑 2：configure 自动探测初版扫候选列表（.venv/venv → PATH → py → current），多 Python 机器上先命中 PATH 的 `C:\Python314\python.EXE` 而当前解释器是 python311 → `same_executable` 校验拒绝、configure 失败；参考 web2md 模式（脚本不做探测，候选扫描是 AI 向导的工作）修正为**缺省只探测当前解释器**（AI 正用它跑 pipeline，必然满足"全程同一个 Python"），删除 `python_candidates`，`configure` 去掉 `project_root` 参数
+- `--config` 参数经 parents 共享 parser 加到 configure/extract（唯二读配置的命令）；其余命令用 state 内 snapshot（runtime/decision_source），不读配置
+- 全 skill grep 复核无 `config.json` / `python-mode` / `PYTHON_MODES` 残留；工作区内无遗留 config.json
+- 向导禁止预填约束不受影响：configure 写入的是用户确认后的值
+
+**遗留事项更新**：
+- （原）术语表文件化：仍待做（模型内存跨块保留）
+- （原）逐行断句的翻译质感：不变（分块契约限制，未改 pipeline）
+- （原）pipeline 独立运行：有意不做（保持不变）
+- （新增）既有项目若残留旧版 `.md2zh_tools/config.json`：不再读取，按 SKILL.md「历史遗留」说明直接删除
+
+
 ### 2026-08-03：单文件 / 树形判定规则优化（按 .md 数量替代"是否目录"）
 
 | 类别 | 内容 |
