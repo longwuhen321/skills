@@ -25,6 +25,20 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-07] KaTeX auto-render 裸 TeX 定界符漏转换（kalmanfilter.net，已修复）
+
+- **现象**：kalmanfilter.net 首页（自定义站点）用 KaTeX auto-render 渲染公式，源码 HTML 中公式是**裸文本** `\(...\)`（125 处）与 `\[...\]`（60 处），没有包在 `class="math"` / `<math>` / MathJax `<script>` 等脚本能识别的标记里（全页仅 1 处 `class="math"` 被转换）。脚本报告「转换了 1 个数学公式」，185 处公式以 `\(...\)` / `\[...\]` 原样残留到 Markdown。该站同时混用 `$$...$$` 与 `\[...\]` 两种显示定界符。
+- **根因**：`process_math_formulas` 只识别 5 种标记（Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>` MathML、`class="math"`、`<mjx-container>`）；SKILL.md §3 的「`\(...\)` 已由脚本自动转 `$...$`」只覆盖 Sphinx 的 `class="math"` 内定界符，KaTeX auto-render 站点的裸文本定界符（非 Sphinx 结构）不在脚本处理范围内。
+- **修复**：`scripts/web2md.py` 新增 `convert_plain_tex_delimiters`（`process_math_formulas` 之后运行，DOM 文本节点级，跳过 code/pre/script/style/math 子树）：单文本节点内配对 `\(...\)` → `$...$`、`\[...\]` → `$$...$$`；保护 `\\[` 行距（开定界符前字符是反斜杠）、`\left(` `\left[`（反斜杠不在括号前，天然不匹配）、`\\)`/`\\]` 转义；`\]` 后粘连正文由现有 `$$` 独占一行机制自动拆行；跨节点配对（定界符与内容被标签打断）不做替换，计数输出交 AI 复核。另新增 `_paragraph_stats` 段落切碎检测与「非平台结构页面」诊断输出（触发 AI 读取 `references/custom-site-rules.md`）。回归测试 `scripts/debug/test_custom_site.py` 12 用例全绿。
+- **排查方法**：脚本输出「检测到裸 TeX 定界符: 行内 N，显示 N，跨节点疑似 N」即命中此类；跨节点疑似需 AI 通读定位修复（如合并打断的 span 或手工补定界符）。
+
+## [2026-08-07] markdownify 保留源码硬换行，段落被切碎（kalmanfilter.net，已修复）
+
+- **现象**：转换产物中每个自然段被 HTML 源码硬换行切成 2–6 行短行（kalmanfilter.net 首页 226 个普通段落中 71 个被切碎 + 8 个列表项含续行），在 Typora 中观感像分段。该问题是通用模式（HTML 源码按编辑习惯每行 ~90 字符硬换行，非自定义站点特有）。
+- **根因**：markdownify 保留 HTML 文本节点内的源码换行；密集短段落放大了 Typora 主题段间距的感知。
+- **修复**：新增 `scripts/merge_paragraphs.py`（`merge_markdown_paragraphs` 函数 + CLI）：普通段落连续非空行合并为一行（空格连接、保留首行缩进）；列表项 `-/*/+` 前缀行 + 后续 2 空格缩进文字续行并入首行（去尾部 hard-break 空格）；`$$` 公式块内部、公式标签行（缩进 + 行尾两空格）、嵌套子列表、Sphinx 定义列表（term + 缩进定义段 / `: ` 前缀行）逐字节保护；双空行压缩为单个（块外）。配置 `merge_paragraphs`（默认 false）+ CLI `--merge-paragraphs`；web2md.py 在 `_paragraph_stats` 切碎检测命中（≥50%）时提示启用。
+- **排查方法**：抓取报告「段落切碎检测: N/M 段」命中时启用 `--merge-paragraphs`；合并后重跑 final_verify 确认结构未破坏。**踩坑记录**：① 空行压缩条件必须 `skip >= 1` 时输出一个空行（写成 `>= 2` 会误删全部段落间空行——曾致整个文件变成无空行，靠备份恢复）；② 列表项续行判断必须用原始行（`strip()` 后永远没有前导空格，会漏合并）；③ Windows 子进程捕获脚本输出需 `errors='replace'`（emoji 输出按 GBK 编码解码会抛 UnicodeDecodeError）。
+
 ## [2026-08-03] collect_children 在 VitePress 普通页面漏识别（纯锚点/.html 重定向/可展开分组，已修复）
 
 - **现象**：`modules/modules_main.html`（VitePress 普通页面，非 index）在导航下有 9 个子页面 + 10 个孙页面，但 `collect_children` 误报"该页面无严格导航子页面"；AI 判断通道确认页面导航真实存在。

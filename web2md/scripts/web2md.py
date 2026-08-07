@@ -32,7 +32,7 @@ def load_config() -> dict:
     缺失/损坏时打印提示并降级为默认值（脚本仍可独立命令行运行），
     首次配置请参考 config.example.py 或运行 /web2md 配置向导。
     """
-    defaults = {'python_path': '', 'timeout': 30, 'collect_children': False}
+    defaults = {'python_path': '', 'timeout': 30, 'collect_children': False, 'merge_paragraphs': False}
     if not os.path.exists(CONFIG_PATH):
         print(f"⚠️ 找不到配置文件: {CONFIG_PATH}")
         print("   请先运行 /web2md 完成首次配置（复制 config.example.py → scripts/config.py）")
@@ -522,6 +522,116 @@ def process_math_formulas(soup) -> int:
     return count
 
 
+PLAIN_TEX_OPEN = re.compile(r'\\([\[(])')
+
+
+def _find_plain_close(text: str, start: int, closer: str) -> int:
+    """从 start 起找第一个非转义的闭定界符（\\) / \\]）。
+
+    闭定界符是「反斜杠 + 括号」（\\) / \\]），不是裸括号；
+    \\) / \\] 前一个字符是反斜杠时视为转义（如 \\] 行距闭合），跳过。
+    找不到返回 -1（= 跨节点配对，交 AI 复核）。
+    """
+    tok = '\\' + closer
+    j = text.find(tok, start)
+    while j != -1:
+        if j > 0 and text[j - 1] == '\\':
+            j = text.find(tok, j + 1)
+            continue
+        return j
+    return -1
+
+
+def convert_plain_tex_delimiters(soup) -> tuple:
+    """把 KaTeX auto-render / MathJax tex2jax 站点的裸 TeX 定界符转为 Typora 定界符。
+
+    只处理文本节点内的配对：
+      - \\(...\\) → $...$（行内）
+      - \\[...\\] → $$...$$（显示，独占一行由 html_to_markdown 的 $$ 机制兜底）
+    \\[ 行距（\\[0.5em]、前字符为反斜杠）与 \\left( \\left[ 不匹配（反斜杠不在括号前），
+    不受影响；class="math" 等受保护子树已由 process_math_formulas 处理，不重复转换。
+    跨节点配对（定界符与内容被 span 打断）不做替换，返回疑似计数交 AI 复核。
+    返回 (行内数, 显示数, 跨节点疑似数)。
+    """
+    inline = display = cross = 0
+    for node in soup.find_all(string=True):
+        if is_protected_text_node(node):
+            continue
+        text = str(node)
+        if not text or ('\\(' not in text and '\\[' not in text):
+            continue
+        parts = []
+        i = 0
+        changed = False
+        while i < len(text):
+            m = PLAIN_TEX_OPEN.search(text, i)
+            if not m:
+                parts.append(text[i:])
+                break
+            # \\[ 行距等：开定界符前一个字符是反斜杠 → 跳过
+            if m.start() > 0 and text[m.start() - 1] == '\\':
+                parts.append(text[i:m.end()])
+                i = m.end()
+                continue
+            opener, closer, repl = m.group(1), (')' if m.group(1) == '(' else ']'), \
+                                   ('$' if m.group(1) == '(' else '$$')
+            j = _find_plain_close(text, m.end(), closer)
+            if j == -1:
+                # 跨节点配对（或本站残缺定界符）：保留原文，交 AI 复核
+                parts.append(text[i:m.end()])
+                i = m.end()
+                cross += 1
+                continue
+            parts.append(text[i:m.start()] + repl + text[m.end():j] + repl)
+            changed = True
+            if m.group(1) == '(':
+                inline += 1
+            else:
+                display += 1
+            i = j + 2   # 跳过整个闭定界符（\ 和括号两个字符）
+        if changed:
+            node.replace_with(NavigableString(''.join(parts)))
+    return inline, display, cross
+
+
+def _paragraph_stats(text: str) -> tuple:
+    """统计 Markdown 中普通段落被源码硬换行切碎的情况。
+
+    忽略 $$ 块、标题、引用、图片、列表项等非普通段落结构。
+    返回 (切碎段数, 总段数)；切碎 = 段内 >=2 行且每行 <80 字符。
+    """
+    lines = text.splitlines()
+    blocks, cur = [], []
+    in_math = False
+    for l in lines:
+        s = l.strip()
+        if s.startswith('$$'):
+            in_math = not in_math
+            if cur:
+                blocks.append(cur)
+                cur = []
+            continue
+        if in_math:
+            continue
+        if s == '':
+            if cur:
+                blocks.append(cur)
+                cur = []
+            continue
+        if s.startswith(('#', '>', '![')) or s.startswith(('- ', '* ', '+ ')):
+            if cur:
+                blocks.append(cur)
+                cur = []
+            continue
+        if l.startswith(' ') and re.match(r'^\s{2,}\S', l):
+            continue   # 缩进行（列表续行/定义列表段/公式标签行）不属于普通段落
+        cur.append(l)
+    if cur:
+        blocks.append(cur)
+    chopped = sum(1 for b in blocks if len(b) >= 2 and max(len(x) for x in b) < 80)
+    return chopped, len(blocks)
+
+
 def normalize_definition_list_tables(markdown: str) -> str:
     """去掉 markdownify 嵌套在定义列表标记下的表格缩进，让 Typora 能解析"""
     lines = markdown.splitlines()
@@ -915,10 +1025,34 @@ def process_page(soup, final_url, raw_html, title_text, output_root, cfg, sessio
         if math_count:
             print(f"  转换了 {math_count} 个数学公式")
 
+        # KaTeX auto-render / MathJax tex2jax 站点：公式是裸文本 \(...\) / \[...\] 定界符，
+        # 无 class="math" 等标记，此处兜底转换（跨节点配对交 AI 复核）
+        inline_n, display_n, cross_n = convert_plain_tex_delimiters(soup)
+        if inline_n or display_n or cross_n:
+            print(
+                f"  🔎 检测到裸 TeX 定界符（KaTeX auto-render 站点）: "
+                f"行内 {inline_n}，显示 {display_n}，跨节点疑似 {cross_n}"
+            )
+            print("  ✅ 已自动转换为 $ / $$ 定界符")
+            if cross_n:
+                print(f"  ⚠️ {cross_n} 处疑似跨节点配对（定界符与内容被标签打断），需 AI 助手复核（见 references/custom-site-rules.md）")
+
         img_mapping = download_images(soup, assets_dir, final_url, session, cfg['timeout'])
 
         print("📝 转换为 Markdown...")
         markdown_text = html_to_markdown(soup, img_mapping, final_url, assets_folder_name)
+
+        # 段落切碎检测：源码硬换行切碎的段落 → 提示可合并（通用能力，所有站点适用）
+        chopped, total = _paragraph_stats(markdown_text)
+        if total and chopped / total >= 0.5:
+            print(
+                f"  📋 段落切碎检测: {chopped}/{total} 段被源码硬换行切碎（≥50%），"
+                f"建议启用段落合并（config merge_paragraphs 或 --merge-paragraphs）"
+            )
+        if cfg.get('merge_paragraphs'):
+            from merge_paragraphs import merge_markdown_paragraphs
+            markdown_text = merge_markdown_paragraphs(markdown_text)
+            print("  📋 已合并段落内的源码硬换行（merge_paragraphs）")
 
         md_path = article_dir / f"{folder_name}.md"
         with open(md_path, 'w', encoding='utf-8') as f:
@@ -1057,12 +1191,16 @@ def main():
                         help='不收集导航子页面（覆盖 config.py 的 collect_children）')
     parser.add_argument('--children-from', metavar='FILE',
                         help='从 AI 助手写的子页面清单文件抓取子/孙页面（优先于规则解析；格式见 SKILL.md）')
+    parser.add_argument('--merge-paragraphs', action='store_true', default=None,
+                        help='转换后合并段落内的源码硬换行（覆盖 config.py 的 merge_paragraphs）')
     args = parser.parse_args()
 
     url = args.url
     output_root = Path(args.output_root)
     cfg = load_config()
     collect = args.children if args.children is not None else bool(cfg.get('collect_children', False))
+    if args.merge_paragraphs is not None:
+        cfg['merge_paragraphs'] = args.merge_paragraphs
     children_list = None
     if args.children_from:
         try:

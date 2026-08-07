@@ -24,4 +24,9 @@ web2md_config = {
     # true = 额外抓取当前页面在导航树下的子页面并嵌套落盘；false = 只抓当前页面（默认）。
     # 可被 CLI 参数 --children / --no-children 覆盖。
     "collect_children": False,
+
+    # 是否在转换后合并段落内的源码硬换行（普通段落合并为一行，列表项续行并入首行）。
+    # 适用于 HTML 源码硬换行把自然段切碎的站点（多为自定义站点；Sphinx/GitBook 通常不触发）。
+    # true = 合并；false = 保留源码换行（默认）。可被 CLI 参数 --merge-paragraphs 覆盖。
+    "merge_paragraphs": False,
 }
