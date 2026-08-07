@@ -32,7 +32,8 @@ def load_config() -> dict:
     缺失/损坏时打印提示并降级为默认值（脚本仍可独立命令行运行），
     首次配置请参考 config.example.py 或运行 /web2md 配置向导。
     """
-    defaults = {'python_path': '', 'timeout': 30, 'collect_children': False, 'merge_paragraphs': False}
+    defaults = {'python_path': '', 'timeout': 30, 'collect_children': False,
+                'merge_paragraphs': False, 'table_formula_inline': True}
     if not os.path.exists(CONFIG_PATH):
         print(f"⚠️ 找不到配置文件: {CONFIG_PATH}")
         print("   请先运行 /web2md 完成首次配置（复制 config.example.py → scripts/config.py）")
@@ -288,12 +289,13 @@ def normalize_document_links(soup, base_url: str, sphinx: bool) -> int:
     return count
 
 
-def normalize_document_html(soup, base_url: str) -> dict:
+def normalize_document_html(soup, base_url: str, title_text=None) -> dict:
     """提取任何 LaTeX 之前，先规范化非数学的 DOM 内容（链接/标题/占位符）"""
     sphinx = is_sphinx_document(soup)
     if is_gitbook_document(soup):
         # 先删 GitBook 导航/搜索模板，避免其链接被绝对化后残留
         remove_gitbook_chrome(soup)
+    duplicate_h1 = strip_duplicate_h1(soup, title_text)
     headings = link_sphinx_headings(soup, base_url) if sphinx else 0
     links = normalize_document_links(soup, base_url, sphinx)
     placeholders = protect_angle_placeholders(soup)
@@ -301,7 +303,26 @@ def normalize_document_html(soup, base_url: str) -> dict:
         'sphinx_headings': headings,
         'links': links,
         'placeholders': placeholders,
+        'duplicate_h1': duplicate_h1,
     }
+
+
+def strip_duplicate_h1(soup, title_text) -> int:
+    """剥离页面自身与脚本前缀标题重复的第一个 h1（extract_title 优先取第一个非空 h1，
+    两者文本相同时，脚本前缀 `# {title}` 已涵盖它，避免 md 出现两个同名 H1）。
+    含 math/code/pre/script/style 子树的 h1 不剥离——保护公式载荷与代码格式。
+    """
+    if not title_text:
+        return 0
+    h1 = soup.find('h1')
+    if not h1:
+        return 0
+    if any(t.name in PROTECTED_TEXT_TAGS or is_math_container(t) for t in h1.find_all(True)):
+        return 0
+    if clean_title_math(_clean_invisible_chars(h1.get_text(strip=True))) != title_text:
+        return 0
+    h1.decompose()
+    return 1
 
 
 def _mathml_to_latex(el) -> str:
@@ -542,12 +563,16 @@ def _find_plain_close(text: str, start: int, closer: str) -> int:
     return -1
 
 
-def convert_plain_tex_delimiters(soup) -> tuple:
+def convert_plain_tex_delimiters(soup, table_formula_inline: bool = True) -> tuple:
     """把 KaTeX auto-render / MathJax tex2jax 站点的裸 TeX 定界符转为 Typora 定界符。
 
     只处理文本节点内的配对：
       - \\(...\\) → $...$（行内）
       - \\[...\\] → $$...$$（显示，独占一行由 html_to_markdown 的 $$ 机制兜底）
+      - table_formula_inline 时，<td>/<th> 单元格内的 \\[...\\] → $...$（行内）——
+        markdown 表格单元格无法容纳 $$ 块（独占行 + 空行会撕裂表格），
+        行内定界符让公式留在单元格内（含 \\\\ 行断的多行公式由 AI 按
+        references/custom-site-rules.md §2 的 aligned 化规则处理）
     \\[ 行距（\\[0.5em]、前字符为反斜杠）与 \\left( \\left[ 不匹配（反斜杠不在括号前），
     不受影响；class="math" 等受保护子树已由 process_math_formulas 处理，不重复转换。
     跨节点配对（定界符与内容被 span 打断）不做替换，返回疑似计数交 AI 复核。
@@ -560,6 +585,9 @@ def convert_plain_tex_delimiters(soup) -> tuple:
         text = str(node)
         if not text or ('\\(' not in text and '\\[' not in text):
             continue
+        in_table_cell = bool(table_formula_inline
+                             and (node.find_parent('td') is not None
+                                  or node.find_parent('th') is not None))
         parts = []
         i = 0
         changed = False
@@ -574,7 +602,7 @@ def convert_plain_tex_delimiters(soup) -> tuple:
                 i = m.end()
                 continue
             opener, closer, repl = m.group(1), (')' if m.group(1) == '(' else ']'), \
-                                   ('$' if m.group(1) == '(' else '$$')
+                                   ('$' if (m.group(1) == '(' or in_table_cell) else '$$')
             j = _find_plain_close(text, m.end(), closer)
             if j == -1:
                 # 跨节点配对（或本站残缺定界符）：保留原文，交 AI 复核
@@ -584,7 +612,7 @@ def convert_plain_tex_delimiters(soup) -> tuple:
                 continue
             parts.append(text[i:m.start()] + repl + text[m.end():j] + repl)
             changed = True
-            if m.group(1) == '(':
+            if m.group(1) == '(' or in_table_cell:
                 inline += 1
             else:
                 display += 1
@@ -655,6 +683,30 @@ def normalize_definition_list_tables(markdown: str) -> str:
     return '\n'.join(normalized)
 
 
+def ensure_table_separators(markdown: str) -> str:
+    """表格块（连续 | 开头行）后若非空行则补空行，避免表格与公式块/段落粘连。
+
+    markdownify 在表格后紧邻块级元素（KaTeX 公式块、段落）时不输出空行，
+    表格行与下一块之间缺少空行会让 Typora 渲染错乱（如「表格行 + $$ 块」粘连）。
+    补空行是机械操作，不影响内容；已有空行时不动。
+    """
+    lines = markdown.split('\n')
+    out = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        l = lines[i]
+        out.append(l)
+        if l.strip().startswith('|'):
+            while i + 1 < n and lines[i + 1].strip().startswith('|'):
+                i += 1
+                out.append(lines[i])
+            if i + 1 < n and lines[i + 1].strip():
+                out.append('')
+        i += 1
+    return '\n'.join(out)
+
+
 def html_to_markdown(soup, img_mapping: dict, base_url: str, assets_folder_name: str) -> str:
     is_wiki = 'wikipedia.org' in base_url or 'wikimedia.org' in base_url
 
@@ -700,6 +752,7 @@ def html_to_markdown(soup, img_mapping: dict, base_url: str, assets_folder_name:
 
     markdown = md(html_str, heading_style="ATX", bullets="-", strip=['meta', 'link'])
     markdown = normalize_definition_list_tables(markdown)
+    markdown = ensure_table_separators(markdown)
 
     # 确保 $$ 公式块独占一行（Wikipedia display math 嵌入 <p> 中，转换后黏在行末）
     markdown = re.sub(r'([^\n])\$\$', lambda m: m.group(1) + '\n\n$$', markdown)
@@ -728,20 +781,61 @@ def fetch_page(url: str, session: requests.Session, timeout: int = 30) -> tuple:
     return soup, resp.url, resp.text
 
 
+TITLE_MATH_UNICODE = {
+    # 希腊字母（小写）
+    '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ', '\\delta': 'δ',
+    '\\epsilon': 'ε', '\\varepsilon': 'ε', '\\zeta': 'ζ', '\\eta': 'η',
+    '\\theta': 'θ', '\\vartheta': 'ϑ', '\\iota': 'ι', '\\kappa': 'κ',
+    '\\lambda': 'λ', '\\mu': 'μ', '\\nu': 'ν', '\\xi': 'ξ', '\\pi': 'π',
+    '\\rho': 'ρ', '\\sigma': 'σ', '\\varsigma': 'ς', '\\tau': 'τ',
+    '\\upsilon': 'υ', '\\phi': 'φ', '\\varphi': 'φ', '\\chi': 'χ',
+    '\\psi': 'ψ', '\\omega': 'ω',
+    # 希腊字母（大写）
+    '\\Gamma': 'Γ', '\\Delta': 'Δ', '\\Theta': 'Θ', '\\Lambda': 'Λ',
+    '\\Xi': 'Ξ', '\\Pi': 'Π', '\\Sigma': 'Σ', '\\Upsilon': 'Υ',
+    '\\Phi': 'Φ', '\\Psi': 'Ψ', '\\Omega': 'Ω',
+    # 常用运算符/符号
+    '\\times': '×', '\\cdot': '·', '\\pm': '±', '\\mp': '∓',
+    '\\rightarrow': '→', '\\leftarrow': '←', '\\Rightarrow': '⇒',
+    '\\Leftrightarrow': '⇔', '\\leq': '≤', '\\geq': '≥', '\\neq': '≠',
+    '\\approx': '≈', '\\infty': '∞', '\\in': '∈', '\\notin': '∉',
+    '\\subset': '⊂', '\\subseteq': '⊆', '\\supset': '⊃', '\\supseteq': '⊇',
+    '\\cup': '∪', '\\cap': '∩', '\\oplus': '⊕', '\\otimes': '⊗',
+    '\\propto': '∝', '\\dots': '…', '\\ldots': '…', '\\cdots': '⋯',
+    '\\partial': '∂', '\\nabla': '∇', '\\sum': 'Σ', '\\prod': '∏',
+    '\\int': '∫', '\\sqrt': '√', '\\degree': '°',
+}
+
+
+def clean_title_math(text: str) -> str:
+    """把标题中的裸 TeX 数学命令转 Unicode、去掉 \( \) \[ \] 定界符并压缩空白。
+
+    部分站点作者在标题里用数学模式写希腊字母（如 `<h1>The \( \alpha \) filter</h1>`），
+    若原样进入 sanitize_filename，`\` 会被当作路径分隔符替换成 `-`（文件夹乱码），
+    且 md 前缀 H1 会残留裸定界符。此处做机械清理：定界符去除 + 常见命令映射 +
+    空白压缩；未映射的 LaTeX 命令保留原样（不误删），由 AI 酌情调整。
+    """
+    text = text.replace(r'\(', ' ').replace(r'\)', ' ').replace(r'\[', ' ').replace(r'\]', ' ')
+    for cmd in sorted(TITLE_MATH_UNICODE, key=len, reverse=True):
+        text = re.sub(r'(?<![A-Za-z])' + re.escape(cmd) + r'(?![A-Za-z])',
+                      TITLE_MATH_UNICODE[cmd], text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def extract_title(soup):
     """从页面提取标题（优先主标题 h1，其次 og:title/<title>，去掉 ' | 站点名' 后缀）
 
-    同时清除零宽/不可见字符（如 U+200B 零宽空格，部分站点 h1 自带），
-    避免混入文件夹名与 md 标题。
+    同时清除零宽/不可见字符（如 U+200B 零宽空格，部分站点 h1 自带），并把裸 TeX
+    数学命令转为 Unicode（clean_title_math）——避免混入文件夹名与 md 标题时乱码。
     """
     h1 = soup.find('h1')
     if h1 and h1.get_text(strip=True):
-        return _clean_invisible_chars(h1.get_text(strip=True))
+        return clean_title_math(_clean_invisible_chars(h1.get_text(strip=True)))
     title = soup.find('meta', property='og:title') or soup.find('meta', attrs={'name': 'twitter:title'})
     if title and title.get('content'):
-        return _clean_invisible_chars(title['content'].strip().split(' | ')[0].strip())
+        return clean_title_math(_clean_invisible_chars(title['content'].strip().split(' | ')[0].strip()))
     if soup.title and soup.title.string:
-        return _clean_invisible_chars(soup.title.string.strip().split(' | ')[0].strip())
+        return clean_title_math(_clean_invisible_chars(soup.title.string.strip().split(' | ')[0].strip()))
     return "untitled"
 
 
@@ -1011,13 +1105,14 @@ def process_page(soup, final_url, raw_html, title_text, output_root, cfg, sessio
     print(f"📁 文件夹: {article_dir}")
 
     try:
-        normalize_stats = normalize_document_html(soup, final_url)
+        normalize_stats = normalize_document_html(soup, final_url, title_text)
         if any(normalize_stats.values()):
             print(
                 "🔗 规范化文档: "
                 f"标题 {normalize_stats['sphinx_headings']}，"
                 f"链接 {normalize_stats['links']}，"
-                f"占位符 {normalize_stats['placeholders']}"
+                f"占位符 {normalize_stats['placeholders']}，"
+                f"重复 H1 {normalize_stats['duplicate_h1']}"
             )
 
         print("🔢 处理数学公式...")
@@ -1027,7 +1122,8 @@ def process_page(soup, final_url, raw_html, title_text, output_root, cfg, sessio
 
         # KaTeX auto-render / MathJax tex2jax 站点：公式是裸文本 \(...\) / \[...\] 定界符，
         # 无 class="math" 等标记，此处兜底转换（跨节点配对交 AI 复核）
-        inline_n, display_n, cross_n = convert_plain_tex_delimiters(soup)
+        inline_n, display_n, cross_n = convert_plain_tex_delimiters(
+            soup, cfg.get('table_formula_inline', True))
         if inline_n or display_n or cross_n:
             print(
                 f"  🔎 检测到裸 TeX 定界符（KaTeX auto-render 站点）: "
@@ -1193,6 +1289,10 @@ def main():
                         help='从 AI 助手写的子页面清单文件抓取子/孙页面（优先于规则解析；格式见 SKILL.md）')
     parser.add_argument('--merge-paragraphs', action='store_true', default=None,
                         help='转换后合并段落内的源码硬换行（覆盖 config.py 的 merge_paragraphs）')
+    parser.add_argument('--table-formula-inline', action='store_true', default=None,
+                        help='表格单元格内显示公式行内化（覆盖 config.py 的 table_formula_inline）')
+    parser.add_argument('--no-table-formula-inline', action='store_false', dest='table_formula_inline',
+                        help='不将表格单元格内显示公式行内化（覆盖 config.py 的 table_formula_inline）')
     args = parser.parse_args()
 
     url = args.url
@@ -1201,6 +1301,8 @@ def main():
     collect = args.children if args.children is not None else bool(cfg.get('collect_children', False))
     if args.merge_paragraphs is not None:
         cfg['merge_paragraphs'] = args.merge_paragraphs
+    if args.table_formula_inline is not None:
+        cfg['table_formula_inline'] = args.table_formula_inline
     children_list = None
     if args.children_from:
         try:

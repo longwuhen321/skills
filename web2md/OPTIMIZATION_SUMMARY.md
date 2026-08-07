@@ -33,6 +33,26 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-07：页面自身 h1 与脚本前缀标题重复时剥离（单 H1 方案）
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | `web2md.py` 新增 `strip_duplicate_h1(soup, title_text)`：页面第一个非空 h1 文本（`_clean_invisible_chars` + `get_text(strip=True)`）与 `extract_title` 提取标题完全相同时剥离该 h1（脚本前缀 `# {title}` 已涵盖它，避免 md 出现两个同名 H1）；`normalize_document_html` 增加可选参 `title_text=None`（缺省不剥离，旧调用方/测试向后兼容），stats 新增 `duplicate_h1` 计数，`process_page` 传入 title_text 并在规范化报告输出「重复 H1 N」 |
+| 保护机制 | h1 内含 math/code/pre/script/style 子树时不剥离（`PROTECTED_TEXT_TAGS` + `is_math_container` 守卫）——公式载荷与代码格式绝不因标题去重丢失；比较源与 `extract_title` 同源（同一 get_text 路径），不存在误判路径 |
+| 流程改动 | SKILL.md 第三步 DOM 规范化说明补一句「页面自身与提取标题重复的 h1 自动剥离」 |
+| 测试 | `test_custom_site.py` 新增 `StripDuplicateH1Tests` 8 用例（重复剥离/不同 h1 保留/无 title/无 h1/math 守卫/code 守卫/空白容忍/`normalize_document_html` 入口与向后兼容）→ selftest 78 用例全绿（原 70 + 新 8） |
+| 验证 | 真实端到端（kalmanfilter.net/background.html 抓到临时目录）：规范化报告「重复 H1 1」，md 前缀 H1 后直接接正文、无双 H1；验证产物用后即清 |
+
+**过程要点**：
+- 触发场景：kalmanfilter.net 等自定义站点 h1 在正文容器里被完整保留，与脚本前缀 H1 同名重复（Sphinx/GitBook 站点的 h1 多在 chrome 区被清理，通常无此问题；Sphinx 页面 h1 带 headerlink 链接时也一并去除——源章节可溯性由前缀「原文链接」承担）
+- 设计取舍：剥离发生在 DOM 规范化层（`normalize_document_html` 内、公式提取前），不比对 md 文本——Sphinx 标题链接化后 md 形态多变，DOM 层文本比较更稳；守卫只保 math/code 类子树，普通嵌套标签（`<em>`/`<span>`）不阻止剥离（文本相同即视为重复）
+- 与 `extract_title` 的耦合：title_text 非空 h1 存在时必取自第一个 h1，故比较天然同源；og:title 兜底路径仅在无非空 h1 时生效，无 h1 则无可剥离对象
+
+**遗留事项更新**：
+- （原）跨节点裸定界符配对仍靠 AI 手工修复 → 不变
+- （原）`merge_paragraphs` 默认 false，靠切碎检测提示启用 → 不变
+- （新增）无
+
 ### 2026-08-07：脚本技术要点外置（references/script-development-rules.md）
 
 | 类别 | 内容 |
@@ -174,3 +194,19 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 - `config.py` 的 `merge_paragraphs` 默认 false，靠切碎检测提示启用（2026-08-07）
 - 跨节点裸定界符配对仍靠 AI 手工修复（脚本只计数提示，2026-08-07）
 
+
+### 2026-08-07：表格单元格内显示公式行内化（table_formula_inline）
+
+| | |
+|------|------|
+| 新功能 | `table_formula_inline`（默认 true）：`convert_plain_tex_delimiters` 把 `<td>`/`<th>` 内 `\[...\]` → `$...$` 行内，防 `$$` 块 + 空行撕裂表格；`--table-formula-inline` / `--no-table-formula-inline` CLI 覆盖 |
+| 配套 | `list_display_fixes` 表格行内公式（`|` 开头行）不自动升级 `$$`（列为「表格内（保持 $）」候选）；SKILL.md 阶段 B/D、custom-site-rules.md §2、script-development-rules.md 防御表同步 |
+| 测试 | 103 → 110 用例（td/th 行内化 6 个 + list_display_fixes 表格内不升级 3 个），selftest 全绿 |
+
+关键认知（2026-08-07 处理 kalmanfilter.net 推导表沉淀）：
+1. markdown 表格单元格无法容纳 `$$` 块（独占行 + 空行结束表格）——单元格内公式行内化是唯一出路
+2. 表格单元格内 `$...$` 含 `\` 在 Typora **不换行**（inline 模式 `\` 无效）+ `\left...\right` 跨行不配对（渲染失败/回退单行）→ 多行公式需 AI 改写为 `$\begin{aligned}...\end{aligned}$`（单物理行、`\` 换行、`&` 对齐、外层跨行括号改 `\Bigg( \Bigg)` 手动大小）——**判断由 AI 做，脚本只做行内化**
+3. 用户编辑器会在块间自动插入空行（表格行间/代码围栏内），破坏表格与围栏配对——交付前需检查「空行前后都是 `|` 行」模式并清理；围栏修复脚本的切片边界必须精确（含/不含开闭标记，off-by-one 会连锁破坏后续代码块的定位锚点）
+
+遗留事项更新：
+- 表格内多行公式 aligned 化由 AI 在阶段 C/D 处理（脚本不自动改公式结构）

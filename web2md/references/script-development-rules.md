@@ -20,7 +20,13 @@
 | 图片名截断 `max_len=60` | `sanitize_filename` | 避免超长文件名 |
 | 同页锚点过滤 | `collect_children` | 单页文档章节锚点（`commands.html#xxx`）与孙级锚点（`父页.html#xxx`）经 `_strip_fragment` 去 fragment 后与当前页/直接父页 URL 相同 → 跳过，避免重复抓取同一页面互相覆盖 |
 | 裸定界符配对保护 | `convert_plain_tex_delimiters` | 文本节点级配对 `\(...\)`/`\[...\]`；跳过 `\\[` 行距（开定界符前字符是反斜杠）、`\left(` `\left[` 天然不匹配、math/code 子树；跨节点配对不替换，计数输出交 AI 复核 |
-| 段落合并结构保护 | `merge_paragraphs.py` | `$$` 块内逐字节、公式标签行（缩进+行尾两空格）、嵌套子列表、Sphinx 定义列表（term+缩进定义段）不合并；空行压缩条件 `skip >= 1`（误写 `>= 2` 会删光段落间空行） |
+| 重复 H1 剥离守卫 | `strip_duplicate_h1` | 页面自身 h1 文本与 `extract_title` 提取标题相同时剥离（避免与脚本前缀 `# {title}` 重复）；含 math/code/pre/script/style 子树的 h1 不剥离；比较与 `extract_title` 同源，不存在误判路径 |
+| 标题数学清理 | `clean_title_math` | 标题含裸 TeX 定界符/命令（如 `\( \alpha \)`）时去定界符 + 希腊字母/常用运算符转 Unicode + 压缩空白；未映射命令保留不误删；`extract_title` 与 `strip_duplicate_h1` 共用同一清理，保证命名、前缀 H1、去重三者一致 |
+| 段落合并结构保护 | `merge_paragraphs.py` | `$$` 块内逐字节、公式标签行（缩进+行尾两空格）、嵌套子列表、Sphinx 定义列表（term+缩进定义段）、表格行（`\|` 开头）不合并；空行压缩条件 `skip >= 1`（误写 `>= 2` 会删光段落间空行）；`$$` 行先 flush `skip` 再切换 in_math（否则 `$$` 块前空行被吞） |
+| 表格后空行分隔 | `ensure_table_separators` | 表格块（连续 `\|` 开头行）后若非空行则补空行，避免表格与 `$$` 块/段落粘连（markdownify 表格后紧邻块级元素时不输出空行）；在 `html_to_markdown` 内无条件调用，不依赖 merge 开关 |
+| 表格单元格显示公式行内化 | `convert_plain_tex_delimiters` | `table_formula_inline`（默认 true，config + CLI 覆盖）时，`<td>`/`<th>` 祖先内 `\[...\]` → `$`（行内），防 `$$` 块 + 空行撕裂表格；仅文本节点级配对替换，受保护子树不动 |
+| 表格行内公式不升级 `$$` | `list_display_fixes` | 含 `\\begin{...}` 或 `\\` 行断的 `$...$` 若位于表格行内（去除空白后以 `\|` 开头且含第二个 `\|`）不自动升级 `$$`（会重新撕裂表格），列为「表格内（保持 $）」候选交 AI 复核 |
+| 表格后缺空行兜底 | `final_verify.py` 表格检测 | 有分隔行的真表格，块结束后下一行非空即报「行 N 表格后缺空行」FAIL——防止脚本补空行机制失效或手工编辑引入 |
 | 清单解析容错 | `parse_children_list` | `--children-from` 清单：注释/空行/备注列忽略，深层级缩进、缺 URL、无父页面的孙页面行跳过并警告——单行格式错误不中断整批抓取 |
 | `_clean_invisible_chars` 含 U+F0C1 | `extract_title` | Sphinx 标题锚点图标 ``（U+F0C1）与零宽/NBSP/BOM 一并清除，防止混入文件夹名与 md 标题 |
 | Wikimedia 限流退避 | `download_images` | HTTP 429 时递增等待 2/4/6 秒，Wikimedia 图片间加 0.3s 间隔 |

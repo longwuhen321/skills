@@ -78,6 +78,21 @@ def display_replacement(text, start, end, inner):
     return before + '$$\n' + inner + '\n$$' + after
 
 
+def line_text(text, pos):
+    """返回 pos 所在行的完整文本。"""
+    start = text.rfind('\n', 0, pos) + 1
+    end = text.find('\n', pos)
+    if end == -1:
+        end = len(text)
+    return text[start:end]
+
+
+def in_table_row(line):
+    """表格行判定：去除首尾空白后以 | 开头且含第二个 |（数据/表头行）。"""
+    s = line.strip()
+    return s.startswith('|') and s.find('|', 1) >= 0
+
+
 def main():
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != '--apply'):
         print('用法：python list_display_fixes.py <markdown_file> [--apply]')
@@ -95,6 +110,10 @@ def main():
         inner = text[start + 1:end - 1]
         line = text[:start].count('\n') + 1
         reasons, auto_apply = analyze_formula(inner)
+        if in_table_row(line_text(text, start)):
+            # 表格单元格内的公式保持 $ 行内（升级 $$ 会撕裂表格），列候选供 AI 复核
+            auto_apply = False
+            reasons.append('表格内（保持 $）')
         if reasons:
             needs_display.append((line, inner, reasons, auto_apply))
         if apply_changes and auto_apply:

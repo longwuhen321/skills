@@ -29,4 +29,11 @@ web2md_config = {
     # 适用于 HTML 源码硬换行把自然段切碎的站点（多为自定义站点；Sphinx/GitBook 通常不触发）。
     # true = 合并；false = 保留源码换行（默认）。可被 CLI 参数 --merge-paragraphs 覆盖。
     "merge_paragraphs": False,
+
+    # 是否把表格单元格（<td>/<th>）内的显示公式 \[...\] 行内化为 $...$（默认 true）。
+    # markdown 表格单元格无法容纳 $$ 块（独占行 + 空行会撕裂表格），行内化让公式留在
+    # 单元格内；含 \\ 行断的多行公式由 AI 按 custom-site-rules.md §2 的 aligned 化规则改写。
+    # true = 行内化（默认）；false = 保持显示公式转换（表格可能被撕裂，需 AI 重建）。
+    # 可被 CLI 参数 --table-formula-inline / --no-table-formula-inline 覆盖。
+    "table_formula_inline": True,
 }

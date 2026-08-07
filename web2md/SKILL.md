@@ -115,6 +115,8 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 
 - 非数学的相对链接改为绝对链接；Sphinx 片段链接转为源页面链接
 - 移除 Sphinx 标题锚点符号（``），同时把标题文本链接到源章节；`extract_title` 提取的文件夹/文件名标题同样清除 U+F0C1 与零宽字符
+- 标题含裸 TeX 定界符（如 `\( \alpha \)`）时 `clean_title_math` 自动转 Unicode（希腊字母/常用运算符映射表），文件夹名与 md 前缀标题不再乱码；未映射的 LaTeX 命令保留原样，由 AI 酌情调整
+- 页面自身 h1 与提取标题文本相同时剥离（避免与脚本前缀 `# {标题}` 重复出现两个同名 H1；含公式/代码子树的 h1 除外）
 - 把转义后的散文占位符（如 `&lt;path&gt;`）包成 `<code>`
 - 该过程**必须跳过** Wikipedia `.mwe-math-element`、MathJax `<script type="math/tex...">`、`<math>`、`class="math"` 以及所有 `<code>` / `<pre>` / `<script>` / `<style>` 子树；`process_math_formulas` 只在这些规范化完成之后运行。**绝不允许**为做链接/标题/占位符清理而事后改写公式载荷。
 
@@ -154,6 +156,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 | 含 `\\` 行断（多行公式） | 自动 → `$$` |
 | 长度 > 200 字符 | 列出仅复核（不自动升级） |
 | 其余单行公式 | 保持 `$`（Typora 行内公式可正常渲染；需要块级独占行时才考虑 `$$`） |
+| 表格行内（`| ... $...$ ... |`） | 保持 `$`（升级 `$$` 会撕裂表格；多行公式见阶段 D 第 2 条 aligned 化规则） |
 
 > 脚本会掩码代码，代码内的公式绝不处理。不带 `--apply` 时只列出候选不修改。自动转换项也仍是机械操作——阶段 C 通读时必须逐一验证其渲染正确（含改过的和没改过的）。
 
@@ -195,8 +198,12 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 在通读全文时，除公式外一并检查 Markdown 结构：
 
-1. 每个表格有合法的分隔行、列数一致、无 `:   ` 或四空格代码块缩进
+1. 每个表格有合法的分隔行、列数一致、无 `:   ` 或四空格代码块缩进、表格后与下一块之间有空行（脚本 `ensure_table_separators` 已保证生成，final_verify 兜底检查「表格后缺空行」）
 2. 一个数学元组 / 序列 / 等式被拆进多个单元格时，按语义重建表格（不做页面特异的自动改写）
+   - **表格单元格内的公式**（`table_formula_inline` 开启时由脚本行内化为 `$...$`）：单行公式直接留在单元格内；
+     **含 `\\` 行断的多行公式**需由 AI 改写为 `$\begin{aligned} ... \end{aligned}$`（单物理行，`\\` 换行、
+     `&` 对齐；外层跨行括号改用手动大小 `\Bigg( ... \Bigg)`，禁用跨行 `\left...\right`——
+     它必须同行成对，跨行会渲染失败或回退单行），`\color` 等宏保持原样
 3. 每个本地图片引用目标真实存在；下载失败且未生成图片引用的视为无害，但**不留失效的本地引用**
 4. 围栏代码块闭合；散文占位符（如 `<path>`）已 code 化——行内代码、围栏代码、LaTeX 内部的占位符形状文本忽略
 5. Sphinx 页面：标题文本链接到精确源章节、无 `` 图标残留、相对非图片链接解析到源站点、无 `#cmdmount` 之类的旧本地命令锚点；公式类遗留（`\(...\)`、`(N)#\[` 锚点、裸 LaTeX 命令、`aligned` 内 `\label`）按 `references/formula-conversion-rules.md` §3 检查
@@ -295,7 +302,7 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 - 模板：`<skill-directory>/config.example.py`（占位符 + 中文注释）
 - 真实配置：`<skill-directory>/scripts/config.py`（**gitignore 排除**，禁止提交）
-- 分组：`web2md_config` dict — `python_path`（必填，AI 助手执行脚本的解释器）、`timeout`（请求超时秒数，默认 30）、`collect_children`（是否收集导航子页面，默认 false，可被 CLI 覆盖）、`merge_paragraphs`（是否合并段落内源码硬换行，默认 false，可被 CLI `--merge-paragraphs` 覆盖）
+- 分组：`web2md_config` dict — `python_path`（必填，AI 助手执行脚本的解释器）、`timeout`（请求超时秒数，默认 30）、`collect_children`（是否收集导航子页面，默认 false，可被 CLI 覆盖）、`merge_paragraphs`（是否合并段落内源码硬换行，默认 false，可被 CLI `--merge-paragraphs` 覆盖）、`table_formula_inline`（是否把表格单元格内显示公式 `\[...\]` 行内化为 `$...$`，默认 true，可被 CLI `--table-formula-inline` / `--no-table-formula-inline` 覆盖；false 时表格内显示公式保持 `$$` 转换，表格可能撕裂需 AI 重建）
 - 加载：`web2md.py` 内 `load_config()`（exec 读取；缺失/损坏时降级默认值并提示首次配置，不退出——脚本仍可独立命令行运行）
 - 首次配置：由第一步的配置向导写入，或手动复制 `config.example.py` → `scripts/config.py` 后填真实值
 
