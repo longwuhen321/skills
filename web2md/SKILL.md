@@ -69,7 +69,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 1. 抓取父页面后，解析侧边栏导航（toctree），定位当前页面节点
 2. 收集其**严格导航子页面**（直接子级），若子页面在导航中还有子页面（孙页面）也一并收集（深度最多 2 级）；子页面正文里引用的其他页面不处理
    - 单页文档（导航子项全部指向当前页面自身的锚点，如 `commands.html#xxx`）→ 自动视为无子页面，不重复抓取（`_strip_fragment` 去 fragment 后与当前页 URL 比较）；孙级锚点同理——孙页面指向其**直接父页面**自身的锚点（如 `customizing.html#xxx`）也跳过，不当作独立孙页面
-3. 逐个抓取子/孙页面 → 转 Markdown → **按页面标题文件夹嵌套落盘**在父页面目录下：
+3. 逐个抓取子/孙页面 → 转 Markdown → **按页面标题文件夹嵌套落盘**在父页面目录下；全部完成后若 `page_nav` 开启（默认 true），在父页面 md 末尾追加 **Sub-pages 导航块**（按 children_list / 导航收集顺序列出子页面，孙页面嵌套缩进，链接为本地相对路径、含空格用 `<>` 包裹——final_verify 链接正则要求）：
 
 ```
 {输出根}/父页面标题/
@@ -302,7 +302,7 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 - 模板：`<skill-directory>/config.example.py`（占位符 + 中文注释）
 - 真实配置：`<skill-directory>/scripts/config.py`（**gitignore 排除**，禁止提交）
-- 分组：`web2md_config` dict — `python_path`（必填，AI 助手执行脚本的解释器）、`timeout`（请求超时秒数，默认 30）、`collect_children`（是否收集导航子页面，默认 false，可被 CLI 覆盖）、`merge_paragraphs`（是否合并段落内源码硬换行，默认 false，可被 CLI `--merge-paragraphs` 覆盖）、`table_formula_inline`（是否把表格单元格内显示公式 `\[...\]` 行内化为 `$...$`，默认 true，可被 CLI `--table-formula-inline` / `--no-table-formula-inline` 覆盖；false 时表格内显示公式保持 `$$` 转换，表格可能撕裂需 AI 重建）
+- 分组：`web2md_config` dict — `python_path`（必填，AI 助手执行脚本的解释器）、`timeout`（请求超时秒数，默认 30）、`collect_children`（是否收集导航子页面，默认 false，可被 CLI 覆盖）、`merge_paragraphs`（是否合并段落内源码硬换行，默认 false，可被 CLI `--merge-paragraphs` 覆盖）、`table_formula_inline`（是否把表格单元格内显示公式 `\[...\]` 行内化为 `$...$`，默认 true，可被 CLI `--table-formula-inline` / `--no-table-formula-inline` 覆盖；false 时表格内显示公式保持 `$$` 转换，表格可能撕裂需 AI 重建）、`page_nav`（是否在抓取到子/孙页面时于父页面 md 末尾追加 Sub-pages 导航块，默认 true，可被 CLI `--page-nav` / `--no-page-nav` 覆盖）
 - 加载：`web2md.py` 内 `load_config()`（exec 读取；缺失/损坏时降级默认值并提示首次配置，不退出——脚本仍可独立命令行运行）
 - 首次配置：由第一步的配置向导写入，或手动复制 `config.example.py` → `scripts/config.py` 后填真实值
 

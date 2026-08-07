@@ -33,7 +33,7 @@ def load_config() -> dict:
     首次配置请参考 config.example.py 或运行 /web2md 配置向导。
     """
     defaults = {'python_path': '', 'timeout': 30, 'collect_children': False,
-                'merge_paragraphs': False, 'table_formula_inline': True}
+                'merge_paragraphs': False, 'table_formula_inline': True, 'page_nav': True}
     if not os.path.exists(CONFIG_PATH):
         print(f"⚠️ 找不到配置文件: {CONFIG_PATH}")
         print("   请先运行 /web2md 完成首次配置（复制 config.example.py → scripts/config.py）")
@@ -1219,22 +1219,54 @@ def parse_children_list(path):
     return items
 
 
-def _fetch_child_tree(node, output_root, cfg, session, depth):
-    """抓取导航树中的一个子/孙节点，落盘到 output_root 下（标题文件夹嵌套），递归孙页面"""
+def build_nav_block(entries, depth=0):
+    """递归生成 Sub-pages 导航列表（children_list/导航顺序，孙页面嵌套缩进）。
+
+    链接路径含空格时必须用 < > 包裹——final_verify 的链接正则
+    ([^\\s)\\n]+) 在空格处截断，不带 < > 会误报「相对链接目标不存在」。
+    """
+    lines = []
+    for e in entries:
+        lines.append(f"{'  ' * depth}- [{e['title']}](<./{e['rel']}>)")
+        sub = build_nav_block(e.get('children', []), depth + 1)
+        if sub:
+            lines.append(sub)
+    return '\n'.join(lines)
+
+
+def append_nav_block(md_path, entries):
+    """父页面 md 末尾追加 Sub-pages 导航块（有子/孙页面时调用，page_nav 开启时）"""
+    block = '\n\n## Sub-pages\n\n' + build_nav_block(entries) + '\n'
+    with open(md_path, 'a', encoding='utf-8') as f:
+        f.write(block)
+
+
+def _fetch_child_tree(node, output_root, cfg, session, depth, prefix=''):
+    """抓取导航树中的一个子/孙节点，落盘到 output_root 下（标题文件夹嵌套），递归孙页面。
+
+    返回 {'title': 实际标题, 'rel': 相对父 md 的链接路径, 'children': [孙节点...]}，
+    供父页面生成 Sub-pages 导航块；抓取失败返回 None。
+    """
     pad = '  ' * depth
     print(f"{pad}📂 子页面「{node['title']}」({node['url']})")
     try:
         soup, final_url, raw_html = fetch_page(node['url'], session, cfg['timeout'])
     except Exception as e:
         print(f"{pad}❌ 获取失败: {e}")
-        return
+        return None
     title_text = extract_title(soup)
     result = process_page(soup, final_url, raw_html, title_text, output_root, cfg, session)
     if result is None:
-        return
+        return None
     folder, _ = result
+    rel = f"{prefix}{folder}/{folder}.md"
+    grandchildren = []
     for grand in node.get('children', []):
-        _fetch_child_tree(grand, output_root / folder, cfg, session, depth + 1)
+        g = _fetch_child_tree(grand, output_root / folder, cfg, session, depth + 1,
+                              prefix=f"{prefix}{folder}/")
+        if g:
+            grandchildren.append(g)
+    return {'title': title_text, 'rel': rel, 'children': grandchildren}
 
 
 def fetch_and_process(url, output_root, cfg, session, children_mode=False, children_list=None):
@@ -1272,8 +1304,14 @@ def fetch_and_process(url, output_root, cfg, session, children_mode=False, child
         return True
     print(f"  📂 发现 {len(children)} 个导航子页面，开始逐个抓取...")
     child_root = output_root / folder
+    nav_entries = []
     for child in children:
-        _fetch_child_tree(child, child_root, cfg, session, 1)
+        info = _fetch_child_tree(child, child_root, cfg, session, 1)
+        if info:
+            nav_entries.append(info)
+    if cfg.get('page_nav', True) and nav_entries:
+        append_nav_block(child_root / f"{folder}.md", nav_entries)
+        print(f"  📑 已在父页面末尾追加 Sub-pages 导航块（{len(nav_entries)} 个子页面）")
     return True
 
 
@@ -1293,6 +1331,10 @@ def main():
                         help='表格单元格内显示公式行内化（覆盖 config.py 的 table_formula_inline）')
     parser.add_argument('--no-table-formula-inline', action='store_false', dest='table_formula_inline',
                         help='不将表格单元格内显示公式行内化（覆盖 config.py 的 table_formula_inline）')
+    parser.add_argument('--page-nav', action='store_true', default=None,
+                        help='父页面末尾追加 Sub-pages 导航块（覆盖 config.py 的 page_nav）')
+    parser.add_argument('--no-page-nav', action='store_false', dest='page_nav',
+                        help='不追加 Sub-pages 导航块（覆盖 config.py 的 page_nav）')
     args = parser.parse_args()
 
     url = args.url
@@ -1303,6 +1345,8 @@ def main():
         cfg['merge_paragraphs'] = args.merge_paragraphs
     if args.table_formula_inline is not None:
         cfg['table_formula_inline'] = args.table_formula_inline
+    if args.page_nav is not None:
+        cfg['page_nav'] = args.page_nav
     children_list = None
     if args.children_from:
         try:

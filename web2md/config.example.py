@@ -36,4 +36,10 @@ web2md_config = {
     # true = 行内化（默认）；false = 保持显示公式转换（表格可能被撕裂，需 AI 重建）。
     # 可被 CLI 参数 --table-formula-inline / --no-table-formula-inline 覆盖。
     "table_formula_inline": True,
+
+    # 是否在抓取到子/孙页面时，于父页面 md 末尾追加 Sub-pages 导航块（默认 true）。
+    # 导航块按 children_list / 导航解析顺序列出子页面（孙页面嵌套缩进），链接为本地
+    # 相对路径（路径含空格时用 < > 包裹，final_verify 链接正则要求）。
+    # true = 追加（默认）；false = 不追加。可被 CLI 参数 --page-nav / --no-page-nav 覆盖。
+    "page_nav": True,
 }

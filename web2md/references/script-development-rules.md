@@ -26,6 +26,7 @@
 | 表格后空行分隔 | `ensure_table_separators` | 表格块（连续 `\|` 开头行）后若非空行则补空行，避免表格与 `$$` 块/段落粘连（markdownify 表格后紧邻块级元素时不输出空行）；在 `html_to_markdown` 内无条件调用，不依赖 merge 开关 |
 | 表格单元格显示公式行内化 | `convert_plain_tex_delimiters` | `table_formula_inline`（默认 true，config + CLI 覆盖）时，`<td>`/`<th>` 祖先内 `\[...\]` → `$`（行内），防 `$$` 块 + 空行撕裂表格；仅文本节点级配对替换，受保护子树不动 |
 | 表格行内公式不升级 `$$` | `list_display_fixes` | 含 `\\begin{...}` 或 `\\` 行断的 `$...$` 若位于表格行内（去除空白后以 `\|` 开头且含第二个 `\|`）不自动升级 `$$`（会重新撕裂表格），列为「表格内（保持 $）」候选交 AI 复核 |
+| 父页面导航块 | `append_nav_block` / `build_nav_block` | `page_nav`（默认 true）时抓取到子/孙页面后在父 md 末尾追加 Sub-pages 列表；顺序 = children_list / 导航收集顺序；`_fetch_child_tree` 返回实际标题与相对路径（孙页面嵌套缩进）；**链接路径含空格必须 `< >` 包裹**——final_verify 链接正则 `([^\s)\n]+)` 在空格处截断，不带 `< >` 误报「相对链接目标不存在」 |
 | 表格后缺空行兜底 | `final_verify.py` 表格检测 | 有分隔行的真表格，块结束后下一行非空即报「行 N 表格后缺空行」FAIL——防止脚本补空行机制失效或手工编辑引入 |
 | 清单解析容错 | `parse_children_list` | `--children-from` 清单：注释/空行/备注列忽略，深层级缩进、缺 URL、无父页面的孙页面行跳过并警告——单行格式错误不中断整批抓取 |
 | `_clean_invisible_chars` 含 U+F0C1 | `extract_title` | Sphinx 标题锚点图标 ``（U+F0C1）与零宽/NBSP/BOM 一并清除，防止混入文件夹名与 md 标题 |

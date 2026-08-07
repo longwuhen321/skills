@@ -210,3 +210,16 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 遗留事项更新：
 - 表格内多行公式 aligned 化由 AI 在阶段 C/D 处理（脚本不自动改公式结构）
+
+### 2026-08-07：父页面 Sub-pages 导航块（page_nav）
+
+| | |
+|------|------|
+| 新功能 | `page_nav`（默认 true）：抓取到子/孙页面后，父页面 md 末尾自动追加 Sub-pages 导航块；顺序 = children_list / 导航收集顺序，孙页面嵌套缩进；`--page-nav` / `--no-page-nav` CLI 覆盖 |
+| 关键点 | **链接路径含空格必须 `< >` 包裹**——final_verify 链接正则 `[^\s)\n]+` 在空格处截断，不带 `< >` 误报「相对链接目标不存在」；`< >` 是 markdown 标准语法，Typora 可点击 |
+| 测试 | 107 → 111 用例（导航块生成 4 个：平级/孙嵌套/空格包裹/追加），selftest 全绿 |
+
+关键认知（2026-08-07）：
+1. `_fetch_child_tree` 返回子/孙页面的**实际标题（文件夹名）与相对链接路径**（递归拼接前缀），导航块在子页面全部落盘后追加——链接目标必然存在
+2. 递归 join 时 `lines.extend(字符串)` 会把字符串**逐字符拆开**（孙页面行全散）——用 `append`；该 bug 被新增测试捕获
+3. 展示版先在 Multivariate Kalman Filter.md 验证（12 链接 + final_verify 全绿）再固化
