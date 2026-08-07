@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 TEST_DIR = Path(__file__).resolve().parent
-SCRIPT_DIR = TEST_DIR.parent if TEST_DIR.name == 'tests' else TEST_DIR
+SCRIPT_DIR = TEST_DIR.parent
 WORK_DIR = Path(os.environ.get('WEB2MD_TEST_WORKDIR', TEST_DIR))
 FIXER = SCRIPT_DIR / 'fix_escapes.py'
 PROMOTER = SCRIPT_DIR / 'list_display_fixes.py'

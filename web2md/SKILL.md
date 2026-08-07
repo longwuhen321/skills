@@ -53,7 +53,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 | `find_all_missed.py` | 扫描伪公式模式（忽略代码内） | 第四步-C 辅助 |
 | `final_verify.py` | 公式 / 表格 / 图片 / 占位符全量验证 | 收尾 |
 
-> **共享脚本规则**：以后新增的可复用脚本一律放 `<skill-directory>/scripts/`，不要往项目里复制。各项目 `.web2md_tools/` 中遗留的旧 `.py` 副本**忽略**——不执行、不更新、不删除（除非用户明确要求）。
+> **共享脚本规则**：以后新增的可复用脚本一律放 `<skill-directory>/scripts/`，不要往项目里复制。
 
 ### 第三步：执行抓取
 
@@ -251,7 +251,7 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
     ├── list_display_fixes.py       ← 阶段 B：$→$$ 自动升级 + 候选列表
     ├── find_all_missed.py          ← 阶段 C：伪公式扫描
     ├── final_verify.py             ← 收尾验证
-    └── tests/                      ← 本地测试（git 不追踪）
+    └── debug/                      ← 本地测试（git 不追踪）
         ├── selftest.py             ← 测试入口
         ├── test_formula_integrity.py
         └── test_sphinx_conversion.py
@@ -276,10 +276,10 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 ## 测试（本地，git 不追踪）
 
-`scripts/tests/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、导航解析 collect_children、`--children-from` 清单解析），**不随仓库分发**：
+`scripts/debug/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、导航解析 collect_children、`--children-from` 清单解析），**不随仓库分发**：
 
 ```powershell
-& "<python路径>" "<skill-directory>/scripts/tests/selftest.py"
+& "<python路径>" "<skill-directory>/scripts/debug/selftest.py"
 ```
 
 **修改 scripts/ 下任何脚本后必须运行并全绿。**

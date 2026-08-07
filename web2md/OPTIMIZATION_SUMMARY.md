@@ -108,7 +108,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 - PX4 `config_fw/` 端到端：父 + 4 子页面抓取、标题文件夹嵌套落盘正确
 - Wikipedia 单页：58 公式、429 退避、13/13 图片
-- selftest 49 用例全绿（2026-08-04 实测：formula 13 + sphinx 36）
+- selftest 全部用例全绿（实测）
 
 ## 三、过程中的 bug 序列
 

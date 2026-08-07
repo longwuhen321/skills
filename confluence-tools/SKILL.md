@@ -20,7 +20,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 检查 `scripts/config.py` 是否存在。不存在时启动配置向导。
 
-**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/debug_utils.py`、`scripts/selftest.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
+**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/debug_utils.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
 
 ### 向导规则
 
@@ -247,8 +247,9 @@ confluence-tools/
 │   ├── md_import.py            # Markdown → Confluence
 │   ├── math_upgrade.py         # 数学公式升级
 │   ├── md_export.py            # Confluence → Markdown 导出
-│   └── selftest.py             # 离线自测（不依赖服务器，mock 配置运行）
-└── debug/
+│   └── debug/                  # 本地测试（git 不追踪）
+│       └── selftest.py         # 离线自测（不依赖服务器，mock 配置运行）
+└── debug/                      # 调试日志快照（gitignore 排除）
     ├── import/
     ├── upgrade/
     └── export/
@@ -287,10 +288,10 @@ confluence-tools/
 
 ### 回归测试（必过）
 
-**修改 `scripts/*.py` 后，必须运行 `selftest.py` 且全部用例通过**，才能算修改完成：
+**修改 `scripts/*.py` 后，必须运行 `scripts/debug/selftest.py` 且全部用例通过**，才能算修改完成：
 
 ```bash
-"<python_path>" "<SKILL_DIR>/scripts/selftest.py"
+"<python_path>" "<SKILL_DIR>/scripts/debug/selftest.py"
 ```
 
 - 全绿 = 转换逻辑未破坏，改动可固化

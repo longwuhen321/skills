@@ -352,7 +352,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 ## 二、验证结果
 
 - NuttShell (NSH) 真实树形翻译：9 文件 / 25 块 / 约 400 段可见文本，全部 validate accepted + verify pass（确定性渲染，链接/代码/命令名字节级保留）
-- selftest 10 用例全绿（pipeline 7 + 辅助脚本 3）
+- selftest 全部用例全绿
 - pipeline 端到端：configure → extract → plan-blocks → 原样翻译 → validate → merge → render（sha256 与源一致）→ verify(pass)
 - 契约校验实测：空译文、SEG 行缺失/多余、译文引入 Markdown 语法均被 validate 拒绝
 

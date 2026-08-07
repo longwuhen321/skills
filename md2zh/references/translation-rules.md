@@ -29,7 +29,7 @@ pipeline 用 ASCII `@@MD2ZH:PROTECT:...@@` 标记表示受保护的源内容。�
 
 读取 skill 级配置（`<skill-directory>/scripts/config.py`，键 `ambiguous_content_decider`）以确定模糊内容由用户还是 AI 助手决定。translate 决策必须选择 pipeline 建议载荷内的精确源子串；它绝不授权重写整个未知结构。
 
-对于 AI 助手决策，使用所提供的完整章节与相邻上下文，并记录简明理由。让 pipeline 将全部 accepted、rejected 与 retried 决策持久化到 `.md2zh_tools/decision_logs/*.jsonl`，供后续诊断与规则改进。
+对于 AI 助手决策，使用所提供的完整章节与相邻上下文，并记录简明理由。让 pipeline 将全部 accepted、rejected 与 retried 决策持久化到 `<skill-directory>/debug/decision_logs/*.jsonl`，供后续诊断与规则改进。
 
 ## 翻译质量
 

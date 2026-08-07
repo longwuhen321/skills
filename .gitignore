@@ -40,3 +40,6 @@ web2md/scripts/config.py
 # md2zh：调试日志快照（decision_logs/intermediate/_archive）：
 md2zh/debug/
 reasonix.toml.bak
+
+# 各 skill：本地测试（统一放 scripts/debug/，不随仓库分发）
+*/scripts/debug/

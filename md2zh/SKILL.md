@@ -13,8 +13,6 @@ description: 将英文 Markdown 文件翻译为中文，保留所有格式；分
 
 **仅显式调用**。用户使用 `/md2zh` 时才执行。
 
-**输出目录**：由配置项 `md2zh_config.output_dir` 控制（见「首次运行：配置向导」）：留空 = 输出在源文件同级（默认）；指定 = 输出到该目录并复制源旁 `<stem>.assets`（图片正常显示）。
-
 ## 契约
 
 - **假定源 Markdown 正确**：不验证、不修复、不规范化、不重排源文件。
@@ -197,10 +195,10 @@ render 输出后、清理前，**AI 通读完整译文**（含长文档每个一
 
 ## 测试（本地）
 
-`scripts/tests/selftest.py` 离线黑盒测试 pipeline（配置写入、分块保护、端到端 roundtrip、契约违规拒绝）：
+`scripts/debug/selftest.py` 离线黑盒测试 pipeline（配置写入、分块保护、端到端 roundtrip、契约违规拒绝）：
 
 ```powershell
-& "<python>" "<skill-directory>/scripts/tests/selftest.py"
+& "<python>" "<skill-directory>/scripts/debug/selftest.py"
 ```
 
 **修改 `scripts/*.py` 后必须运行并全绿。**
@@ -247,7 +245,7 @@ md2zh/
     ├── md2zh_pipeline.py       # 分块/保护/校验 pipeline（纯标准库 Python）
     ├── scan_visible.py         # 扫描块 input.txt 列出可见文本段（供翻译）
     ├── apply_translations.py   # 按 SEG 映射生成 output.txt（译文写回，支持多行段）
-    └── tests/
+    └── debug/
         └── selftest.py         # 离线黑盒测试（改脚本后必须全绿）
 
 忽略规则（.gitignore）位于仓库根目录：`md2zh/scripts/config.py` 与 `md2zh/debug/` 被排除。
@@ -279,7 +277,7 @@ md2zh/
 
 ### 回归测试（必过）
 
-**修改 `scripts/*.py` 后，必须运行 `scripts/tests/selftest.py` 且全部用例通过**，才能算修改完成：
+**修改 `scripts/*.py` 后，必须运行 `scripts/debug/selftest.py` 且全部用例通过**，才能算修改完成：
 
 - 全绿 = 分块/保护/校验逻辑未破坏，改动可固化
 - 有红 = 修改引入回归，先修复再继续

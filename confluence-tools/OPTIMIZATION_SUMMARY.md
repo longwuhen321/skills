@@ -211,7 +211,7 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 - mathblock `alignment=left` 在 Confluence 9.2.1 服务器实测支持
 - toc 自动目录宏真实验证：73596940（Commands）重跑导入，标题多自动补目录宏
 - 多轮真实页面导入/升级/修复验证（含 --dir 树导入、同名附件更新、自闭合宏修复后回归），全部闭环
-- selftest：83 用例全绿（2026-08-04 实测；76 为 debug 清理调整前时点，本次新增 cleanup/排序/export 快照 4 用例）
+- selftest：全部用例全绿（实测）
 
 ## 三、过程中的 bug 序列（按时间）
 
@@ -252,6 +252,6 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 ## 六、环境速查
 
-- Confluence：9.2.x（http://<confluence-server>:8090），PAT Bearer 认证
+- Confluence：9.2.1（Data Center，build 9109），PAT Bearer 认证
 - Python：`<python 解释器路径>`（需安装 requests / markdown2）
-- 测试命令：`"<python>" scripts/selftest.py` → 全部用例全绿（截至 2026-08-04 为 83 用例）
+- 测试命令：`"<python>" scripts/debug/selftest.py` → 全部用例通过
