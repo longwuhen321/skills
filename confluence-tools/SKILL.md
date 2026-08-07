@@ -267,6 +267,7 @@ confluence-tools/
 
 - **优化前**：先读取 `OPTIMIZATION_SUMMARY.md`——对齐上次大优化的改动范围、修复过的 bug 序列（避免重复踩坑）、协作风格与遗留事项（其中 P3 未做项可能是本次优化方向）。
 - **优化后**：将本次优化追加记录到 `OPTIMIZATION_SUMMARY.md`（新增/改动内容、过程中遇到的问题与解法、遗留事项更新），保持交接文档不过时。
+- **⚠️ 写入 `OPTIMIZATION_SUMMARY.md` / `KNOWN_ISSUES.md` 前必须读该文档的头部说明（追加模板 / 维护约定），按文档约定插入**——例如 `OPTIMIZATION_SUMMARY.md` 的约定是「追加操作、插入位置在顶部（最新条目紧随模板之后、时间倒序）」，**禁止直接 `cat >>` 追加到文件末尾或只模仿尾部格式**。
 - **分工**：bug 修复 → 记 `KNOWN_ISSUES.md`；优化/重构/扩展 → 记 `OPTIMIZATION_SUMMARY.md`。
 
 每次执行遇到非一次性错误（脚本 bug、渲染异常、边界情况），修复并通过验证后，向用户提出：

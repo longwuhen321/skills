@@ -32,6 +32,37 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 ============================================================================
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
+### 2026-08-07：父页面 Sub-pages 导航块（page_nav）
+
+| | |
+|------|------|
+| 新功能 | `page_nav`（默认 true）：抓取到子/孙页面后，父页面 md 末尾自动追加 Sub-pages 导航块；顺序 = children_list / 导航收集顺序，孙页面嵌套缩进；`--page-nav` / `--no-page-nav` CLI 覆盖 |
+| 关键点 | **链接路径含空格必须 `< >` 包裹**——final_verify 链接正则 `[^\s)\n]+` 在空格处截断，不带 `< >` 误报「相对链接目标不存在」；`< >` 是 markdown 标准语法，Typora 可点击 |
+| 测试 | 107 → 111 用例（导航块生成 4 个：平级/孙嵌套/空格包裹/追加），selftest 全绿 |
+
+关键认知（2026-08-07）：
+1. `_fetch_child_tree` 返回子/孙页面的**实际标题（文件夹名）与相对链接路径**（递归拼接前缀），导航块在子页面全部落盘后追加——链接目标必然存在
+2. 递归 join 时 `lines.extend(字符串)` 会把字符串**逐字符拆开**（孙页面行全散）——用 `append`；该 bug 被新增测试捕获
+3. 展示版先在 Multivariate Kalman Filter.md 验证（12 链接 + final_verify 全绿）再固化
+
+
+
+### 2026-08-07：表格单元格内显示公式行内化（table_formula_inline）
+
+| | |
+|------|------|
+| 新功能 | `table_formula_inline`（默认 true）：`convert_plain_tex_delimiters` 把 `<td>`/`<th>` 内 `\[...\]` → `$...$` 行内，防 `$$` 块 + 空行撕裂表格；`--table-formula-inline` / `--no-table-formula-inline` CLI 覆盖 |
+| 配套 | `list_display_fixes` 表格行内公式（`|` 开头行）不自动升级 `$$`（列为「表格内（保持 $）」候选）；SKILL.md 阶段 B/D、custom-site-rules.md §2、script-development-rules.md 防御表同步 |
+| 测试 | 103 → 110 用例（td/th 行内化 6 个 + list_display_fixes 表格内不升级 3 个），selftest 全绿 |
+
+关键认知（2026-08-07 处理 kalmanfilter.net 推导表沉淀）：
+1. markdown 表格单元格无法容纳 `$$` 块（独占行 + 空行结束表格）——单元格内公式行内化是唯一出路
+2. 表格单元格内 `$...$` 含 `\` 在 Typora **不换行**（inline 模式 `\` 无效）+ `\left...\right` 跨行不配对（渲染失败/回退单行）→ 多行公式需 AI 改写为 `$\begin{aligned}...\end{aligned}$`（单物理行、`\` 换行、`&` 对齐、外层跨行括号改 `\Bigg( \Bigg)` 手动大小）——**判断由 AI 做，脚本只做行内化**
+3. 用户编辑器会在块间自动插入空行（表格行间/代码围栏内），破坏表格与围栏配对——交付前需检查「空行前后都是 `|` 行」模式并清理；围栏修复脚本的切片边界必须精确（含/不含开闭标记，off-by-one 会连锁破坏后续代码块的定位锚点）
+
+遗留事项更新：
+- 表格内多行公式 aligned 化由 AI 在阶段 C/D 处理（脚本不自动改公式结构）
+
 
 ### 2026-08-07：页面自身 h1 与脚本前缀标题重复时剥离（单 H1 方案）
 
@@ -195,31 +226,3 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 - 跨节点裸定界符配对仍靠 AI 手工修复（脚本只计数提示，2026-08-07）
 
 
-### 2026-08-07：表格单元格内显示公式行内化（table_formula_inline）
-
-| | |
-|------|------|
-| 新功能 | `table_formula_inline`（默认 true）：`convert_plain_tex_delimiters` 把 `<td>`/`<th>` 内 `\[...\]` → `$...$` 行内，防 `$$` 块 + 空行撕裂表格；`--table-formula-inline` / `--no-table-formula-inline` CLI 覆盖 |
-| 配套 | `list_display_fixes` 表格行内公式（`|` 开头行）不自动升级 `$$`（列为「表格内（保持 $）」候选）；SKILL.md 阶段 B/D、custom-site-rules.md §2、script-development-rules.md 防御表同步 |
-| 测试 | 103 → 110 用例（td/th 行内化 6 个 + list_display_fixes 表格内不升级 3 个），selftest 全绿 |
-
-关键认知（2026-08-07 处理 kalmanfilter.net 推导表沉淀）：
-1. markdown 表格单元格无法容纳 `$$` 块（独占行 + 空行结束表格）——单元格内公式行内化是唯一出路
-2. 表格单元格内 `$...$` 含 `\` 在 Typora **不换行**（inline 模式 `\` 无效）+ `\left...\right` 跨行不配对（渲染失败/回退单行）→ 多行公式需 AI 改写为 `$\begin{aligned}...\end{aligned}$`（单物理行、`\` 换行、`&` 对齐、外层跨行括号改 `\Bigg( \Bigg)` 手动大小）——**判断由 AI 做，脚本只做行内化**
-3. 用户编辑器会在块间自动插入空行（表格行间/代码围栏内），破坏表格与围栏配对——交付前需检查「空行前后都是 `|` 行」模式并清理；围栏修复脚本的切片边界必须精确（含/不含开闭标记，off-by-one 会连锁破坏后续代码块的定位锚点）
-
-遗留事项更新：
-- 表格内多行公式 aligned 化由 AI 在阶段 C/D 处理（脚本不自动改公式结构）
-
-### 2026-08-07：父页面 Sub-pages 导航块（page_nav）
-
-| | |
-|------|------|
-| 新功能 | `page_nav`（默认 true）：抓取到子/孙页面后，父页面 md 末尾自动追加 Sub-pages 导航块；顺序 = children_list / 导航收集顺序，孙页面嵌套缩进；`--page-nav` / `--no-page-nav` CLI 覆盖 |
-| 关键点 | **链接路径含空格必须 `< >` 包裹**——final_verify 链接正则 `[^\s)\n]+` 在空格处截断，不带 `< >` 误报「相对链接目标不存在」；`< >` 是 markdown 标准语法，Typora 可点击 |
-| 测试 | 107 → 111 用例（导航块生成 4 个：平级/孙嵌套/空格包裹/追加），selftest 全绿 |
-
-关键认知（2026-08-07）：
-1. `_fetch_child_tree` 返回子/孙页面的**实际标题（文件夹名）与相对链接路径**（递归拼接前缀），导航块在子页面全部落盘后追加——链接目标必然存在
-2. 递归 join 时 `lines.extend(字符串)` 会把字符串**逐字符拆开**（孙页面行全散）——用 `append`；该 bug 被新增测试捕获
-3. 展示版先在 Multivariate Kalman Filter.md 验证（12 链接 + final_verify 全绿）再固化

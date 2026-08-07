@@ -262,6 +262,7 @@ md2zh/
 **skill 自我优化时**：
 - **优化前**：先读 `OPTIMIZATION_SUMMARY.md` 对齐历史改动与遗留事项
 - **优化后**：将本次优化**追加记录**（含日期，取系统当前时间 `Get-Date -Format "yyyy-MM-dd"`，禁止硬编码）
+- **⚠️ 写入 `OPTIMIZATION_SUMMARY.md` / `KNOWN_ISSUES.md` 前必须读该文档的头部说明（追加模板 / 维护约定），按文档约定插入**——例如 `OPTIMIZATION_SUMMARY.md` 的约定是「追加操作、插入位置在顶部（最新条目紧随模板之后、时间倒序）」，**禁止直接 `cat >>` 追加到文件末尾或只模仿尾部格式**
 
 每次修复非一次性错误后向用户提出固化方案（改脚本 / 记 KNOWN_ISSUES / 更新 SKILL.md / 都改 / 不改）。
 
