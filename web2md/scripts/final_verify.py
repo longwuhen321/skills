@@ -274,6 +274,8 @@ while index < len(lines):
     if not separators:
         reviews.append(f'行 {line_no} 表格没有分隔行')
         continue
+    if index < len(lines) and lines[index].strip():
+        failures.append(f'行 {line_no} 表格后缺空行')
     expected = len(rows[separators[0]])
     if any(len(cells) != expected for cells in rows):
         failures.append(f'行 {line_no} 表格列数不一致')

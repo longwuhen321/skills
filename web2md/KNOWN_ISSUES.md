@@ -25,6 +25,24 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-07] merge_paragraphs 把表格行当普通段落合并成单行，表格后与公式块粘连（kalmanfilter.net，已修复）
+
+- **现象**：转换产物中表格全部拍扁成单行（如 `|  | Notes | | --- | --- | | a | b |`），且表格行与后续 `$$` 公式块之间无空行（Typora 渲染异常）。kalman1d 页 5 个表格全部损坏，之前（alphabeta 页）误判为「markdownify 把行列合并成单行」，实际根因在 merge_paragraphs。
+- **根因**：`merge_paragraphs.py` 的「普通段落」合并逻辑把 `|` 开头的表格行当普通段落——连续表格行被空格连接合并成一行；表格行与紧邻的 `$$` 块之间也无空行（markdownify 在表格后紧邻块级元素时不输出空行）。验证：把 30 行 `|` 开头行喂给 merge，输出只剩 5 行。
+- **修复**：三处——
+  1. `scripts/merge_paragraphs.py`：表格行（strip 后以 `|` 开头）加入特殊行保护（与标题/引用同列），普通段落合并与列表项续行循环均 break 表格行，不再合并/吞并；
+  2. `scripts/web2md.py` 新增 `ensure_table_separators()`（html_to_markdown 内、markdownify 输出后无条件调用）：表格块（连续 `|` 行）后若非空行则补空行，表格与 `$$` 块/段落不再粘连；不依赖 merge 开关；
+  3. `scripts/final_verify.py`：表格检测循环新增「行 N 表格后缺空行」FAIL 检查（有分隔行的真表格，块后下一行非空即报），兜底防御。
+  4. **同链发现第二个缺陷**：`merge_paragraphs.py` 的空行压缩在 `$$` 行切换 in_math 状态时未先 flush `skip`，`$$` 块前的空行（含第 2 步补的空行）被吞——修复为 `$$` 分支先 `if skip >= 1: final.append('')` 再切换状态。
+- **排查方法**：产物表格成单行 → 先查是否启用 merge（config `merge_paragraphs`），把表格段喂给 `merge_markdown_paragraphs` 复现；表格后 `$$` 粘连、或任意块级元素后紧邻 `$$` 无空行 → 检查 merge 空行压缩是否吞掉 `$$` 前空行（已修复）。回归测试 `test_table_rows_not_merged` / `test_table_rows_not_absorbed_into_paragraph` / `test_blank_before_math_block_kept`（MergeParagraphsTests）+ `TableSeparatorTests` 5 用例（ensure_table_separators 补空行/不动 + final_verify 报错/通过）；selftest 94 用例全绿；kalman1d 真实页面端到端验证：5 个多行表格完好、表格后缺空行 0。
+
+## [2026-08-07] 页面标题含裸 TeX 定界符导致文件夹名乱码（kalmanfilter.net，已修复）
+
+- **现象**：kalmanfilter.net 的 alphabeta 页 `<h1>` 是 `The \( \alpha -\beta -\gamma \) filter`——作者用 KaTeX 数学模式写希腊字母。转换后：① 文件夹名变成 `The -( -alpha --beta --gamma -) filter`（每个 `\` 被替换成 `-`）；② md 前缀 H1 保留未转换的裸 `\(...\)` 定界符。
+- **根因**：`extract_title` 原样提取标题文本；`sanitize_filename` 把 `\`（Windows 路径分隔符）替换为 `-`（`[\\/:*?"<>|]` → `-`）；脚本前缀 `# {title}` 直接写提取文本，未经任何公式转换。
+- **修复**：`scripts/web2md.py` 新增 `TITLE_MATH_UNICODE` 映射表 + `clean_title_math()`——去掉 `\( \) \[ \]` 定界符、希腊字母与常用运算符转 Unicode（`\alpha`→α、`\times`→× 等）、压缩空白；**未映射的 LaTeX 命令保留原样不误删**（交 AI 酌情调整）。`extract_title` 三条路径（h1 / og:title / `<title>`）与 `strip_duplicate_h1` 的比较都走同一清理，保证命名、前缀标题、重复 H1 剥离三者一致。回归测试 `TitleMathCleanTests` 7 用例 + `test_h1_with_bare_tex_title_stripped`，selftest 86 用例全绿。
+- **排查方法**：转换产物文件夹名出现 `-( -alpha` 类乱码、或 md 首行标题含 `\(` 时即为此类；修复后文件夹/文件/前缀标题自动干净，仅当标题含未映射命令（如 `\frac`）残留时才需 AI 手动调整（参考本页最终人工改为 `The α-β-γ filter`）。
+
 ## [2026-08-07] KaTeX auto-render 裸 TeX 定界符漏转换（kalmanfilter.net，已修复）
 
 - **现象**：kalmanfilter.net 首页（自定义站点）用 KaTeX auto-render 渲染公式，源码 HTML 中公式是**裸文本** `\(...\)`（125 处）与 `\[...\]`（60 处），没有包在 `class="math"` / `<math>` / MathJax `<script>` 等脚本能识别的标记里（全页仅 1 处 `class="math"` 被转换）。脚本报告「转换了 1 个数学公式」，185 处公式以 `\(...\)` / `\[...\]` 原样残留到 Markdown。该站同时混用 `$$...$$` 与 `\[...\]` 两种显示定界符。

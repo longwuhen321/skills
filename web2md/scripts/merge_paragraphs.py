@@ -8,7 +8,8 @@ markdownify 保留 HTML 源码的硬换行（每行 ~90 字符），把自然段
   - 列表项：-/*/+ 前缀行 + 后续 2 空格缩进文字续行合并为一行（去尾部 hard-break 空格）
   - 保护（逐字节不动）：
       $$ 公式块内部、公式标签行（缩进 + 行尾两空格）、嵌套子列表项、
-      Sphinx 定义列表（term + 缩进定义段 / ": " 前缀行）、标题/引用/图片/围栏
+      Sphinx 定义列表（term + 缩进定义段 / ": " 前缀行）、标题/引用/图片/围栏、
+      表格行（| 开头）
   - 双空行压缩为单个（块外）
 
 用法：python merge_paragraphs.py <md文件> [更多文件...]
@@ -50,9 +51,10 @@ def merge_markdown_paragraphs(markdown: str) -> str:
             i += 1
             continue
 
-        # 标题 / 引用 / 图片 / 围栏 / 水平线 / 定义列表标记：单独保留
+        # 标题 / 引用 / 图片 / 围栏 / 水平线 / 定义列表标记 / 表格行：单独保留
         if (s.startswith('#') or s.startswith('>') or s.startswith('![')
-                or s.startswith('```') or s == '---' or s.startswith(': ')):
+                or s.startswith('```') or s == '---' or s.startswith(': ')
+                or s.startswith('|')):
             out.append(l)
             i += 1
             continue
@@ -68,7 +70,8 @@ def merge_markdown_paragraphs(markdown: str) -> str:
                 lj = lines[j]
                 sj = lj.strip()
                 if sj == '' or sj.startswith('$$') or sj.startswith('#') or sj.startswith('>') \
-                        or sj.startswith('![') or sj.startswith('```') or sj.startswith(': '):
+                        or sj.startswith('![') or sj.startswith('```') or sj.startswith(': ') \
+                        or sj.startswith('|'):
                     break
                 if LIST_HEAD.match(lj):      # 新的列表项（含子列表项）
                     break
@@ -94,7 +97,8 @@ def merge_markdown_paragraphs(markdown: str) -> str:
             lj = lines[j]
             sj = lj.strip()
             if sj == '' or sj.startswith('$$') or sj.startswith('#') or sj.startswith('>') \
-                    or sj.startswith('![') or sj.startswith('```') or sj == '---' or sj.startswith(': '):
+                    or sj.startswith('![') or sj.startswith('```') or sj == '---' or sj.startswith(': ') \
+                    or sj.startswith('|'):
                 break
             if LIST_HEAD.match(lj):
                 break
@@ -118,6 +122,9 @@ def merge_markdown_paragraphs(markdown: str) -> str:
     in_math = False
     for l in text.split('\n'):
         if l.strip().startswith('$$'):
+            if skip >= 1:
+                final.append('')
+            skip = 0
             in_math = not in_math
             final.append(l)
             continue
