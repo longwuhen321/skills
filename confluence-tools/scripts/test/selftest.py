@@ -31,6 +31,9 @@ from md_import import MarkdownImporter
 from math_upgrade import ConfluenceMathUpdater
 from md_export import ConfluenceExporter
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_sync import ConfigSyncTests
+
 MOCK_CFG = {
     'common_config': {
         'confluence_url': 'http://test:8090',
@@ -1060,14 +1063,14 @@ class TestMdExport(unittest.TestCase):
         self.assertIn('hello', text)
 
     def test_export_saves_storage_debug(self):
-        # 导出时每页原始 storage 保存到 debug/export/<时间戳>/<page_id>_<标题>.html
+        # 导出时每页原始 storage 保存到 logs/export/<时间戳>/<page_id>_<标题>.html
         page = {'page_id': '5', 'title': '测试页', 'version': 3, 'space_key': 'TEST',
                 'storage': '<p>原始内容</p>',
                 'raw': {'version': {'when': '2026-01-01T00:00:00.000Z'}}}
         with patch.object(self.exporter, 'fetch_page', return_value=page), \
              patch.object(self.exporter, 'get_child_pages', return_value=[]):
             self.exporter.export_page('5')
-        export_dir = Path(self.tmp.name) / 'debug' / 'export'
+        export_dir = Path(self.tmp.name) / 'logs' / 'export'
         self.assertTrue(export_dir.exists())
         files = list(export_dir.glob('*/*.html'))
         self.assertEqual(len(files), 1)
@@ -1098,4 +1101,6 @@ class TestMdExport(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
+    suite.addTests(unittest.TestLoader().loadTestsFromTestCase(ConfigSyncTests))
+    unittest.TextTestRunner(verbosity=2).run(suite)

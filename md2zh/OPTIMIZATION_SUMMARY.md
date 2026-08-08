@@ -33,6 +33,76 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-08：测试目录更名（scripts/debug/ → scripts/test/）
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | 测试目录从 `scripts/debug/` 更名 `scripts/test/`——目录里存的是测试文件，`test/` 比 `debug/` 自描述；与日志目录更名同逻辑，至此全项目消除 debug 语义歧义（`logs/` 日志、`scripts/test/` 测试） |
+| 磁盘 | `scripts/debug/` → `scripts/test/`（内容不动） |
+| 文档 | SKILL.md 3 处 `scripts/debug` → `scripts/test`（含目录树 `└── test/`）；测试需入库（git 追踪） |
+| 测试 | selftest 从 `scripts/test/selftest.py` 运行 40 全绿（相对路径定位自动跟随，零代码改动） |
+
+**过程要点**：
+- 与 web2md / confluence-tools 同步更名（三 skill 统一）；`debug_utils` 类文件名保留（调试工具，非测试）
+
+**遗留事项更新**：
+- （新增）历史条目仍写 `scripts/debug/`，属当时事实，保留不改
+
+
+### 2026-08-08：日志目录更名（debug/ → logs/）
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | `md2zh_pipeline.py` `default_tools_root()`：`"debug"` → `"logs"`（注释同步更新历史：`.md2zh_tools/` → `<skill>/debug/`（08-06）→ `<skill>/logs/`（08-08）） |
+| 文档 | SKILL.md 10 处 `<skill-directory>/debug/` → `<skill-directory>/logs/`（日志语境）；`scripts/debug/`（测试）保留 |
+| 磁盘 | `md2zh/debug/` → `md2zh/logs/`（内容不动） |
+| gitignore | `/*/debug` → `/*/logs`（全局规则覆盖） |
+| 测试 | selftest 40 全绿（tools_root 改动无回归） |
+
+**过程要点**：
+- 更名动机：`debug/` 与 `scripts/debug/`（测试）同名造成语义混淆；`logs/` 自描述「日志」
+- 与 confluence-tools 同步更名（三 skill 统一：日志归 `<skill>/logs/`）
+
+**遗留事项更新**：
+- （新增）历史条目（08-06 迁移记录）仍写 `debug/`，属当时事实，保留不改
+
+
+### 2026-08-08：skill 文档自描述规范化
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | 确立「skill 文档自描述」表达规范：结构/流程说明必须**自描述**——规则写全本文件内，复杂结构用「占位符 + 示例图」直接画出，不引用其他 skill 的规则细节，不用具体实例名（真实项目名）。md2zh/SKILL.md 全文按此规范落地 |
+| 落地清单 | ① 配置向导「与 web2md / confluence-tools 同规则」→「规则见下」（本文件 L41-43 三步自含）；② 树形扫描「与 confluence-tools --dir 同扫描规则」→ 删除（扫描规则本文件 L164 已自含）；③ 树级术语表示例 `NuttShell / NSH` → 占位描述；④ 输出镜像树 `如 Commands.md` → 删具体名，格式图并入第 4 点作为输出示例（`页面A.md` / `子文件夹` 占位符）；⑤ 树形判定 `web2md 抓取单页` → 删跨 skill 引用 + 补单文件场景目录示例（`<标题>.md` / `<标题>.assets/`）；⑥ 删「与 confluence-tools 对接：可直接交给 md_import --dir 导入——完整流水线」段（skill 独立不连通，跨 skill 关系属 README 职责，不在执行指令集内） || 判定标准 | 跨 skill 引用分两类：**执行依赖**（AI 需要对方规则细节才能执行）→ 删；**对接/兼容说明**（目录结构兼容等，非执行依赖）→ 归 README 或删。SKILL.md 只装执行者（AI）需要的内容 |
+
+**过程要点**：
+- 起因：用户指出「与 web2md / confluence-tools 同规则」这类跨 skill 引用不可取——skill 执行时上下文只有本 SKILL.md，引用指向的内容根本不在上下文里；且被引用的两份规则本身不一致（confluence 禁 AskUserQuestion、web2md 未写），语义上无从遵循
+- 关键区分：**清理 ≠ 规范化**——工作成果是「确立了占位符 + 示例图的表达规范」而非「删了什么」；此规范可复用于其他 skill 文档
+- 对「与 confluence-tools 对接」段的取舍：目录结构兼容是真实设计（`_zh` 仅单文件、树形同名 md 均为此），但「可直接交给」暗示了不存在的连通；改为自描述格式图 + 删除对接段，兼容性信息由 README 承担
+- 具体实例名（`Commands.md` / `NuttShell / NSH`）与「自包含」原则冲突——它们本质是隐性外部参照，削弱格式图的通用性
+
+**遗留事项更新**：
+- （新增）「skill 文档自描述」规范确立落地；README.md 保留跨 skill 关系说明（总览文档职责），本 skill SKILL.md 已无跨引用
+
+
+### 2026-08-08：配置同步强制门禁（check_config_sync.py，复用 web2md 方案）
+
+| 类别 | 内容 |
+|------|------|
+| 新脚本 | `check_config_sync.py`：对比 `scripts/config.py` 与 `config.example.py` 的 `md2zh_config` **键集合 + 值类型**（`exec` 解析，与 `load_global_config()` 同源）；三类差异 `missing` / `extra` / `type` 逐条列出；退出码 0 = 同步 / 1 = 有差异 / 2 = 文件缺失或损坏；`--config-text` 从 stdin 读取（配置向导写入后复核）；`--group` 参数化分组名（默认 `md2zh_config`，web2md 版无此参数） |
+| 流程改动 | SKILL.md：`python_path` 存在且有效 → 先跑门禁，不一致（退出码 1/2）**中断任务**；向导第 3 步写入后立即复核；脚本完整性检查补 `check_config_sync.py`；配置段 / 文件结构 / 固化的核心约束（新增配置键时旧 config.py 会被门禁拦下）同步更新 |
+| 测试 | `debug/test_config_sync.py` 9 用例（真实文件同步通过 / 临时对同步 / 缺键 / 多余键 / 类型不符 / 文件缺失 / 损坏 / stdin 模式 / `--group` 自定义分组）；selftest.py 改为 suite 显式装载三组用例 → 40 用例全绿（31 原 + 9 新） |
+
+**过程要点**：
+- **同构性核实**：`load_global_config()`（md2zh_pipeline.py:256-295）与 web2md `load_config()` 完全同构——选填键 `output_dir` / `tree_translation` / `max_block_chars` 缺失时 defaults 兜底**静默降级**，只 `python_path` / `ambiguous_content_decider` 两个必需键缺失才抛错 → 漂移通道存在，门禁有价值
+- **configure 不能作为补齐途径**：`configure_project`（md2zh_pipeline.py:215-253）是重建式写入，缺键时 `_read_config_value` 回退默认值（L234-244）→ 缺失新键只能手动编辑 config.py 补齐
+- **复用方式**：从 web2md 复制 + 加 `--group` 参数化（约 10 行），不跨 skill 共享脚本（各自完整性约定）
+- 踩坑：md2zh selftest.py 是单文件结构（非 web2md 的 discover），新测试不自动发现 → 改为 suite 显式装载；`test_config_sync.py` 的临时文件场景返回码 2 曾误判（stdin 模式跳过 config 文件存在性检查）
+
+**遗留事项更新**：
+- （新增）真实 config.py 当前 5 键与 example 一致（exit 0），门禁防未来漂移；新增配置键时 configure 无法补齐，需手动编辑 config.py
+
+
+
 ### 2026-08-06：SKILL.md / KNOWN_ISSUES.md 审查修复（4 个问题）
 
 | 类别 | 内容 |

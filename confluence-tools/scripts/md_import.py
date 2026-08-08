@@ -74,9 +74,9 @@ class MarkdownImporter:
         # 跳过不处理的 base64 内嵌图片（data: URI）计数
         self.data_images_skipped = 0
         # 调试目录统一放在 skill 目录下
-        self.debug_dir = os.path.join(SKILL_ROOT, 'debug', 'import')
+        self.debug_dir = os.path.join(SKILL_ROOT, 'logs', 'import')
         os.makedirs(self.debug_dir, exist_ok=True)
-        cleanup_debug(os.path.join(SKILL_ROOT, 'debug'),
+        cleanup_debug(os.path.join(SKILL_ROOT, 'logs'),
                       int(debug_cfg.get('max_size_mb', 50)),
                       int(debug_cfg.get('keep_recent', 20)))
 

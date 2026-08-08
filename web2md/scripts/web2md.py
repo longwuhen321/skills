@@ -1080,8 +1080,9 @@ def collect_children(soup, base_url):
 
 
 def _save_debug_snapshot(output_root, raw_html, label='fetch'):
-    """处理失败时保存原始页面快照到 {项目根目录}/.web2md_tools/_archive/（排查用）"""
-    archive_dir = Path(output_root) / '.web2md_tools' / '_archive'
+    """处理失败时保存原始页面快照到 <skill>/logs/_archive/<项目根名>/（排查用）"""
+    project_name = Path(output_root).resolve().name or 'default'
+    archive_dir = (Path(__file__).resolve().parent.parent / 'logs' / '_archive' / project_name)
     archive_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     path = archive_dir / f'{label}_{ts}.html'

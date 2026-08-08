@@ -56,7 +56,7 @@ class ConfluenceMathUpdater:
         self.recursive = upgrade_cfg.get('recursive', True)
         self.max_depth = int(upgrade_cfg.get('max_depth', 0))
         self.block_template = build_block_template(self.math_align)
-        self.debug_dir = os.path.join(SKILL_ROOT, 'debug', 'upgrade')
+        self.debug_dir = os.path.join(SKILL_ROOT, 'logs', 'upgrade')
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -65,7 +65,7 @@ class ConfluenceMathUpdater:
         })
 
         os.makedirs(self.debug_dir, exist_ok=True)
-        cleanup_debug(os.path.join(SKILL_ROOT, 'debug'),
+        cleanup_debug(os.path.join(SKILL_ROOT, 'logs'),
                       int(debug_cfg.get('max_size_mb', 50)),
                       int(debug_cfg.get('keep_recent', 20)))
 

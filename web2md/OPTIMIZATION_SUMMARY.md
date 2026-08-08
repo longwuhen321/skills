@@ -32,6 +32,77 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 ============================================================================
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
+### 2026-08-08：测试目录更名（scripts/debug/ → scripts/test/）
+
+| | |
+|------|------|
+| 流程改动 | 测试目录从 `scripts/debug/` 更名 `scripts/test/`——目录里存的是测试文件（selftest.py + test_*.py），`test/` 比 `debug/` 自描述；与日志目录更名（`debug/` → `logs/`）同逻辑，至此**全项目消除 debug 语义歧义**（`logs/` 日志、`scripts/test/` 测试、`debug_utils.py` 调试工具，各归其位） |
+| 磁盘 | `scripts/debug/` → `scripts/test/`（内容不动；git 识别为 rename） |
+| 文档 | SKILL.md 2 处 `scripts/debug` → `scripts/test`；「本地测试（git 不追踪）」→「git 追踪」（测试需入库）；`SKILL_MODIFICATION_STANDARD.md` / `references/script-development-rules.md` 同步 |
+| 测试 | selftest 从 `scripts/test/selftest.py` 运行 57 全绿（相对路径定位自动跟随，零代码改动） |
+
+**过程要点**：
+- **⚠️ sed 误伤教训**：全局替换 `s|scripts/debug|scripts/test|g` 误伤 `scripts/debug_utils.py`（真实脚本）→ `scripts/test_utils.py`——真实文件名与测试目录同名前缀冲突，全局替换必须加边界（如 `scripts/debug/` 带斜杠）或逐一确认；已修复
+- 测试需入库（用户决定）：selftest 是「改脚本必跑」的质量门，丢失则无法回归验证
+
+**遗留事项更新**：
+- （新增）历史条目（KNOWN_ISSUES / 归档日志）仍写 `scripts/debug/`，属当时事实，保留不改
+
+
+### 2026-08-08：日志目录统一（web2md 日志迁入 skill 级 logs/）
+
+| | |
+|------|------|
+| 流程改动 | web2md 工作目录从项目级 `{项目根}/.web2md_tools/` 迁入 skill 级 `<skill>/logs/`，与其他 skill 统一（日志归 skill 目录、项目根目录干净）；按 `<项目根名>/` 隔离（与 md2zh 的 `<task-id>/` 隔离同构） |
+| 脚本改动 | `web2md.py` `_save_debug_snapshot`：`{根}/.web2md_tools/_archive/` → `<skill>/logs/_archive/<项目根名>/`（`output_root` 取目录名作隔离层，`__file__` 定位 skill 根） |
+| 文档 | SKILL.md 5 处 `.web2md_tools` → `logs/intermediate/<项目根名>/` 与 `_archive/<项目根名>/`；目录结构加 `logs/`；清理约定加项目隔离层（intermediate 保留 5 轮、_archive 保留 20 条，均按项目隔离） |
+| 迁移 | 旧项目 `E:/study_data/web2md/.web2md_tools/` 内容迁入 `logs/<项目根名>/web2md/`（含 KNOWN_ISSUES_PROJECT.md、快照、清单）；旧目录已删；gitignore 加 `web2md/logs/` |
+| 测试 | `test_save_debug_snapshot` 断言 `.web2md_tools` → `logs`；`test_real_config_reports_drift` → `test_real_config_synced_passes`（config 已补齐）；selftest 57 全绿 |
+
+**过程要点**：
+- **web2md 清单留 skill 级 + 项目根名隔离**（而非项目级）——与 md2zh 的 `<task-id>/` 隔离同构，统一管理；不同项目的 `fix_list_roundN.md` 不会互相覆盖
+- **⚠️ 命名统一教训**：最初定为 `web2md_logs/`，用户指出与 md2zh/confluence 的 `logs/` 命名不一致——同类事物必须同类命名；后统一为 `<skill>/logs/`（三 skill 一致，gitignore 一条 `/*/logs` 全覆盖）。命名应一次到位，避免反复
+- `KNOWN_ISSUES_PROJECT.md`（项目级问题记录）随旧目录一并迁入 `_archive/<项目根名>/`，属项目日志，不入 skill 文档
+
+**遗留事项更新**：
+- （新增）旧项目若残留 `.web2md_tools/` 目录（未迁移的项目），后续抓取时按新路径写入；旧目录可手动删除
+
+
+### 2026-08-08：skill 文档自描述规范化
+
+| | |
+|------|------|
+| 流程改动 | 应用「skill 文档自描述」规范：结构/流程说明必须自描述——规则写全本文件内、复杂结构用「占位符 + 示例图」、不引用其他 skill 的规则细节、不用具体实例名（真实项目/平台名） |
+| 落地清单 | 唯一跨 skill 引用 L309「仿照 confluence-tools 的配置模式」→ 改为「采用『模板 + 真实配置』分离模式」——设计溯源说明虽非执行依赖，按规范仍去除；其余全文核验无跨引用 / 无具体实例名 / 无连通断言（`父页面标题` 等目录示例均为占位符风格；`results matching` / `.search-noresults` 为 GitBook 真实 DOM 结构记录，保留） |
+
+**过程要点**：
+- 判定标准：**执行依赖**的跨 skill 引用 → 删；**对接/兼容说明** → 自描述化或删；**真实默认值/命令值/DOM 结构** → 保留
+- 「仿照 confluence-tools 的配置模式」属**设计溯源**（非执行依赖），但按统一标准一律去除——即使无害的引用也删
+- 全文核验合格项：目录树示例（`父页面标题` / `子页面标题`）、清单格式示例（`child.html`）、公式示例（`\( \alpha \)`、`x_{k}`）、伪公式模式示例（`**w***k*`）——均为占位符风格；L43「按当前 AI 助手平台的方式设置」已是泛化措辞
+
+**遗留事项更新**：
+- （原）web2md 待后续按需通读 → **（已完成）**本 skill SKILL.md 自描述规范化落地
+- （新增）README.md 保留跨 skill 关系说明（总览文档职责），不属自描述规范范围
+
+
+### 2026-08-08：配置同步强制门禁（check_config_sync.py）
+
+| | |
+|------|------|
+| 新脚本 | `check_config_sync.py`：对比 `scripts/config.py` 与 `config.example.py` 的 `web2md_config` **键集合 + 值类型**（`exec` 解析，与 `load_config()` 同源）；三类差异 `missing` / `extra` / `type` 逐条列出；退出码 0 = 同步 / 1 = 有差异 / 2 = 文件缺失或损坏；`--config-text` 从 stdin 读取（供配置向导写入后复核，此时跳过 config 文件存在性检查） |
+| 流程改动 | SKILL.md 第一步：`config.py` 存在且 `python_path` 有效 → **先跑门禁**，不一致（退出码 1/2）**中断任务**，补齐后重跑；向导第 5 步写入后立即复核；第二步表格、目录结构、配置段、固化的核心约束（新增配置键时旧 config.py 会被门禁拦下）同步更新；**收尾自查**：会话改动过 `scripts/*.py` / `SKILL.md` / `config.example.py` / `references/*.md` 时向用户提出记录建议（bug → KNOWN_ISSUES.md；优化 → OPTIMIZATION_SUMMARY.md），**是否记录由用户决定**（对应用户原则：我们出决策建议、由客户拍板，不自动强制补记） |
+| 测试 | `debug/test_config_sync.py` 8 用例（真实文件漂移断言 / 临时对同步 / 缺键 / 多余键 / 类型不符 / 文件缺失 / 损坏 / stdin 模式），selftest 49 → 57 全绿 |
+| 文档 | `script-development-rules.md` 防御性设计表新增「配置同步门禁」条目；真实 `config.py` 补齐缺失的 `merge_paragraphs` / `table_formula_inline` / `page_nav` 三键（门禁从 exit 1 → exit 0） |
+
+**过程要点**：
+- **只比结构不比 `python_path` 值**——example 是占位符、config.py 是真实路径，逐字节对比必然误报；键集合 + 值类型是唯一可靠判据
+- **缺键的后果是 `load_config()` 静默降级默认值**（web2md.py defaults 合并），门禁把「用户以为开了实际没开」（如 collect_children 新增时旧 config 无键）变成显式中断
+- 踩坑：Windows 子进程 `input=` 模式下 stdout 默认 GBK，打印 `✗`/`✓` 会 UnicodeEncodeError → stdin/stdout 均 reconfigure utf-8；`--config-text` 模式跳过 config 文件存在性检查（配置从 stdin 来）；测试里 `TemporaryDirectory` 块内创建的文件在块外使用已删除（子进程返回 2 排查）
+
+**遗留事项更新**：
+- （新增）配置向导第 5 步目前只写 `python_path`，新增配置键仍需手动在 `config.py` 补齐——门禁只拦截不自动补，向导可考虑后续覆盖全部键
+
+
 ### 2026-08-07：父页面 Sub-pages 导航块（page_nav）
 
 | | |

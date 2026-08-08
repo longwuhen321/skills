@@ -33,6 +33,95 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-08：测试目录更名（scripts/debug/ → scripts/test/）
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | 测试目录从 `scripts/debug/` 更名 `scripts/test/`——目录里存的是测试文件，`test/` 比 `debug/` 自描述；与日志目录更名同逻辑，至此全项目消除 debug 语义歧义（`logs/` 日志、`scripts/test/` 测试） |
+| 磁盘 | `scripts/debug/` → `scripts/test/`（内容不动） |
+| 文档 | SKILL.md 3 处 `scripts/debug` → `scripts/test`（含目录树 `│ └── test/`）；「本地测试（git 不追踪）」→「git 追踪」 |
+| 测试 | selftest 从 `scripts/test/selftest.py` 运行 107 全绿（相对路径定位自动跟随，零代码改动） |
+
+**过程要点**：
+- **⚠️ sed 误伤**：全局替换误伤 `scripts/debug_utils.py` → `scripts/test_utils.py`（SKILL.md 脚本完整性检查 L23），已修复——真实文件名与测试目录同名前缀，全局替换需加边界
+- 与 web2md / md2zh 同步更名（三 skill 统一）；`debug_utils.py` 文件名保留（调试工具，非测试）
+
+**遗留事项更新**：
+- （新增）历史条目仍写 `scripts/debug/`，属当时事实，保留不改
+
+
+### 2026-08-08：日志目录更名（debug/ → logs/）
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | `math_upgrade.py` / `md_export.py` / `md_import.py` 各 2 处 `'debug'` → `'logs'`（路径字符串）；`debug_utils.py` `cleanup_debug` 默认参 `'debug'` → `'logs'`（标识符 `debug_dir`/`debug_utils`/`debug_root` 不动） |
+| 文档 | SKILL.md 2 处日志语境 `debug/` → `logs/`（调试日志节 + 文件结构树）；`scripts/debug/`（测试）保留 |
+| 磁盘 | `confluence-tools/debug/` → `confluence-tools/logs/`（内容不动） |
+| gitignore | `/*/debug` → `/*/logs`（全局规则覆盖） |
+| 测试 | `test_export_saves_storage_debug` 断言 `debug/export` → `logs/export`；selftest 107 全绿 |
+
+**过程要点**：
+- 更名动机：`debug/` 与 `scripts/debug/`（测试）同名造成语义混淆；`logs/` 自描述「日志」
+- 与 md2zh 同步更名（三 skill 统一：日志归 `<skill>/logs/`）；`debug_dir` 等标识符保留（语义仍是"调试目录"，无歧义）
+
+**遗留事项更新**：
+- （新增）历史条目仍写 `debug/`，属当时事实，保留不改
+
+
+### 2026-08-08：skill 文档自描述规范化
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | 应用「skill 文档自描述」规范：结构/流程说明必须自描述——规则写全本文件内、复杂结构用「占位符 + 示例图」、不引用其他 skill 的规则细节、不用具体实例名（真实项目/平台名）；该规范同日于 md2zh 先行确立落地，本 skill 跟进 |
+| 落地清单 | ① md_export 输出结构「与 web2md 输出、md_import --dir 目录结构一致，导出的目录树**可直接用 --dir 反向导回** Confluence」→ 删 web2md 引用 + 删全部连通断言，改为**自描述输出示例图**（`<输出根>/<页面A>/<页面A>.md + <页面A>.assets/`，页面无图不产生 assets；子页面嵌套保留层级）——不再断言与其他 skill 的兼容性（结构兼容与否由读者自行判断，README 已承担跨 skill 关系说明）；② 配置确认后「写入 Bash allow 规则（Claude Code 为 .claude/settings.local.json，Reasonix 为 reasonix.toml 的 [permissions].allow）」→ 改为「写入当前 AI 助手平台的免确认白名单（按平台方式设置）」，不绑具体平台 |
+| 判定标准 | **执行依赖**的跨 skill 引用 → 删（自含规则）；**对接/兼容说明**（目录结构一致）→ 自描述化或删；**真实默认值/命令值**（`confluence_export`、`--confirm latest`）→ 保留；**禁止项清单**（settings.json 等"禁止读取"对象）→ 保留 |
+
+**过程要点**：
+- 与 md2zh 清理同款问题：md_export 的「与 web2md 输出…可直接反向导回」是跨 skill 引用 + 连通暗示（skill 独立不连通）
+- **⚠️ 教训 1（首改不彻底）**：第一轮修改只删了 web2md 引用和「直接」二字，却保留了「输入一致，可反向导入」的连通断言——换说法重申了要删的东西。删断言必须删干净，不留"化妆式修改"（用户点破后，改为自描述示例图 + 不再断言任何兼容性，兼容与否由读者自行判断）
+- **⚠️ 教训 2（断言必须读代码核实）**：改 md_export 输出结构前未读代码，沿用原文兼容断言。读 md_export.py:325-345,453-463 后确认：`<标题>.md` 与文件夹同名、`.assets/` 页面无图时不产生、子页面嵌套——结构与 `_scan_tree` 的"同名 md 优先"确实兼容，但兼容性是读者的判断，本 skill 不应自行断言
+- **⚠️ 教训 3（规范须应用于自身输出）**：最初记录本条目时写了「（见 md2zh/OPTIMIZATION_SUMMARY.md 2026-08-08 条目）」——在禁止跨引用的规范条目里写了跨文档指针，规范没应用到自己的输出。规范定义必须自含，只留"同日于 md2zh 先行确立落地"的事实陈述
+- 平台配置段（settings.local.json / reasonix.toml）是具体平台引用，对不用的用户是噪音 → 泛化为「当前 AI 助手平台的免确认白名单」
+- 保留项判定：`confluence_export`（真实默认输出目录名）、`--confirm latest`（真实命令值）、独立运行示例（用法展示，非结构说明）、L31/L327 的 settings.json（"禁止读取"清单，非引用）
+
+**遗留事项更新**：
+- （新增）「skill 文档自描述」规范落地完成（本 skill SKILL.md 已无跨引用、无连通断言）
+
+
+### 2026-08-08：配置同步强制门禁（check_config_sync.py，五分组全检查）
+
+| 类别 | 内容 |
+|------|------|
+| 新脚本 | `check_config_sync.py`：对比 `scripts/config.py` 与 `config.example.py` 的**全部五分组**（`common_config` / `import_config` / `upgrade_config` / `export_config` / `debug_config`）**键集合 + 值类型**（`exec` 解析，与 `load_config()` 同源）；三类差异 `missing` / `extra` / `type` 逐条列出（含分组名）；退出码 0 = 同步 / 1 = 有差异 / 2 = 文件缺失或损坏；`--config-text` 从 stdin 读取（配置向导写入后复核）；`--groups` 逗号分隔指定分组（默认自动发现 example 中全部 `*_config` 分组） |
+| 流程改动 | SKILL.md「首次运行」节：`config.py` 存在时先跑门禁，不一致（退出码 1/2）**中断任务**；脚本完整性检查补 `check_config_sync.py`；文件结构段同步更新 |
+| 测试 | `debug/test_config_sync.py` 9 用例（真实文件同步通过 / 临时对同步 / 缺分组 / 缺键 / 多余键 / 类型不符 / 文件缺失 / 损坏 / stdin 模式）；selftest.py 改为 suite 装载（`loadTestsFromModule` + 显式加 ConfigSyncTests）→ 107 用例全绿（98 原 + 9 新） |
+
+**过程要点**：
+- **同构性核实**：所有选填键均为 `.get(key, 默认值)`（md_import.py:45-55 / math_upgrade.py:51-57 / md_export.py:65-68）——缺键必静默降级，漂移通道真实存在，与 web2md / md2zh 完全同构
+- **否决先前的"不推荐"论证**：五分组部分配置合法 → 但 `load_config` 强制返回五组且选填键全 `.get`，缺键必降级无合法跳过；凭据组 token 环境变量覆盖 → 但 `CONFLUENCE_TOKEN` 只覆盖值、键本身必在（必需项），键集合对比不受影响；占位符类型坑 → md2zh 的 `max_block_chars` 同样存在，非 confluence 独有
+- **五分组全检查（用户拍板 A）**：静态配置一次检查永不漂移；键在值空不拦（查存在性不比值）；`common_config` 必需键缺失本就 `sys.exit(1)`，门禁捕获的是选填键静默降级
+- 踩坑：confluence selftest.py 为单文件结构（非 discover），新测试不自动发现 → `loadTestsFromModule(sys.modules[__name__])` + 显式加 ConfigSyncTests（注意别重复加载）
+
+**遗留事项更新**：
+- （新增）真实 config.py 当前五分组键与 example 一致（exit 0）；`--groups` 支持部分分组检查，后续如遇"只查某组"需求可直接传参，无需改脚本
+
+
+### 2026-08-08：新增收尾自查（记录建议由用户决定）
+
+| 类别 | 内容 |
+|------|------|
+| 流程改动 | SKILL.md「自进化」节新增「收尾自查」：会话改动过 `scripts/*.py` / `SKILL.md` / `config.example.py` / `references/*.md` 时，向用户提出记录建议（bug → KNOWN_ISSUES.md；优化 → OPTIMIZATION_SUMMARY.md），**是否记录、记录到哪由用户决定**——不自动强制补记（对应用户原则：我们出决策建议、由客户拍板） |
+| 说明 | 与 web2md / md2zh 三 skill 同步新增（同措辞）；web2md 的优化条目见其 OPTIMIZATION_SUMMARY 2026-08-08 |
+
+**过程要点**：
+- 补上「固化方案」覆盖不到的空隙：原「修复后向用户提出固化方案」只在错误修复后触发，纯优化（如新增配置项）不在其列；收尾自查覆盖任何改动
+- 此前讨论过 config 同步门禁（check_config_sync.py）是否同步到本 skill——**结论：不推荐**：五分组结构（部分配置合法）误报面 > 捕获面、凭据组 token 可环境变量覆盖、占位符类型坑（如 `default_parent_id: ""` str vs 真实 int）、且与「配置来源唯一原则」哲学冲突；已有「运行期配置补齐」机制覆盖实际漂移场景
+
+**遗留事项更新**：
+- （新增）config 同步门禁待用户后续决定是否讨论落地
+
+
+
 ### 2026-08-04：debug 清理策略调整 + md_export 原始 storage 快照
 
 | 类别 | 内容 |

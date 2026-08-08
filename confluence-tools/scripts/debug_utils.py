@@ -39,7 +39,7 @@ def _get_timestamp_dirs(debug_root: str) -> list:
     return dirs
 
 
-def cleanup_debug(debug_root: str = 'debug',
+def cleanup_debug(debug_root: str = 'logs',
                   max_size_mb: int = 50,
                   keep_recent: int = 20):
     """清理调试目录：总大小超过 max_size_mb **或** 子目录数超过 keep_recent 即清理

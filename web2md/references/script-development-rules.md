@@ -3,7 +3,7 @@
 > 按需读取：**修改或新增 `scripts/*.py` 之前必读本文件**（对齐既有防御机制与红线，
 > 避免破坏设计）；正常转换流程不读。
 > 更新约束：改动脚本后须同步本文件（防御性设计表按实际机制增删改）；
-> 修改 `scripts/*.py` 后必须跑 `scripts/debug/selftest.py` 全绿才算完成。
+> 修改 `scripts/*.py` 后必须跑 `scripts/test/selftest.py` 全绿才算完成。
 
 ## 防御性设计
 
@@ -14,6 +14,7 @@
 | 受保护子树 DOM 规范化 | `normalize_document_html` | 链接/标题/占位符清理在公式提取前完成，math/code 子树不动 |
 | 文本节点占位符保护 | `protect_angle_placeholders` | 把转义占位符包成 `<code>`，不碰真实 HTML 标签与 math/code 内容 |
 | 代码掩码 | `markdown_code.py` | fix_escapes / list_display_fixes / find_all_missed / final_verify 全部忽略围栏与行内代码 |
+| 配置同步门禁 | `check_config_sync.py` | 对比 `scripts/config.py` 与 `config.example.py` 的 `web2md_config` **键集合 + 值类型**（`exec` 解析，与 `load_config()` 同源）；只比结构不比 `python_path` 值（占位符 vs 真实路径天然不同）；不一致退出码 1（缺失/多余/类型不匹配逐条列出），文件缺失/损坏退出码 2；`--config-text` 从 stdin 读取供向导写入后复核 |
 | `is_wiki` 域名判断 | `html_to_markdown` | 语言栏/编辑链接清理、`[[edit]]` 移除仅对 `wikipedia.org` / `wikimedia.org` 生效 |
 | 定义列表表格去缩进 | `normalize_definition_list_tables` | 去掉 markdownify 的 `:   ` 与四空格嵌套，让 Typora 能解析表格 |
 | `$$` 独占一行 | `html_to_markdown` | `([^\n])\$\$` → 前插 `\n\n`，`\$\$([^\n])` → 后插 `\n\n`，确保 Typora 识别 |

@@ -21,6 +21,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent   # md2zh/scripts
 PIPELINE = HERE / 'md2zh_pipeline.py'
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_config_sync import ConfigSyncTests
+
 SAMPLE = (
     '# Title\n\n'
     'Hello **world** with $x$ inline.\n\n'
@@ -426,4 +429,7 @@ class TestHelpers(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    suite = unittest.TestLoader().loadTestsFromTestCase(TestPipeline)
+    suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestHelpers))
+    suite.addTests(unittest.TestLoader().loadTestsFromTestCase(ConfigSyncTests))
+    unittest.TextTestRunner(verbosity=2).run(suite)

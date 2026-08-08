@@ -21,7 +21,9 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 
 读取 `<skill-directory>/scripts/config.py`（本 skill 的共享配置）：
 
-- `config.py` 存在且 `python_path` 有效 → 直接使用，不再询问。
+- `config.py` 存在且 `python_path` 有效 → **先跑配置同步检查**（`scripts/check_config_sync.py`，对比 `config.example.py` 的 `web2md_config` 键集合与值类型；只比结构不比 `python_path` 值本身）：
+  - 通过（退出码 0）→ 直接使用，不再询问
+  - **不一致（退出码 1/2）→ 中断任务**，按输出报告在 `config.py` 补齐/修正缺失或漂移的键后重跑（缺键的后果是 `load_config()` 静默降级到默认值，必须显式配置）
 - `config.py` 缺失 / 损坏 / 路径失效 → 走配置向导：
   1. **先问用户**：「有想用的 Python 环境路径吗？直接回车我自动搜索。」
   2. 用户指定 → 验证可用性 → 采用；用户跳过 → 自动扫描：`where python` / `where python3`、`~/python_env/*/python`、`E:/work/python_env/*/python`、系统 PATH
@@ -31,7 +33,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
      & "<python路径>" -m pip install requests beautifulsoup4 markdownify lxml -q
      ```
      （不要因为缺依赖就换环境，安装失败或环境不可用才重新选择）
-  5. 确认后把 `python_path` 写入 `scripts/config.py`（参考 `config.example.py` 模板，该文件已被 gitignore 排除）
+  5. 确认后把 `python_path` 写入 `scripts/config.py`（参考 `config.example.py` 模板，该文件已被 gitignore 排除），**写入后立即跑 `scripts/check_config_sync.py` 复核**——确认没有缺键（含向导未覆盖的新增键）才继续
   6. **python_path 是必需项**：用户不提供且自动扫描无结果 → **中断任务**（无 Python 无法执行脚本），不创建半成品 config.py；`timeout` 为选填，缺省用默认值 30
   7. **收集导航子页面** → `web2md_config.collect_children`（选填，默认 `false`）
      - `true`：抓取页面时解析侧边栏导航，**批量抓取当前页面在导航树下的直接子页面（含孙页面）**，按页面标题文件夹嵌套落盘
@@ -48,6 +50,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 |------|------|------|
 | `web2md.py` | 主抓取脚本 | 第三步 |
 | `markdown_code.py` | 代码 span/fence 掩码工具（被其他脚本共用） | 各阶段 |
+| `check_config_sync.py` | 配置同步强制检查（第一步门禁） | 第一步 |
 | `fix_escapes.py` | `\_` `\*` → `_` `*`（忽略代码内） | 第四步-A |
 | `list_display_fixes.py` | 自动升级确定性 `$`→`$$` 候选 + 列出其余候选（`--apply`） | 第四步-B |
 | `find_all_missed.py` | 扫描伪公式模式（忽略代码内） | 第四步-C 辅助 |
@@ -95,7 +98,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 
 1. AI 助手 web_fetch 父页面 → 从页面导航文本识别子/孙页面（URL 核对：与父页面同域、
    同版本路径前缀；孙页面在导航中嵌套于子页面之下）
-2. 写清单到 `{项目根目录}/.web2md_tools/intermediate/children_list.md`（格式见下）
+2. 写清单到 `<skill-directory>/logs/intermediate/<项目根名>/children_list.md`（格式见下；`<项目根名>` 取 `{项目根目录}` 的目录名）
 3. 执行 `& "<python路径>" "<skill-directory>/scripts/web2md.py" "<URL>" "{项目根目录}" --children-from "{清单路径}"`
    → 脚本按清单逐个抓取子/孙页面落盘（文件夹名仍以页面实际标题为准）
 
@@ -165,7 +168,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 `**i**` `*i*`。脚本无法判断——**由 AI 助手读 .md 全文**，根据上下文识别。
 
 1. **通读** .md → 识别遗漏的伪公式（`**w***k*`、`*x*2`、`*a*1 + *b*2**i**` 等）
-2. **写清单**到 `{项目根目录}/.web2md_tools/intermediate/fix_list_roundN.md`，格式：`行号 + 原文片段 → 建议修复`
+2. **写清单**到 `<skill-directory>/logs/intermediate/<项目根名>/fix_list_roundN.md`（格式：`行号 + 原文片段 → 建议修复`；`<项目根名>` 取 `{项目根目录}` 的目录名）
 3. **逐条 Edit**，修一条划一条
 4. **重读复核**
 5. 有遗漏 → 回到步骤 2，**直到干净**
@@ -240,6 +243,10 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 嵌套子列表、Sphinx 定义列表（term + 缩进定义段）逐字节保护；双空行压缩为单个（块外）。
 合并后需重跑 final_verify 确认结构未破坏（`merge_paragraphs` 默认关闭，见「配置」）。
 
+**收尾自查**：本次会话是否改动了 `scripts/*.py`、`SKILL.md`、`config.example.py`、`references/*.md`？
+- 有 → **向用户提出记录建议**：列出改动项，按类别给出建议（bug 修复 → `KNOWN_ISSUES.md`；优化/重构/扩展 → `OPTIMIZATION_SUMMARY.md`），**是否记录、记录到哪由用户决定**——确认后按约定补记（日期取系统时间、按文档头部约定插入），用户选择不记录则跳过
+- 无 → 跳过
+
 告知用户文件路径，用 Typora 打开即可。
 
 如果本次抓取/转换/审核发现了**新的失败模式**（当前脚本与说明未覆盖的），在交付时附加一小节：
@@ -253,13 +260,13 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 ## 各项目工作文件
 
-- `{项目根目录}/.web2md_tools/intermediate/` — AI 助手清单 `fix_list_roundN.md`（公式/结构审核轮次）、`children_list.md`（子页面清单，`--children-from` 读取）
-- `{项目根目录}/.web2md_tools/_archive/` — 一次性调试/诊断文件（含抓取失败快照 `fetch_*.html`）
+- `<skill-directory>/logs/intermediate/<项目根名>/` — AI 助手清单 `fix_list_roundN.md`（公式/结构审核轮次）、`children_list.md`（子页面清单，`--children-from` 读取）；`<项目根名>` 取 `{项目根目录}` 的目录名
+- `<skill-directory>/logs/_archive/<项目根名>/` — 一次性调试/诊断文件（含抓取失败快照 `fetch_*.html`）
 
 ### 产物清理约定
 
-- `intermediate/`：每轮转换的清单按 `fix_list_roundN.md` 追加，**只保留最近 5 轮**，更早的移入 `_archive/` 或删除；`children_list.md` 为固定名覆盖式（每次 AI 生成新清单直接覆盖），不参与轮次清理
-- `_archive/`：**最多保留最近 20 个文件/目录**，超出后删除最旧的（调试快照排查用完后可手动删除）
+- `intermediate/<项目根名>/`：每轮转换的清单按 `fix_list_roundN.md` 追加，**只保留最近 5 轮**，更早的移入 `_archive/` 或删除；`children_list.md` 为固定名覆盖式（每次 AI 生成新清单直接覆盖），不参与轮次清理
+- `_archive/<项目根名>/`：**最多保留最近 20 个文件/目录**，超出后删除最旧的（调试快照排查用完后可手动删除）
 
 ### 目录结构规范
 
@@ -269,12 +276,14 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 ├── KNOWN_ISSUES.md                 # 已知问题与修复记录（排查/优化时读，正常转换不预读）
 ├── OPTIMIZATION_SUMMARY.md         # 工作交接摘要（大优化后更新，新会话先读）
 ├── config.example.py               # 配置模板（占位符）
+├── logs/                    # 工作目录（gitignore 排除）：intermediate/<项目根名>/ + _archive/<项目根名>/
 ├── references/
 │   ├── formula-conversion-rules.md   # 公式转换规则（阶段 C 按需读取：伪公式 A–I / Sphinx 遗留 / 碎片化序列）
 │   ├── custom-site-rules.md          # 非平台结构页面规则（自定义站点，检测命中时读取）
 │   └── script-development-rules.md   # 脚本技术要点（防御性设计 + 红线，改动 scripts/*.py 前必读）
 └── scripts/
     ├── config.py                   # 真实配置（gitignore 排除）
+    ├── check_config_sync.py        ← 第一步门禁：配置同步检查
     ├── web2md.py                   ← 主抓取
     ├── markdown_code.py            ← 代码掩码工具
     ├── fix_escapes.py              ← 阶段 A：\_ \* 修复
@@ -282,7 +291,7 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
     ├── find_all_missed.py          ← 阶段 C：伪公式扫描
     ├── merge_paragraphs.py         ← 第五步（可选）：段落源码硬换行合并
     ├── final_verify.py             ← 收尾验证
-    └── debug/                      ← 本地测试（git 不追踪）
+    └── test/                      ← 本地测试（git 追踪）
         ├── selftest.py             ← 测试入口
         ├── test_formula_integrity.py
         ├── test_sphinx_conversion.py
@@ -291,27 +300,28 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 - 可复用脚本一律放 `<skill-directory>/scripts/`，**不复制进项目**
 - 项目根目录禁止散放 `.py` / `.txt` / `.json`（除平台配置目录外）
-- AI 助手生成的中间清单 → `intermediate/`
-- 非复用的一次性脚本 → `_archive/`
+- AI 助手生成的中间清单 → `<skill-directory>/logs/intermediate/<项目根名>/`
+- 非复用的一次性脚本 → `<skill-directory>/logs/_archive/<项目根名>/`
 
 ---
 
 ## 配置（config.py）
 
-仿照 confluence-tools 的配置模式：
+采用「模板 + 真实配置」分离模式：
 
 - 模板：`<skill-directory>/config.example.py`（占位符 + 中文注释）
 - 真实配置：`<skill-directory>/scripts/config.py`（**gitignore 排除**，禁止提交）
 - 分组：`web2md_config` dict — `python_path`（必填，AI 助手执行脚本的解释器）、`timeout`（请求超时秒数，默认 30）、`collect_children`（是否收集导航子页面，默认 false，可被 CLI 覆盖）、`merge_paragraphs`（是否合并段落内源码硬换行，默认 false，可被 CLI `--merge-paragraphs` 覆盖）、`table_formula_inline`（是否把表格单元格内显示公式 `\[...\]` 行内化为 `$...$`，默认 true，可被 CLI `--table-formula-inline` / `--no-table-formula-inline` 覆盖；false 时表格内显示公式保持 `$$` 转换，表格可能撕裂需 AI 重建）、`page_nav`（是否在抓取到子/孙页面时于父页面 md 末尾追加 Sub-pages 导航块，默认 true，可被 CLI `--page-nav` / `--no-page-nav` 覆盖）
 - 加载：`web2md.py` 内 `load_config()`（exec 读取；缺失/损坏时降级默认值并提示首次配置，不退出——脚本仍可独立命令行运行）
-- 首次配置：由第一步的配置向导写入，或手动复制 `config.example.py` → `scripts/config.py` 后填真实值
+- 同步强制：第一步先跑 `scripts/check_config_sync.py`——`config.py` 与 `config.example.py` 的 `web2md_config` **键集合与值类型**不一致（缺键 / 多余键 / 类型不符）即**中断任务**，补齐后再继续（只比结构，不比 `python_path` 占位符 vs 真实路径等值）
+- 首次配置：由第一步的配置向导写入，或手动复制 `config.example.py` → `scripts/config.py` 后填真实值（写入后跑一次 `check_config_sync.py` 复核）
 
-## 测试（本地，git 不追踪）
+## 测试（本地，git 追踪）
 
-`scripts/debug/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、导航解析 collect_children、`--children-from` 清单解析、裸定界符转换、段落合并），**不随仓库分发**：
+`scripts/test/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、导航解析 collect_children、`--children-from` 清单解析、裸定界符转换、段落合并）：
 
 ```powershell
-& "<python路径>" "<skill-directory>/scripts/debug/selftest.py"
+& "<python路径>" "<skill-directory>/scripts/test/selftest.py"
 ```
 
 **修改 scripts/ 下任何脚本后必须运行并全绿。**
@@ -319,6 +329,8 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 ---
 
 ## 自进化：从错误中学习
+
+**修改本 skill 任何文件（`SKILL.md` / `references/*.md` / `scripts/*.py` / `config.example.py`）之前，先读 `<skill-directory>/../SKILL_MODIFICATION_STANDARD.md`**（skill 修改执行标准：书写规范、修改前流程、验证与收尾自查）。仅正常使用本 skill（不涉及修改）时不读。
 
 **仅在碰到问题需要排查（可能涉及修改 `scripts/*.py`）或需要优化 skill 时才读取 `KNOWN_ISSUES.md`**，查是否已知问题及修复方案；正常转换流程**不预读**——不要出于「流程性保守」提前读，历史条目只在真正排查/优化时才有用。
 
@@ -343,10 +355,10 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 - **修改 `scripts/*.py` 后必须跑 selftest 全绿**才算完成；改动脚本前先读 `references/script-development-rules.md`（防御机制与红线），改动后同步该文件（防御性设计表按实际机制增删改）
 - **写入 KNOWN_ISSUES.md / OPTIMIZATION_SUMMARY.md 的条目日期必须取系统当前时间**：写入前执行 `Get-Date -Format "yyyy-MM-dd"`（Windows）或 `date +%F`（Linux/macOS）获取，禁止硬编码或凭印象写日期（历史教训：曾把 8-02 晚间的条目误标为 8-03）
-- **新增/改动配置项时同步更新** `config.example.py` 与本文档的配置说明
+- **新增/改动配置项时同步更新** `config.example.py` 与本文档的配置说明（旧 `config.py` 缺新键会被第一步的 `check_config_sync.py` 门禁拦下，属预期行为）
 - **公共代码必须抽取**：两个及以上脚本共用的逻辑放入 `scripts/` 下共享模块（如 `markdown_code.py`），禁止复制粘贴
 - **真实环境验证产物用后即清**：验证用的临时页面/文件不残留
-- **失败快照**：处理失败时 `web2md.py` 会把原始 HTML 存入 `{项目根目录}/.web2md_tools/_archive/fetch_*.html`，排查用
+- **失败快照**：处理失败时 `web2md.py` 会把原始 HTML 存入 `<skill-directory>/logs/_archive/<项目根名>/fetch_*.html`，排查用
 
 ---
 

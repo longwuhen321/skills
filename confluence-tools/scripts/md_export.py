@@ -75,9 +75,9 @@ class ConfluenceExporter:
         self.headers = {'Content-Type': 'application/json'}
 
         # 调试目录：每页原始 storage 快照（与 md_import/math_upgrade 一致的机制）
-        self.debug_dir = os.path.join(SKILL_ROOT, 'debug', 'export')
+        self.debug_dir = os.path.join(SKILL_ROOT, 'logs', 'export')
         os.makedirs(self.debug_dir, exist_ok=True)
-        cleanup_debug(os.path.join(SKILL_ROOT, 'debug'),
+        cleanup_debug(os.path.join(SKILL_ROOT, 'logs'),
                       int(debug_cfg.get('max_size_mb', 50)),
                       int(debug_cfg.get('keep_recent', 20)))
 

@@ -240,11 +240,11 @@ class SphinxConversionTests(unittest.TestCase):
         self.assertEqual(mapping, {})
 
     def test_save_debug_snapshot(self):
-        # 失败快照写入 {根}/.web2md_tools/_archive/fetch_时间戳.html
+        # 失败快照写入 <skill>/logs/_archive/<项目根名>/fetch_时间戳.html
         with tempfile.TemporaryDirectory() as tmp:
             path = _save_debug_snapshot(tmp, '<html>raw</html>')
             self.assertTrue(path.exists())
-            self.assertIn('.web2md_tools', str(path))
+            self.assertIn('logs', str(path))
             self.assertIn('_archive', str(path))
             self.assertTrue(path.name.startswith('fetch_'))
             self.assertEqual(path.read_text(encoding='utf-8'), '<html>raw</html>')

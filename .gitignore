@@ -15,31 +15,10 @@ __pycache__/
 # Reasonix 本地配置（会话/权限状态，不提交）
 .reasonix/
 reasonix.toml
-
-# ---------- 各 skill 专属规则 ----------
-# 规则需带 skill 目录前缀，避免误伤其他 skill 的同名路径。
-
-# confluence-tools：真实配置含 PAT token，不提交（从 config.example.py 复制）
-confluence-tools/scripts/config.py
-
-# 仓库根目录的配置测试文件（含真实 token，防止误提交）
-/config.py
-
-# confluence-tools：调试日志快照（导入/升级时生成，体积可能很大）
-confluence-tools/debug/
-
-# md2zh：本机配置（含 Python 路径），不提交（从 config.example.py 复制）
-md2zh/scripts/config.py
-
-# web2md：真实配置（python_path 等），不提交（从 config.example.py 复制）
-web2md/scripts/config.py
-
-# 其他 skill 如有需要，在此追加各自的前缀规则：
-# 例如：md2zh/xxx
-
-# md2zh：调试日志快照（decision_logs/intermediate/_archive）：
-md2zh/debug/
 reasonix.toml.bak
 
-# 各 skill：本地测试（统一放 scripts/debug/，不随仓库分发）
-*/scripts/debug/
+# 真实配置文件 不提交
+**/config.py
+
+# 不提交项目中的调试日志快照（<skill>/logs/，体积可能很大）
+/*/logs

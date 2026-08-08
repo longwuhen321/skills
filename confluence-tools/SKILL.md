@@ -20,7 +20,9 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 检查 `scripts/config.py` 是否存在。不存在时启动配置向导。
 
-**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/debug_utils.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
+**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/debug_utils.py`、`scripts/check_config_sync.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
+
+**配置同步门禁（每次执行前）**：`config.py` 存在时，先跑 `scripts/check_config_sync.py`——对比 `config.example.py` 的**全部五分组**（`common_config` / `import_config` / `upgrade_config` / `export_config` / `debug_config`）键集合与值类型，只比结构不比值（token / 路径等占位符 vs 真实值天然不同）。不一致（退出码 1/2）→ **中断任务**，按输出报告补齐/修正后重跑；通过（退出码 0）→ 继续。
 
 ### 向导规则
 
@@ -94,7 +96,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 22. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
 23. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
 
-配置确认后同时将 Python 路径写入 Bash allow 规则（Claude Code 为 `.claude/settings.local.json`，Reasonix 为 `reasonix.toml` 的 `[permissions].allow`），避免后续执行每次确认。
+配置确认后同时将 Python 路径写入当前 AI 助手平台的免确认白名单（按平台方式设置，避免后续执行每次确认）。
 
 后续调用直接从 `scripts/config.py` 读取，不再询问。配置失效（401/403/连接超时）时提示用户重新走配置向导。
 
@@ -167,7 +169,18 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 - 数学公式原生宏还原：`mathblock` → `$$...$$`、`mathinline` → `$...$`（旧 mathjax 宏兼容）
 - 代码宏 → ```` ```语言 ```` 围栏；`toc` 宏 → `[toc]`；note/info/warning 等提示宏 → 引用块
 - 图片附件下载到 `<标题>.assets/`，md 内引用改写为相对路径
-- 输出结构：`<标题>/<标题>.md + <标题>.assets/` —— 与 web2md 输出、`md_import --dir` 目录结构一致，**导出的目录树可直接用 `--dir` 反向导回 Confluence**
+- 输出结构（页面目录 + 同名 md + 可选 assets）：
+
+  ```
+  <输出根>/
+  ├── <页面A>/                    # 页面目录（标题）
+  │   ├── <页面A>.md              # 与该文件夹同名的 md
+  │   └── <页面A>.assets/         # 该页面的图片（页面无图时不产生）
+  └── <页面B>/
+      └── <页面B>.md
+  ```
+
+  子页面导出时 `<页面A>` 内嵌套子页面目录（层级保留）。
 
 ```bash
 "<python_path>" "<SKILL_DIR>/scripts/md_export.py" --page-id <ID> [--recursive|--no-recursive] [--output <目录>]
@@ -219,7 +232,7 @@ python scripts/md_export.py --page-id 12345
 ## 调试日志
 
 ```
-<SKILL_DIR>/debug/
+<SKILL_DIR>/logs/
 ├── import/              # md_import
 │   └── YYYYMMDD_HHMMSS/before_upload.html
 ├── upgrade/             # math_upgrade
@@ -242,14 +255,15 @@ confluence-tools/
 ├── config.example.py           # 配置模板（提交 git，含占位符和注释）
 ├── scripts/
 │   ├── config.py               # 真实配置（不提交，从 example 拷贝）
+│   ├── check_config_sync.py    # 配置同步强制门禁（每次执行前）
 │   ├── common.py               # 公共：配置加载、HTTP 重试、页面收集
 │   ├── debug_utils.py          # 公共：日志清理
 │   ├── md_import.py            # Markdown → Confluence
 │   ├── math_upgrade.py         # 数学公式升级
 │   ├── md_export.py            # Confluence → Markdown 导出
-│   └── debug/                  # 本地测试（git 不追踪）
+│   └── test/                  # 本地测试（git 追踪）
 │       └── selftest.py         # 离线自测（不依赖服务器，mock 配置运行）
-└── debug/                      # 调试日志快照（gitignore 排除）
+└── logs/                        # 调试日志快照（gitignore 排除）
     ├── import/
     ├── upgrade/
     └── export/
@@ -260,6 +274,8 @@ confluence-tools/
 ---
 
 ## 自进化：从错误中学习
+
+**修改本 skill 任何文件（`SKILL.md` / `references/*.md` / `scripts/*.py` / `config.example.py`）之前，先读 `<skill-directory>/../SKILL_MODIFICATION_STANDARD.md`**（skill 修改执行标准：书写规范、修改前流程、验证与收尾自查）。仅正常使用本 skill（不涉及修改）时不读。
 
 排查需修改 `scripts/*.py` 的问题时，**先读取 `KNOWN_ISSUES.md`** 查是否已知问题及修复方案。
 
@@ -277,6 +293,10 @@ confluence-tools/
 > - **记录到 KNOWN_ISSUES.md** — 追加修复条目（含现象/根因/修复/排查方法）
 > - **都改 / 不改**
 
+**收尾自查**：本次会话是否改动了 `scripts/*.py`、`SKILL.md`、`config.example.py`、`references/*.md`？
+- 有 → **向用户提出记录建议**：列出改动项，按类别给出建议（bug 修复 → `KNOWN_ISSUES.md`；优化/重构/扩展 → `OPTIMIZATION_SUMMARY.md`），**是否记录、记录到哪由用户决定**——确认后按约定补记（日期取系统时间、按文档头部约定插入），用户选择不记录则跳过
+- 无 → 跳过
+
 ### 实现前检查点（必过）
 
 **在写任何代码之前，必须输出方案并让用户确认。** 方案至少覆盖以下三点：
@@ -289,10 +309,10 @@ confluence-tools/
 
 ### 回归测试（必过）
 
-**修改 `scripts/*.py` 后，必须运行 `scripts/debug/selftest.py` 且全部用例通过**，才能算修改完成：
+**修改 `scripts/*.py` 后，必须运行 `scripts/test/selftest.py` 且全部用例通过**，才能算修改完成：
 
 ```bash
-"<python_path>" "<SKILL_DIR>/scripts/debug/selftest.py"
+"<python_path>" "<SKILL_DIR>/scripts/test/selftest.py"
 ```
 
 - 全绿 = 转换逻辑未破坏，改动可固化

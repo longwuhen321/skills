@@ -309,11 +309,11 @@ def ensure_state_runtime(state: Dict[str, Any]) -> None:
 
 
 def default_tools_root() -> Path:
-    """日志产物根目录：skill 根目录下的 debug/（skill 根 = scripts 的父目录）。
+    """日志产物根目录：skill 根目录下的 logs/（skill 根 = scripts 的父目录）。
 
-    旧版为 {项目根}/.md2zh_tools/，2026-08-06 起迁移到 <skill>/debug/。
+    旧版为 {项目根}/.md2zh_tools/，2026-08-06 迁移到 <skill>/debug/，2026-08-08 更名 <skill>/logs/。
     """
-    return Path(__file__).resolve().parent.parent / "debug"
+    return Path(__file__).resolve().parent.parent / "logs"
 
 
 def state_tools_root(state: Dict[str, Any]) -> Path:
