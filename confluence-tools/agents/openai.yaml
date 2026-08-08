@@ -1,0 +1,7 @@
+interface:
+  display_name: "Confluence Tools"
+  short_description: "Import export and upgrade Confluence content"
+  default_prompt: "Use $confluence-tools for the requested Confluence content operation."
+
+policy:
+  allow_implicit_invocation: false

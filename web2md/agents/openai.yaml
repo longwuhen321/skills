@@ -1,0 +1,7 @@
+interface:
+  display_name: "Web to Markdown"
+  short_description: "Convert webpages to local Markdown"
+  default_prompt: "Use $web2md to convert the requested webpage to Markdown."
+
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,547 @@
+"""
+Confluence 页面数学公式升级工具
+
+功能：将 Confluence 页面的 storage format 中的原始 LaTeX 标记
+      $...$ / $$...$$ / ```latex``` 升级为 Confluence 原生宏
+      mathinline / mathblock。
+
+用法:
+  python math_upgrade.py --page-id ID [--space KEY] [--recursive] [--align left|center]
+  python math_upgrade.py --space KEY [--align left|center]
+  python math_upgrade.py --confirm <debug_folder>    # AI 助手验证后确认更新
+  python math_upgrade.py --space KEY --stop-on-error  # 批量遇错即停
+
+配置从 scripts/config.py 读取（CLI 参数可覆盖默认值）。
+"""
+
+import os
+import re
+import sys
+import io
+import time
+import argparse
+import datetime
+import requests
+
+# 修复 Windows GBK 终端 emoji 编码问题
+# 幂等：已 wrap 过则跳过，避免多模块同时 import 时第一个 wrapper 被 GC 关闭底层流
+if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+from common import (SKILL_ROOT, load_config, request_with_retry,
+                    collect_space_pages, build_block_template, fetch_page)
+from debug_utils import cleanup_debug
+
+
+def _sanitize_latex(s: str) -> str:
+    """清理非法控制序列：\\* 是未定义控制序列（MathJax 报错），归一化为 *"""
+    return s.replace(r'\*', '*')
+
+
+class ConfluenceMathUpdater:
+    """拉取 Confluence 页面，将原始 $LaTeX$ 标记升级为原生宏"""
+
+    def __init__(self, space_key=None, math_align=None, auto_update=None, ai_verify=None):
+        cfg = load_config()
+        common = cfg['common_config']
+        upgrade_cfg = cfg['upgrade_config']
+        debug_cfg = cfg['debug_config']
+
+        self.base_url = common['confluence_url'].rstrip('/')
+        self.space_key = space_key or upgrade_cfg.get('space', '')
+        self.default_page = upgrade_cfg.get('default_page', '') or None
+        self.math_align = math_align if math_align is not None else upgrade_cfg.get('math_align', 'left')
+        self.auto_update = auto_update if auto_update is not None else upgrade_cfg.get('auto_update', True)
+        self.ai_verify = ai_verify if ai_verify is not None else upgrade_cfg.get('ai_verify', False)
+        self.recursive = upgrade_cfg.get('recursive', True)
+        self.max_depth = int(upgrade_cfg.get('max_depth', 0))
+        self.block_template = build_block_template(self.math_align)
+        self.debug_dir = os.path.join(SKILL_ROOT, 'logs', 'upgrade')
+
+        self.session = requests.Session()
+        self.session.headers.update({
+            'Authorization': f"Bearer {common['confluence_token']}",
+            'Content-Type': 'application/json',
+        })
+
+        os.makedirs(self.debug_dir, exist_ok=True)
+        cleanup_debug(os.path.join(SKILL_ROOT, 'logs'),
+                      int(debug_cfg.get('max_size_mb', 50)),
+                      int(debug_cfg.get('keep_recent', 20)))
+
+    # ── 1. 拉取页面 ──
+    def fetch_page(self, page_id):
+        """拉取页面详情（委托 common.fetch_page，429/5xx 已内置重试）"""
+        return fetch_page(self.session, self.base_url, page_id)
+
+    # ── 2. 转换引擎 ──
+    def _upgrade_old_macros(self, storage_html):
+        upgraded = 0
+
+        def replace_old_macro(m):
+            nonlocal upgraded
+            eq_match = re.search(
+                r'<ac:parameter ac:name="equation">(.*?)</ac:parameter>',
+                m.group(0), re.DOTALL)
+            if eq_match:
+                upgraded += 1
+                return self.block_template.format(content=_sanitize_latex(eq_match.group(1)))
+            return m.group(0)
+
+        result = re.sub(
+            r'<ac:structured-macro ac:name="mathjax-inline-macro"[^>]*>.*?</ac:structured-macro>',
+            replace_old_macro,
+            storage_html, flags=re.DOTALL)
+        return result, upgraded
+
+    @staticmethod
+    def _strip_math_spans(html):
+        """剥掉 math class span 的壳（保留内容），返回 (html, 剥壳数)
+
+        内容部分不允许出现 span 标签（`<span` / `</span`），因此嵌套 span
+        不匹配、原样保留，保证标签配对完整。
+        """
+        pattern = re.compile(
+            r'<span[^>]*class=["\'][^"\']*math[^"\']*["\'][^>]*>'
+            r'(?P<inner>(?:[^<]|<(?!/?span\b)[^>]*>)*)'
+            r'</span>')
+        stripped = 0
+
+        def unwrap(m):
+            nonlocal stripped
+            stripped += 1
+            return m.group('inner')
+
+        return pattern.sub(unwrap, html), stripped
+
+    def _apply_alignment(self, storage_html):
+        """align=left 时，将页面上已有的 mathblock 宏设为 alignment=left（本实例 9.2.1 实测支持）
+
+        替换旧的"mathblock 转 mathinline+\displaystyle" hack。
+        """
+        if self.math_align != 'left':
+            return storage_html, 0
+
+        realigned = 0
+
+        def set_left(m):
+            nonlocal realigned
+            macro = m.group(0)
+            # 已是 left：跳过，避免无意义重写导致版本号虚涨（幂等）
+            if '<ac:parameter ac:name="alignment">left</ac:parameter>' in macro:
+                return macro
+            # 移除其他 alignment 参数（若有），统一替换为 left
+            macro = re.sub(r'<ac:parameter ac:name="alignment">.*?</ac:parameter>',
+                           '', macro, flags=re.DOTALL)
+            macro = macro.replace('<ac:plain-text-body>',
+                                  '<ac:parameter ac:name="alignment">left</ac:parameter>'
+                                  '<ac:plain-text-body>', 1)
+            realigned += 1
+            return macro
+
+        result = re.sub(
+            r'<ac:structured-macro ac:name="mathblock"[^>]*>'
+            r'(?:(?!</ac:structured-macro>).)*?</ac:structured-macro>',
+            set_left, storage_html, flags=re.DOTALL)
+        return result, realigned
+
+    def convert_math(self, storage_html):
+        def escape_latex(s):
+            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        # 剥离旧版 mathjax 插件生成的 math span（class 含 math）的壳，保留内容。
+        # 只处理内容不含嵌套 span 的 math span：
+        #   - 嵌套 span 不匹配 → 结构原样保留，杜绝孤立 </span> 导致 XHTML 400
+        #   - 剥壳保留内容 → 公式文本不丢，后续 convert 正常转换
+        storage_html, span_removed = self._strip_math_spans(storage_html)
+
+        storage_html, old_upgraded = self._upgrade_old_macros(storage_html)
+
+        protected_parts = re.split(
+            r'(<ac:structured-macro\b(?:[^>]*/>|.*?</ac:structured-macro>)|'
+            r'<code[^>]*>.*?</code>|'
+            r'<pre[^>]*>.*?</pre>|'
+            r'</?(?:td|tr|th|table|thead|tbody|p|div|h[1-6]|li|ul|ol|br|hr|img|a|strong|em|blockquote)[^>]*/?>)',
+            storage_html, flags=re.DOTALL)
+
+        def convert(text):
+            # 块级公式内容禁 HTML 标签字符 < >（防跨 span 吞标签）
+            block_before = len(re.findall(r'[$][$]([^$<>]+?)[$][$]', text, re.DOTALL))
+            text = re.sub(
+                r'[$][$]([^$<>]+?)[$][$]',
+                lambda m: self.block_template.format(content=_sanitize_latex(m.group(1).strip())),
+                text, flags=re.DOTALL)
+
+            latex_before = len(re.findall(r'```latex(.*?)```', text, re.DOTALL))
+            text = re.sub(
+                r'```latex(.*?)```',
+                lambda m: self.block_template.format(content=_sanitize_latex(m.group(1).strip())),
+                text, flags=re.DOTALL)
+
+            inline_count = 0
+            upgraded_count = 0
+
+            def replace_inline(m):
+                nonlocal inline_count, upgraded_count
+                content = _sanitize_latex(m.group(1).strip())
+                is_complex = ('=' in content and len(content) > 20)
+                if is_complex:
+                    upgraded_count += 1
+                    return self.block_template.format(content=content)
+                else:
+                    inline_count += 1
+                    return (
+                        '<ac:structured-macro ac:name="mathinline" ac:schema-version="1">'
+                        f'<ac:parameter ac:name="body">{escape_latex(content)}</ac:parameter>'
+                        '</ac:structured-macro>')
+
+            text = re.sub(
+                # 行内公式规则：
+                #   - 开头 $ 后禁空白（排除 $ PWD 等）
+                #   - 闭合 $ 前禁空白（排除 $PWD / $OLDPWD 的跨变量配对）
+                #   - 内容禁 < > $ 换行（防跨 HTML 标签吞 span；storage 中 < 已转义为 &lt;，实体形式可正常匹配）
+                r'(?<![$])[$](?![\s$])([^$<>\n]+?)(?<![$\s])[$](?![$])',
+                replace_inline, text)
+
+            return text, {
+                'inline': inline_count,
+                'block': block_before + upgraded_count,
+                'latex': latex_before,
+                'upgraded': upgraded_count,
+            }
+
+        result_parts = []
+        stats = {'inline': 0, 'block': 0, 'latex': 0, 'upgraded': 0,
+                 'old_macro_upgraded': old_upgraded, 'span_removed': span_removed}
+
+        for i, part in enumerate(protected_parts):
+            if i % 2 == 1:
+                result_parts.append(part)
+            else:
+                converted, s = convert(part)
+                result_parts.append(converted)
+                for k in stats:
+                    if k in s:
+                        stats[k] += s[k]
+
+        return ''.join(result_parts), stats
+
+    def save_debug(self, page_info, before, after, stats):
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder = os.path.join(self.debug_dir, timestamp)
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, 'before.html'), 'w', encoding='utf-8') as f:
+            f.write(before)
+        with open(os.path.join(folder, 'after.html'), 'w', encoding='utf-8') as f:
+            f.write(after)
+        with open(os.path.join(folder, 'info.txt'), 'w', encoding='utf-8') as f:
+            f.write(f"页面 ID: {page_info['page_id']}\n")
+            f.write(f"标题: {page_info['title']}\n")
+            f.write(f"版本: {page_info['version']}\n")
+            f.write(f"转换时间: {timestamp}\n")
+            f.write(f"旧宏升级 (mathjax-inline → mathblock): {stats.get('old_macro_upgraded', 0)} 处\n")
+            f.write(f"行内公式 ($...$ → mathinline):  {stats['inline']} 处\n")
+            f.write(f"块级公式 ($$...$$ → mathblock): {stats['block']} 处\n")
+            f.write(f"latex 块 (```latex → mathblock): {stats['latex']} 处\n")
+            f.write(f"其中 $...$ 升级为 mathblock: {stats.get('upgraded', 0)} 处\n")
+            f.write(f"mathblock 对齐调整 (→ left): {stats.get('realigned', 0)} 处\n")
+            f.write(f"剥离 mathjax span 壳: {stats.get('span_removed', 0)} 处\n")
+        print(f"调试文件已保存: {folder}")
+        return folder
+
+    @staticmethod
+    def _check_xhtml_balance(html):
+        """栈式标签配对检查（支持 ac:/ri: 前缀与 HTML 空元素），返回 (ok, 描述)
+
+        防 PUT 400 "Error parsing xhtml"：转换后的标签不配对在提交前拦截。
+        注意：先剔除 CDATA 与注释——其中可能含 `<mmc::Irlock>` 这类
+        代码文本，会被误当成标签（历史误报根因）。
+        """
+        protected = re.sub(r'<!\[CDATA\[.*?\]\]>', '', html, flags=re.DOTALL)
+        protected = re.sub(r'<!--.*?-->', '', protected, flags=re.DOTALL)
+        stack = []
+        void_tags = {'br', 'hr', 'img', 'meta', 'input', 'link', 'area',
+                     'base', 'col', 'embed', 'source', 'track', 'wbr'}
+        for m in re.finditer(r'</?([a-zA-Z][a-zA-Z0-9:_-]*)(?:\s[^>]*?)?/?>', protected):
+            tag, raw = m.group(1), m.group(0)
+            if raw.startswith('</'):
+                if not stack or stack[-1] != tag:
+                    return False, f"多余闭合 </{tag}>（位置 {m.start()}）"
+                stack.pop()
+            elif raw.endswith('/>') or tag in void_tags:
+                continue
+            else:
+                stack.append(tag)
+        if stack:
+            return False, f"未闭合标签: {stack[-5:]}"
+        return True, "标签配对 OK"
+
+    def verify(self, before, after, stats):
+        report = []
+        passed = True
+        balanced, balance_report = self._check_xhtml_balance(after)
+        report.append(f"XHTML 标签配对: {balance_report}")
+        if not balanced:
+            passed = False
+        before_macros = len(re.findall(r'<ac:structured-macro\b', before))
+        after_macros = len(re.findall(r'<ac:structured-macro\b', after))
+        expected = before_macros + stats['inline'] + stats['block'] + stats['latex']
+        report.append(f"已有宏: {before_macros} → 转换后宏: {after_macros} (预期 {expected})")
+        if after_macros != expected:
+            report.append(f"  ⚠️ 宏数量不匹配，差 {after_macros - expected}")
+            passed = False
+        else:
+            report.append("  ✅ 宏数量正确")
+
+        unprotected_after = re.sub(
+            r'<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>|<code[^>]*>.*?</code>|<pre[^>]*>.*?</pre>',
+            '', after, flags=re.DOTALL)
+        remaining_inline = len(re.findall(
+            r'(?<![$])[$](?![\s$])([^$<>\n]+?)(?<![$\s])[$](?![$])', unprotected_after))
+        remaining_block = len(re.findall(r'[$][$]([^$<>]+?)[$][$]', unprotected_after, re.DOTALL))
+        remaining_latex = len(re.findall(r'```latex(.*?)```', unprotected_after, re.DOTALL))
+        report.append(f"未转换残留: inline={remaining_inline}, block={remaining_block}, latex={remaining_latex}")
+        if remaining_inline + remaining_block + remaining_latex <= 2:
+            report.append("  ✅ 无残留" if remaining_inline + remaining_block + remaining_latex == 0
+                          else f"  ⚠️ 少量残留 (≤2)，可能为孤立字符，跳过")
+        else:
+            report.append("  ⚠️ 存在未转换的公式")
+            passed = False
+        return passed, '\n'.join(report)
+
+    def update_page(self, page_info, new_storage):
+        url = f"{self.base_url}/rest/api/content/{page_info['page_id']}"
+        new_version = page_info['version'] + 1
+        payload = {
+            "version": {"number": new_version},
+            "title": page_info['title'],
+            "type": "page",
+            "space": {"key": page_info['space_key']},
+            "body": {"storage": {"value": new_storage, "representation": "storage"}}
+        }
+        resp = request_with_retry(self.session, 'PUT', url, json=payload)
+        if not resp.ok:
+            print(f"  PUT 失败 ({resp.status_code}): {resp.text[:500]}")
+        resp.raise_for_status()
+        return new_version
+
+    def get_child_pages(self, page_id):
+        url = f"{self.base_url}/rest/api/content/{page_id}/child/page"
+        params = {'limit': 200, 'expand': 'version'}
+        resp = request_with_retry(self.session, 'GET', url, params=params,
+                                  retry_on=(429, 500, 502, 503, 504))
+        resp.raise_for_status()
+        return [(r['id'], r['title']) for r in resp.json().get('results', [])]
+
+    def process_single(self, page_id, depth=0, page_title=''):
+        indent = "  " * depth
+        try:
+            page_info = self.fetch_page(page_id)
+        except Exception as e:
+            # 瞬时网络/服务器抖动：等待后重试一次（5xx 已在请求层重试，这里是兜底）
+            time.sleep(3)
+            try:
+                page_info = self.fetch_page(page_id)
+            except Exception as e2:
+                return False, f"{indent}❌ 拉取失败: {e2}"
+
+        before = page_info['storage']
+        after, stats = self.convert_math(before)
+        after, realigned = self._apply_alignment(after)
+        stats['realigned'] = realigned
+
+        total = stats['inline'] + stats['block'] + stats['latex']
+        old_up = stats.get('old_macro_upgraded', 0)
+        total_changes = total + old_up + realigned
+
+        if total_changes == 0:
+            return True, f"{indent}  {page_info['title']} (v{page_info['version']}) — 无需转换"
+
+        self.save_debug(page_info, before, after, stats)
+
+        if self.ai_verify:
+            return True, (f"{indent}  {page_info['title']} (v{page_info['version']}) "
+                          f"— 转换 {total_changes} 处, ⏸️ 等待 AI 助手验证")
+
+        passed, report = self.verify(before, after, stats)
+        if not passed:
+            return False, f"{indent}❌ {page_info['title']}: 验证未通过\n{report}"
+
+        if self.auto_update:
+            try:
+                new_version = self.update_page(page_info, after)
+            except Exception as e:
+                err_msg = str(e)
+                if hasattr(e, 'response') and e.response is not None:
+                    err_msg = e.response.text[:200]
+                return False, f"{indent}❌ {page_info['title']}: PUT 失败 — {err_msg}"
+            return True, (f"{indent}  {page_info['title']} (v{new_version}) "
+                          f"— inline:{stats['inline']} block:{stats['block']} "
+                          f"old:{old_up} realigned:{realigned}")
+
+        return True, f"{indent}  {page_info['title']} — 转换 {total_changes} 处 (未自动更新)"
+
+    def confirm_update(self, debug_folder=None):
+        if debug_folder is None:
+            dirs = sorted(os.listdir(self.debug_dir))
+            if not dirs:
+                print("❌ 找不到 debug 目录，请先运行转换")
+                return
+            debug_folder = os.path.join(self.debug_dir, dirs[-1])
+
+        after_path = os.path.join(debug_folder, 'after.html')
+        if not os.path.exists(after_path):
+            print(f"❌ 找不到 {after_path}")
+            return
+
+        with open(after_path, 'r', encoding='utf-8') as f:
+            after = f.read()
+
+        info_path = os.path.join(debug_folder, 'info.txt')
+        page_id = None
+        if os.path.exists(info_path):
+            with open(info_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('页面 ID:'):
+                        page_id = line.split(':', 1)[1].strip()
+                        break
+
+        if not page_id:
+            print("❌ 无法从 debug 文件获取页面 ID")
+            return
+
+        page_info = self.fetch_page(page_id)
+        new_version = self.update_page(page_info, after)
+        print(f"  ✅ 页面已更新: v{page_info['version']} → v{new_version}")
+        print(f"  链接: {self.base_url}/spaces/{page_info['space_key']}/pages/{page_id}")
+
+    def collect_tree(self, root_id, max_depth=0):
+        result = []
+        queue = [(root_id, '', 0)]
+        try:
+            r = request_with_retry(
+                self.session, 'GET',
+                f"{self.base_url}/rest/api/content/{root_id}",
+                params={'expand': 'version'}, retry_on=(429, 500, 502, 503, 504))
+            r.raise_for_status()
+            root_title = r.json()['title']
+            queue[0] = (root_id, root_title, 0)
+        except Exception:
+            return result
+
+        while queue:
+            pid, ptitle, pdepth = queue.pop(0)
+            if max_depth and pdepth > max_depth:
+                continue
+            result.append((pid, ptitle, pdepth))
+            try:
+                children = self.get_child_pages(pid)
+            except Exception:
+                children = []
+            for cid, ctitle in children:
+                queue.append((cid, ctitle, pdepth + 1))
+        return result
+
+    def _run_batch(self, all_pages, stop_on_error=False):
+        """批量处理公共逻辑：默认遇错继续，末尾汇总失败列表
+
+        all_pages: [(id, title, depth), ...] 三元组列表
+        """
+        total = len(all_pages)
+        print(f"共 {total} 个页面待处理\n")
+        success_count = 0
+        failures = []
+        for i, entry in enumerate(all_pages):
+            pid, ptitle = entry[0], entry[1]
+            pdepth = entry[2] if len(entry) > 2 else 0
+            indent = pdepth * '  '
+            print(f"[{i+1}/{total}] {indent}「{ptitle}」(ID: {pid})")
+            success, msg = self.process_single(pid, pdepth, ptitle)
+            print(f"  {msg}")
+            if success:
+                success_count += 1
+            else:
+                failures.append((pid, ptitle))
+                if stop_on_error:
+                    break
+        print()
+        print("=" * 60)
+        if failures:
+            print(f"汇总: {success_count}/{total} 成功, ❌ {len(failures)} 个页面失败:")
+            for pid, ptitle in failures:
+                print(f"  - 「{ptitle}」(ID: {pid})")
+        else:
+            print(f"汇总: {success_count}/{total} 成功 ✅ 全部完成")
+
+    def run_space(self, space_key, stop_on_error=False):
+        print(f"\n📂 拉取空间「{space_key}」所有页面...")
+        all_pages = collect_space_pages(self.session, self.base_url, space_key)
+        # 公共版本返回 (id, title, version)，批量处理只关心 (id, title, depth)
+        all_pages = [(pid, ptitle, 0) for pid, ptitle, _v in all_pages]
+        self._run_batch(all_pages, stop_on_error=stop_on_error)
+
+    def run_recursive(self, page_id, max_depth=0, stop_on_error=False):
+        print("\n📂 收集子页面树...")
+        all_pages = self.collect_tree(page_id, max_depth)
+        self._run_batch(all_pages, stop_on_error=stop_on_error)
+
+    def run_single(self, page_id):
+        print(f"\n处理: 页面 (ID: {page_id})")
+        success, msg = self.process_single(page_id, 0, '')
+        print(f"\n{msg}")
+        if not success:
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Confluence 数学公式升级工具')
+    parser.add_argument('--page-id', default=None, help='单个页面 ID（默认从 config.py 读取）')
+    parser.add_argument('--space', default=None, help='空间 Key（默认从 config.py 读取）')
+    parser.add_argument('--recursive', action='store_true', default=None,
+                        help='递归处理子页面（默认从 config.py 读取）')
+    parser.add_argument('--no-recursive', action='store_false', dest='recursive',
+                        help='不递归，仅处理单个页面')
+    parser.add_argument('--max-depth', type=int, default=-1, help='递归最大深度（-1=读取 config，0=不限）')
+    parser.add_argument('--align', default=None, choices=['left', 'center'], help='公式对齐方式（默认从 config.py 读取）')
+    parser.add_argument('--ai-verify', action='store_true', default=None,
+                        help='转换后暂停等待 AI 助手验证（默认从 config.py 读取）')
+    parser.add_argument('--no-ai-verify', action='store_false', dest='ai_verify',
+                        help='不暂停，直接更新')
+    parser.add_argument('--no-auto-update', action='store_true', help='不自动更新，仅生成 debug 文件')
+    parser.add_argument('--stop-on-error', action='store_true',
+                        help='批量处理时遇到失败立即停止（默认继续处理并末尾汇总）')
+    parser.add_argument('--confirm', default=None, help='AI 助手验证后确认更新（传入 debug 目录路径）')
+
+    args = parser.parse_args()
+
+    if args.confirm:
+        updater = ConfluenceMathUpdater()
+        updater.confirm_update(args.confirm if args.confirm != 'latest' else None)
+        sys.exit(0)
+
+    updater = ConfluenceMathUpdater(
+        space_key=args.space,
+        math_align=args.align,
+        auto_update=False if args.no_auto_update else None,
+        ai_verify=args.ai_verify,
+    )
+
+    page_id = args.page_id or updater.default_page
+    recursive = args.recursive if args.recursive is not None else updater.recursive
+    max_depth = args.max_depth if args.max_depth >= 0 else updater.max_depth
+
+    if not page_id and not updater.space_key:
+        parser.error("必须指定 --page-id 或 --space，或在 config.py 的 upgrade_config 中设置 default_page 或 space")
+
+    print("=" * 60)
+    print("🔍 Confluence 数学公式升级工具")
+    align_label = '左对齐 (mathblock + alignment=left)' if updater.math_align == 'left' else '居中 (mathblock)'
+    print(f"  对齐: {align_label}")
+    print("=" * 60)
+
+    if page_id and recursive:
+        updater.run_recursive(page_id, max_depth=max_depth, stop_on_error=args.stop_on_error)
+    elif page_id:
+        updater.run_single(page_id)
+    else:
+        updater.run_space(updater.space_key, stop_on_error=args.stop_on_error)
