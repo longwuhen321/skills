@@ -20,6 +20,9 @@
 | `$$` 独占一行 | `html_to_markdown` | `([^\n])\$\$` → 前插 `\n\n`，`\$\$([^\n])` → 后插 `\n\n`，确保 Typora 识别 |
 | 图片名截断 `max_len=60` | `sanitize_filename` | 避免超长文件名 |
 | 同页锚点过滤 | `collect_children` | 单页文档章节锚点（`commands.html#xxx`）与孙级锚点（`父页.html#xxx`）经 `_strip_fragment` 去 fragment 后与当前页/直接父页 URL 相同 → 跳过，避免重复抓取同一页面互相覆盖 |
+| 导航收集分层（基座+策略+汇总） | `nav_children.py` | 通用基座（URL 规范化/current_a 定位/容器查找/层级判定/去重）只写一遍；策略层每主题只写差异（`strategy_sphinx`/`strategy_vitepress` + STRATEGIES 注册表）；汇总 `collect_children` 返回 `{structure, children, notes}` dict。**新主题 = 追加 strategy 函数 + 注册**，不动基座 |
+| RTD 当前项 href="#" 参与定位 | `nav_children._collect_base` | Sphinx RTD 主题当前项导航链接是 `href="#"` 占位（靠 `li.current` class 标记），`href_raw == '#'` 且 urljoin 后 == 当前页 → 参与 current_a 定位；`#VPContent` 类真实锚点（`startswith('#')` 且非 `#`）仍跳过——`== '#'` 判据天然区分两者（2026-08-08 回归教训：一刀切跳过 `#` 开头链接曾误杀 RTD） |
+| 导航空结果诊断（notes） | `nav_children.collect_children` / `web2md.py` fetch_and_process | 空结果时 notes 输出「未定位到当前页/无子页面容器/被过滤/结构未识别」原因 + 定位成功信息，web2md.py 打印「🧭 导航诊断」——AI 助手据此判断「真没有」还是「漏识别」，零网络依赖；未命中任何主题特征时按通用 li/ul 兜底（structure='generic'） |
 | 裸定界符配对保护 | `convert_plain_tex_delimiters` | 文本节点级配对 `\(...\)`/`\[...\]`；跳过 `\\[` 行距（开定界符前字符是反斜杠）、`\left(` `\left[` 天然不匹配、math/code 子树；跨节点配对不替换，计数输出交 AI 复核 |
 | 重复 H1 剥离守卫 | `strip_duplicate_h1` | 页面自身 h1 文本与 `extract_title` 提取标题相同时剥离（避免与脚本前缀 `# {title}` 重复）；含 math/code/pre/script/style 子树的 h1 不剥离；比较与 `extract_title` 同源，不存在误判路径 |
 | 标题数学清理 | `clean_title_math` | 标题含裸 TeX 定界符/命令（如 `\( \alpha \)`）时去定界符 + 希腊字母/常用运算符转 Unicode + 压缩空白；未映射命令保留不误删；`extract_title` 与 `strip_duplicate_h1` 共用同一清理，保证命名、前缀 H1、去重三者一致 |

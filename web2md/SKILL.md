@@ -49,6 +49,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 | 文件 | 用途 | 阶段 |
 |------|------|------|
 | `web2md.py` | 主抓取脚本 | 第三步 |
+| `nav_children.py` | 导航子/孙页面收集（基座+策略+汇总，`collect_children` 返回 `{structure, children, notes}`；空结果输出诊断 notes 供 AI 判断） | 第三步（子页面收集） |
 | `markdown_code.py` | 代码 span/fence 掩码工具（被其他脚本共用） | 各阶段 |
 | `check_config_sync.py` | 配置同步强制检查（第一步门禁） | 第一步 |
 | `fix_escapes.py` | `\_` `\*` → `_` `*`（忽略代码内） | 第四步-A |
@@ -90,16 +91,27 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 规则解析（`collect_children`）只覆盖已知导航结构（Sphinx li/ul、VitePress div.item/section 等）。
 遇到以下情况时，由 **AI 助手接管子/孙页面判断**（脚本退化为按清单抓取）：
 
-1. 脚本输出"该页面无严格导航子页面"，但 AI 助手访问页面（web_fetch）时在侧边栏导航中
-   明显看到子页面（新站点主题漏识别）
+1. 脚本输出"该页面无严格导航子页面"且 notes 诊断显示**结构未识别**（structure=unknown/generic）
+   或空结果原因不明（current_a 未定位等），同时本地证据（页面 md 中的子页链接、同站
+   其他章节产物、历史清单）显示导航中**明显存在子页面**（新站点主题漏识别）
 2. 规则收集的候选异常（数量过多、含外部站点/版本切换链接等，疑似整树误抓）
 
-流程：
+流程（**本地证据优先，网络核实仅作补充**）：
 
-1. AI 助手 web_fetch 父页面 → 从页面导航文本识别子/孙页面（URL 核对：与父页面同域、
-   同版本路径前缀；孙页面在导航中嵌套于子页面之下）
-2. 写清单到 `<skill-directory>/logs/intermediate/<项目根名>/children_list.md`（格式见下；`<项目根名>` 取 `{项目根目录}` 的目录名）
-3. 执行 `& "<python路径>" "<skill-directory>/scripts/web2md.py" "<URL>" "{项目根目录}" --children-from "{清单路径}"`
+1. **先用手里的本地证据判断子/孙页面**（不需要再访问页面）：
+   - 本次会话 `web2md.py` 已抓取的页面 HTML（soup 仍在会话里）——直接解析导航结构
+   - 脚本 `collect_children` 的输出诊断（`nav_children.py` 的 notes：结构特征、导航前 N 条链接、空结果原因）
+   - 历史产物：`logs/intermediate/<项目根名>/children_list.md`、`logs/_archive/<项目根名>/` 快照、项目目录下同站其他章节的抓取结果
+2. web_fetch 父页面仅作**补充核实**（从页面导航文本识别子/孙页面；URL 核对：与父页面同域、
+   同版本路径前缀；孙页面在导航中嵌套于子页面之下）。**web_fetch 失败不改变结论方向**——
+   退回第 1 步的本地证据；本地证据仍不足时，可用 skill 的 Python 环境（`scripts/config.py` 的
+   `python_path`）写脚本核实（与主抓取同一网络通道，通常可达）——核实脚本的代理从
+   `scripts/config.py` 的 `proxy` 键读取（非空时传入 requests/curl，空则自动用环境变量）
+3. **全部通道都无法确认时 → 如实报告给用户**：说明「无法核实子/孙页面」，附上本地证据
+   （如页面 md 中的子页链接），由用户确认或提供清单——**禁止把「无法核实」静默当成「确认无子页面」**
+   （核心纪律：无法核实 ≠ 确认没有，证据不足时问用户，不自行收尾）
+4. 写清单到 `<skill-directory>/logs/intermediate/<项目根名>/children_list.md`（格式见下；`<项目根名>` 取 `{项目根目录}` 的目录名）
+5. 执行 `& "<python路径>" "<skill-directory>/scripts/web2md.py" "<URL>" "{项目根目录}" --children-from "{清单路径}"`
    → 脚本按清单逐个抓取子/孙页面落盘（文件夹名仍以页面实际标题为准）
 
 清单格式（AI 助手生成，脚本只做机械解析；`--children-from` 优先于规则解析）：
@@ -285,6 +297,7 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
     ├── config.py                   # 真实配置（gitignore 排除）
     ├── check_config_sync.py        ← 第一步门禁：配置同步检查
     ├── web2md.py                   ← 主抓取
+    ├── nav_children.py             ← 导航子/孙页面收集（基座+策略+汇总，含 notes 诊断）
     ├── markdown_code.py            ← 代码掩码工具
     ├── fix_escapes.py              ← 阶段 A：\_ \* 修复
     ├── list_display_fixes.py       ← 阶段 B：$→$$ 自动升级 + 候选列表
@@ -311,7 +324,7 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 - 模板：`<skill-directory>/config.example.py`（占位符 + 中文注释）
 - 真实配置：`<skill-directory>/scripts/config.py`（**gitignore 排除**，禁止提交）
-- 分组：`web2md_config` dict — `python_path`（必填，AI 助手执行脚本的解释器）、`timeout`（请求超时秒数，默认 30）、`collect_children`（是否收集导航子页面，默认 false，可被 CLI 覆盖）、`merge_paragraphs`（是否合并段落内源码硬换行，默认 false，可被 CLI `--merge-paragraphs` 覆盖）、`table_formula_inline`（是否把表格单元格内显示公式 `\[...\]` 行内化为 `$...$`，默认 true，可被 CLI `--table-formula-inline` / `--no-table-formula-inline` 覆盖；false 时表格内显示公式保持 `$$` 转换，表格可能撕裂需 AI 重建）、`page_nav`（是否在抓取到子/孙页面时于父页面 md 末尾追加 Sub-pages 导航块，默认 true，可被 CLI `--page-nav` / `--no-page-nav` 覆盖）
+- 分组：`web2md_config` dict — `python_path`（必填，AI 助手执行脚本的解释器）、`proxy`（请求代理，空字符串=环境变量自动检测，非空=显式配置优先；仅支持 http:// 形式，socks5:// 需 PySocks 未安装）、`timeout`（请求超时秒数，默认 30）、`collect_children`（是否收集导航子页面，默认 false，可被 CLI 覆盖）、`merge_paragraphs`（是否合并段落内源码硬换行，默认 false，可被 CLI `--merge-paragraphs` 覆盖）、`table_formula_inline`（是否把表格单元格内显示公式 `\[...\]` 行内化为 `$...$`，默认 true，可被 CLI `--table-formula-inline` / `--no-table-formula-inline` 覆盖；false 时表格内显示公式保持 `$$` 转换，表格可能撕裂需 AI 重建）、`page_nav`（是否在抓取到子/孙页面时于父页面 md 末尾追加 Sub-pages 导航块，默认 true，可被 CLI `--page-nav` / `--no-page-nav` 覆盖）
 - 加载：`web2md.py` 内 `load_config()`（exec 读取；缺失/损坏时降级默认值并提示首次配置，不退出——脚本仍可独立命令行运行）
 - 同步强制：第一步先跑 `scripts/check_config_sync.py`——`config.py` 与 `config.example.py` 的 `web2md_config` **键集合与值类型**不一致（缺键 / 多余键 / 类型不符）即**中断任务**，补齐后再继续（只比结构，不比 `python_path` 占位符 vs 真实路径等值）
 - 首次配置：由第一步的配置向导写入，或手动复制 `config.example.py` → `scripts/config.py` 后填真实值（写入后跑一次 `check_config_sync.py` 复核）

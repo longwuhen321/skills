@@ -17,6 +17,13 @@ web2md_config = {
     # 可以是系统 Python、conda 环境或 venv 中的 python.exe。
     "python_path": "/path/to/your/python",
 
+    # 抓取页面的请求代理（HTTP/HTTPS 请求统一使用）。
+    # 空字符串 "" = 不显式配置，交给 requests 自动读取环境变量（HTTP_PROXY/HTTPS_PROXY）。
+    # 非空 = 显式配置，优先于环境变量（单一配置源，避免双源漂移）。
+    # 仅支持 http:// 形式（如 "http://127.0.0.1:7890"）；socks5:// 需要 PySocks 未安装会报错。
+    # AI 判断通道（web_fetch 失败时的核实脚本）同样从本配置读取代理。
+    "proxy": "",
+
     # 抓取页面的请求超时（秒），防网络挂起卡死脚本。
     "timeout": 30,
 

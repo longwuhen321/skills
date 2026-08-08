@@ -32,6 +32,49 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 ============================================================================
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
+### 2026-08-08：proxy 配置项（config.py + web2md.py + AI 判断通道）
+
+| | |
+|------|------|
+| 新功能 | `web2md_config` 新增 `proxy` 键：空字符串 = 不显式配置，requests 自动读环境变量（HTTP_PROXY/HTTPS_PROXY）；非空 = 显式配置，优先于环境变量（单一配置源，避免双源漂移）；仅支持 http:// 形式（socks5:// 需 PySocks 未安装会报错）。`web2md.py` `load_config` defaults 加 `proxy`，`main` 中 session 非空时设置 `session.proxies`（图片下载同 session 自动覆盖），打印「代理（config.py 配置）」提示 |
+| 流程改动 | SKILL.md 配置段补 proxy 说明；AI 判断通道 fallback 第 2 步补「核实脚本从 config.py 读 proxy 传入 requests/curl」——AI 助手不再需要自行发现本机代理路径（本次事故教训：AI 曾不知道本机网络怎么走） |
+| 配置 | `config.example.py` + 真实 `config.py` 同步补 `proxy` 键（真实值留空 = 走环境变量，当前系统已配置 HTTP_PROXY/HTTPS_PROXY）；`check_config_sync.py` 门禁 7 键全一致（退出码 0） |
+| 验证 | 网络恢复后实测：环境变量代理 4/4 成功、显式 HTTP 代理 4/4 成功（各 ~3-6s）；curl 直连/代理均 3/3 全 200；selftest 60 全绿 |
+
+**过程要点**：
+- **代理发现教训**：AI 曾因不知道本机网络路径（WebFetch 平台侧失败 + 不识别 git 代理/环境变量）误判「无法访问」——proxy 配置项把答案写进 config.py，AI 第一步就读它
+- **网络抖动**：验证初期环境变量代理 4/4 全失败（TLS 握手超时），用户确认「网络卡了」；恢复后 4/4 全通——排查时先排除网络抖动再判断配置问题
+- **限制**：仅 http:// 代理；socks5 需装 PySocks（本机不装，直连/HTTP 代理已通，避免过度工程）
+
+**遗留事项更新**：
+- （原）nav_children.py generic 兜底未在真实手写导航站点实测 → 不变
+- （新增）md2zh/confluence 未加 proxy 键（最小改动原则，如需要照此模式加）
+
+
+### 2026-08-08：导航收集重构（nav_children.py 基座+策略+汇总）与 AI 判断通道 fallback
+
+| | |
+|------|------|
+| 重构 | `web2md.py` 导航收集 7 个函数（`_norm_nav_url`/`_strip_fragment`/`_is_descendant_of`/`_child_nav_container`/`_same_doc_tree`/`collect_children` 及内嵌 `nav_level`/`_item_section`）迁出为独立模块 `scripts/nav_children.py`——**基座 + 策略 + 汇总**架构：通用基座只写一遍（URL 规范化/current_a 定位/容器查找/层级判定/去重），策略层每主题只写差异（`strategy_sphinx`/`strategy_vitepress` + STRATEGIES 注册表，新主题追加函数即扩展），汇总 `collect_children` 返回 `{structure, children, notes}` dict（structure ∈ sphinx/vitepress/generic/unknown） |
+| 新功能 | **RTD 当前项 href="#" 识别修复**（回归）：`href_raw == '#'` 且 urljoin 后 == 当前页 → 参与 current_a 定位；`#VPContent` 类真实锚点仍跳过（`== '#'` 判据天然区分）；未命中主题特征时按通用 li/ul 兜底（generic） |
+| 新功能 | **notes 诊断输出**：空结果时输出「未定位到当前页/无子页面容器/被过滤/结构未识别」原因 + 定位成功信息，web2md.py 打印「🧭 导航诊断」——AI 判断子页面零网络依赖 |
+| 流程改动 | SKILL.md AI 判断通道改「本地证据优先 → web_fetch 补充 → 全失败如实报告由用户确认」，核心纪律「无法核实 ≠ 确认没有」；web_fetch 失败时用 skill Python 环境核实为替代通道 |
+| 测试 | 迁移 11 处 `collect_children` import（web2md → nav_children）并适配 dict 返回；新增 3 用例（RTD href="#" 识别 3 子页、RTD 叶子页 notes 诊断、布局锚点仍跳过）；selftest 57 → 60 全绿 |
+| 验证 | 端到端 nuttx NSH 实跑：structure=sphinx，识别 8 子页面（customizing.html#nsh-commands 锚点变体正确过滤） |
+
+**过程要点**：
+- **回归根因**：8-02 为挡 VitePress 布局锚点加 `href.startswith('#')` 一刀切——RTD 当前项占位 href="#" 被误杀（8-02 旧逻辑在相同 DOM 实测能识别 9 子页）。教训：过滤条件要精确到语义（`== '#'` vs `startswith('#')`），一刀切必踩坑
+- **策略特征检测盲区**：老测试的裸 li/ul HTML 无任何主题特征（无 generator meta/toctree class/VPSidebar）→ 策略全部未命中 → 需 generic 兜底（也覆盖手写导航的站点）；`#VPContent` 保护不依赖特征检测，`== '#'` 判据天然安全
+- **决策缺陷**（独立于脚本）：AI 判断通道 web_fetch 失败无 fallback，把「无法核实」当「确认没有」；本地证据（已抓 HTML/历史清单/同站产物）被忽略。教训：AI 判断通道必须给 fallback 链 + 纪律，不能留白让 AI 即兴
+- **网络通道**：WebFetch 失败是 claude.ai 平台侧预检查，与站点可达性无关；本机 Python 直连（skill 主通道）本来就通；git socks5 代理 Python 缺 PySocks 不必装（直连已通，避免过度工程）
+- **CRLF 强制**：test_sphinx_conversion.py 原为 CRLF（违反仓库规范），已转 LF
+
+**遗留事项更新**：
+- （原）跨节点裸定界符配对仍靠 AI 手工修复 → 不变
+- （新增）nav_children.py 的 generic 兜底在真实非 Sphinx/VitePress 站点（手写 HTML 导航）上未实测，后续遇到可补充验证
+- （新增）策略特征检测目前只覆盖 Sphinx/VitePress 两族；GitBook 等新主题追加 strategy 函数 + 注册即可
+
+
 ### 2026-08-08：测试目录更名（scripts/debug/ → scripts/test/）
 
 | | |

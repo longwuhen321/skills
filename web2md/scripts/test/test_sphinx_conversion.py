@@ -275,9 +275,9 @@ class SphinxConversionTests(unittest.TestCase):
 
     def test_collect_children_strict_navigation(self):
         # 严格导航子页面：目录形式 URL → 4 个子页面，Trimming Guide 下 2 个孙页面
-        from web2md import collect_children
+        from nav_children import collect_children
         soup = BeautifulSoup(self.NAV_HTML, 'lxml')
-        children = collect_children(soup, 'https://docs.px4.io/v1.15/en/config_fw/')
+        children = collect_children(soup, 'https://docs.px4.io/v1.15/en/config_fw/')['children']
         self.assertEqual(len(children), 4)
         self.assertEqual(children[0]['title'], 'Rate/Attitude Controller Tuning Guide')
         self.assertEqual(
@@ -291,17 +291,17 @@ class SphinxConversionTests(unittest.TestCase):
 
     def test_collect_children_index_html_url(self):
         # index.html 形式的 base_url 也能匹配当前导航节点
-        from web2md import collect_children
+        from nav_children import collect_children
         soup = BeautifulSoup(self.NAV_HTML, 'lxml')
-        children = collect_children(soup, 'https://docs.px4.io/v1.15/en/config_fw/index.html')
+        children = collect_children(soup, 'https://docs.px4.io/v1.15/en/config_fw/index.html')['children']
         self.assertEqual(len(children), 4)
 
     def test_collect_children_leaf_returns_empty(self):
         # 叶子节点（导航中无子页面）→ 空列表，不报错
-        from web2md import collect_children
+        from nav_children import collect_children
         leaf = BeautifulSoup(
             '<nav><ul><li><a href="/a/index.html">A</a></li></ul></nav>', 'lxml')
-        self.assertEqual(collect_children(leaf, 'https://x.com/a/'), [])
+        self.assertEqual(collect_children(leaf, 'https://x.com/a/')['children'], [])
 
     def test_children_folder_name_sanitized(self):
         # 标题文件夹名：非法字符（/ 等）被替换，符合文件系统命名规范
@@ -312,7 +312,7 @@ class SphinxConversionTests(unittest.TestCase):
 
     def test_collect_children_vitepress_structure(self):
         # VitePress 侧边栏用 div/section 而非 ul/li：子页面平铺在 div.items 下
-        from web2md import collect_children
+        from nav_children import collect_children
         html = """
         <aside class="VPSidebar"><nav class="nav"><div class="group">
         <section class="VPSidebarItem level-0">
@@ -330,7 +330,7 @@ class SphinxConversionTests(unittest.TestCase):
         </div></nav></aside>
         """
         soup = BeautifulSoup(html, 'lxml')
-        children = collect_children(soup, 'https://docs.px4.io/v1.15/en/config_fw/')
+        children = collect_children(soup, 'https://docs.px4.io/v1.15/en/config_fw/')['children']
         self.assertEqual(len(children), 2)
         self.assertEqual(children[0]['title'], 'Rate/Attitude Controller Tuning Guide')
         self.assertEqual(
@@ -363,7 +363,7 @@ class SphinxConversionTests(unittest.TestCase):
 
     def test_collect_children_ignores_same_page_anchors(self):
         # 单页文档：导航子项全部是当前页锚点（commands.html#xxx）→ 无子页面，不重复抓取
-        from web2md import collect_children
+        from nav_children import collect_children
         html = """
         <nav><ul>
         <li><a href="/docs/latest/applications/nsh/commands.html">Commands</a>
@@ -376,12 +376,12 @@ class SphinxConversionTests(unittest.TestCase):
         </ul></nav>
         """
         soup = BeautifulSoup(html, 'lxml')
-        children = collect_children(soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/commands.html')
+        children = collect_children(soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/commands.html')['children']
         self.assertEqual(children, [])
 
     def test_collect_children_current_link_with_anchor(self):
         # 当前导航链接带锚点（commands.html#commands）也能定位节点；本页锚点子项被过滤，真子页面保留
-        from web2md import collect_children
+        from nav_children import collect_children
         html = """
         <nav><ul>
         <li><a href="/docs/latest/applications/nsh/commands.html#commands">Commands</a>
@@ -393,7 +393,7 @@ class SphinxConversionTests(unittest.TestCase):
         </ul></nav>
         """
         soup = BeautifulSoup(html, 'lxml')
-        children = collect_children(soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/commands.html')
+        children = collect_children(soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/commands.html')['children']
         self.assertEqual(len(children), 1)
         self.assertEqual(children[0]['title'], 'Other Page')
         self.assertEqual(
@@ -404,7 +404,7 @@ class SphinxConversionTests(unittest.TestCase):
 
     def test_collect_children_grandchild_anchor_to_parent_skipped(self):
         # 孙页面锚点指向其直接父页面自身（customizing.html#nsh-commands）→ 跳过，避免重复抓取同一页面互相覆盖
-        from web2md import collect_children
+        from nav_children import collect_children
         html = '''
         <nav><ul>
         <li><a href="/docs/latest/applications/nsh/index.html" class="active">NuttShell (NSH)</a>
@@ -421,7 +421,7 @@ class SphinxConversionTests(unittest.TestCase):
         '''
         soup = BeautifulSoup(html, 'lxml')
         children = collect_children(
-            soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/index.html')
+            soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/index.html')['children']
         self.assertEqual(len(children), 1)
         self.assertEqual(children[0]['title'], 'The NSH Library')
         self.assertEqual(children[0]['children'], [])
@@ -430,7 +430,7 @@ class SphinxConversionTests(unittest.TestCase):
     def test_collect_children_flat_anchor_sibling_skipped(self):
         # 平铺导航：customizing.html#nsh-commands 与 customizing.html 同级（同为子页面），
         # 锚点变体去 fragment 后与已接受的子页面相同 → 跳过，不重复抓取
-        from web2md import collect_children
+        from nav_children import collect_children
         html = '''
         <nav><ul>
         <li><a href="/docs/latest/applications/nsh/index.html" class="active">NuttShell (NSH)</a>
@@ -447,7 +447,7 @@ class SphinxConversionTests(unittest.TestCase):
         '''
         soup = BeautifulSoup(html, 'lxml')
         children = collect_children(
-            soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/index.html')
+            soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/index.html')['children']
         self.assertEqual(len(children), 1)
         self.assertEqual(children[0]['title'], 'The NSH Library')
         self.assertEqual(children[0]['children'], [])
@@ -538,7 +538,7 @@ class SphinxConversionTests(unittest.TestCase):
     def test_collect_children_layout_anchor_not_interfering(self):
         # VitePress 布局锚点 #VPContent / 正文标题锚点先于导航出现时，不得把 current_a
         # 误定位到锚点（去 fragment 后与当前页 URL 相同）→ 子页面仍正常收集
-        from web2md import collect_children
+        from nav_children import collect_children
         html = """
         <div class="Layout"><a href="#VPContent">Skip to content</a></div>
         <nav><ul>
@@ -551,7 +551,7 @@ class SphinxConversionTests(unittest.TestCase):
         </ul></nav>
         """
         soup = BeautifulSoup(html, 'lxml')
-        children = collect_children(soup, 'https://docs.example.com/docs/topic/index.html')
+        children = collect_children(soup, 'https://docs.example.com/docs/topic/index.html')['children']
         self.assertEqual(len(children), 2)
         self.assertEqual(children[0]['title'], 'Child 1')
         self.assertEqual(
@@ -562,7 +562,7 @@ class SphinxConversionTests(unittest.TestCase):
     def test_collect_children_plain_page_html_redirect(self):
         # 普通页面（非 index）被服务器重定向为去 .html 形式：导航链接 modules_main
         # （无后缀）与 base_url modules_main.html 归一化后必须匹配，否则误报"无导航子页面"
-        from web2md import collect_children
+        from nav_children import collect_children
         html = """
         <nav><ul>
         <li><a href="/modules/modules_main" class="active">Modules Main</a>
@@ -574,7 +574,7 @@ class SphinxConversionTests(unittest.TestCase):
         </ul></nav>
         """
         soup = BeautifulSoup(html, 'lxml')
-        children = collect_children(soup, 'https://docs.example.com/modules/modules_main.html')
+        children = collect_children(soup, 'https://docs.example.com/modules/modules_main.html')['children']
         self.assertEqual(len(children), 2)
         self.assertEqual(children[0]['title'], 'Sub A')
         self.assertEqual(
@@ -585,7 +585,7 @@ class SphinxConversionTests(unittest.TestCase):
     def test_collect_children_collapsible_group_grandchild(self):
         # VitePress 可展开分组（section.VPSidebarItem level-2 collapsible，非 div.level-2）：
         # 分组下的孙页面必须正确挂载到分组子页面（Drivers）下，而非漏挂
-        from web2md import collect_children
+        from nav_children import collect_children
         html = """
         <aside class="VPSidebar"><nav class="nav"><div class="group">
         <section class="VPSidebarItem level-1">
@@ -604,7 +604,7 @@ class SphinxConversionTests(unittest.TestCase):
         </div></nav></aside>
         """
         soup = BeautifulSoup(html, 'lxml')
-        children = collect_children(soup, 'https://docs.example.com/modules/index.html')
+        children = collect_children(soup, 'https://docs.example.com/modules/index.html')['children']
         self.assertEqual(len(children), 2)
         drivers = children[0]
         self.assertEqual(drivers['title'], 'Drivers')
@@ -616,6 +616,79 @@ class SphinxConversionTests(unittest.TestCase):
         )
         self.assertEqual(children[1]['title'], 'Scheduler')
         self.assertEqual(children[1]['children'], [])
+
+    # ── 2026-08-08 补：Sphinx RTD 主题当前项 href="#" 回归 ──
+
+    def test_collect_children_rtd_current_anchor(self):
+        # Sphinx RTD 主题（Read the Docs）：当前项导航链接是 href="#" 占位（靠 li.current
+        # class 标记当前页），而非页面完整 URL。若按「跳过 # 开头链接」一刀切，current_a
+        # 定位失败 → 误报「无导航子页面」（2026-08-08 实测回归：nuttx NSH 页 8 子页面全漏）。
+        # 修复：href_raw == '#' 且 urljoin 后 == 当前页 → 参与定位；真实锚点（#VPContent）
+        # 仍跳过（test_collect_children_layout_anchor_not_interfering 保证）。
+        from nav_children import collect_children
+        html = """
+        <nav class="wy-nav-side">
+        <ul class="current">
+        <li class="toctree-l2 current"><a href="#">NuttShell (NSH)</a>
+          <ul>
+            <li class="toctree-l3"><a href="nsh.html">Overview</a></li>
+            <li class="toctree-l3"><a href="commands.html">Commands</a></li>
+            <li class="toctree-l3"><a href="config.html">Configuration Settings</a></li>
+          </ul>
+        </li>
+        </ul>
+        </nav>
+        """
+        soup = BeautifulSoup(html, 'lxml')
+        result = collect_children(soup, 'https://nuttx.apache.org/docs/latest/applications/nsh/index.html')
+        self.assertEqual(result['structure'], 'sphinx')
+        self.assertEqual(len(result['children']), 3)
+        self.assertEqual(result['children'][0]['title'], 'Overview')
+        self.assertEqual(
+            result['children'][1]['url'],
+            'https://nuttx.apache.org/docs/latest/applications/nsh/commands.html',
+        )
+        # notes 应说明定位成功（诊断供 AI 判断，不静默空结果）
+        self.assertTrue(any('定位成功' in n for n in result['notes']))
+
+    def test_collect_children_rtd_no_children_notes(self):
+        # RTD 叶子页：当前项 href="#" 但无嵌套子页面容器 → children 空，notes 说明原因
+        # （AI 据此判断「真没有」而非「漏识别」，不需要再访问页面）
+        from nav_children import collect_children
+        html = """
+        <nav class="wy-nav-side">
+        <ul class="current">
+        <li class="toctree-l1 current"><a href="#">Leaf Page</a></li>
+        </ul>
+        </nav>
+        """
+        soup = BeautifulSoup(html, 'lxml')
+        result = collect_children(soup, 'https://nuttx.apache.org/docs/latest/applications/leaf.html')
+        self.assertEqual(result['structure'], 'sphinx')
+        self.assertEqual(result['children'], [])
+        self.assertTrue(any('叶子页' in n or '无嵌套' in n or '定位成功' in n for n in result['notes']))
+
+    def test_collect_children_layout_anchor_still_skipped(self):
+        # 回归防护：VitePress 布局锚点 #VPContent 等真实锚点仍必须跳过——即使 urljoin 后
+        # 去 fragment 与当前页相同，也不能参与 current_a 定位（会误定位到布局元素）。
+        # 与 test_collect_children_layout_anchor_not_interfering 呼应，此处验证 unknown
+        # 结构时 notes 给出未命中原因。
+        from nav_children import collect_children
+        html = """
+        <div class="Layout"><a href="#VPContent">Skip to content</a></div>
+        <nav><ul>
+        <li><a href="/docs/topic/index.html" class="active">Topic</a>
+          <ul>
+            <li><a href="/docs/topic/child1.html">Child 1</a></li>
+          </ul>
+        </li>
+        </ul></nav>
+        """
+        soup = BeautifulSoup(html, 'lxml')
+        result = collect_children(soup, 'https://docs.example.com/docs/topic/index.html')
+        self.assertEqual(result['structure'], 'generic')
+        self.assertEqual(len(result['children']), 1)
+        self.assertEqual(result['children'][0]['title'], 'Child 1')
 
 
 if __name__ == '__main__':

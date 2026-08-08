@@ -25,6 +25,20 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-08] Sphinx RTD 主题当前项 href="#" 被跳过，导航子页面全漏（nuttx.apache.org NSH，已修复）
+
+- **现象**：nuttx.apache.org NSH 页面（Sphinx Read the Docs 主题）抓取时脚本报「该页面无严格导航子页面」，但页面导航下实际有 8 个子页面（Overview/Commands/Configuration Settings/customizing/builtin/installation/login/running_apps）；8-02 曾用同一站点同一套件正常抓取 9 个文件。另：AI 助手 WebFetch 失败（平台侧域名安全预检查，与站点可达性无关）后把「无法核实」当成「确认没有」→ 未走 AI 判断通道、未对照历史产物，直接交付了缺失子页面的结果。
+- **根因**（两个独立问题）：
+  1. **脚本回归**：`collect_children` 的 current_a 定位（web2md.py）为挡 VitePress 布局锚点（`#VPContent`）加了 `href.startswith('#')` 一刀切跳过——RTD 主题当前项导航链接恰好是 `href="#"`（靠 `li.current` class 标记当前页），被误杀 → current_a 定位失败 → 返回空。实测 8-02 前旧逻辑（`2ded7af`，无 `#` 过滤）在相同 DOM 上能完整识别 9 个子页面。
+  2. **决策缺陷**：SKILL.md AI 判断通道只写了 web_fetch 核实，未定义 web_fetch 失败时的 fallback；AI 把「无法核实」静默当成「确认无子页面」，且未使用本地证据（本次已抓 HTML、历史 children_list.md、8-02 同站产物）。
+- **修复**：
+  1. **重构**：`web2md.py` 的导航收集（`_norm_nav_url`/`_strip_fragment`/`_child_nav_container`/`nav_level`/`_item_section`/`_same_doc_tree`/`collect_children`）全部迁出为独立模块 `scripts/nav_children.py`（基座 + 策略 + 汇总：通用基座 + `strategy_sphinx`/`strategy_vitepress` + STRATEGIES 注册表 + `collect_children` 返回 `{structure, children, notes}` 诊断 dict；`structure` ∈ sphinx/vitepress/generic/unknown）。**RTD 修复**：`href_raw == '#'`（RTD 占位）经 urljoin 后与当前页 URL 匹配 → 参与 current_a 定位；`#VPContent` 类真实锚点（`startswith('#')` 且非 `#`）仍跳过。未命中任何主题特征时按通用 li/ul 导航兜底（structure='generic'）。
+  2. **诊断输出**：`collect_children` 空结果时 notes 带原因（current_a 未定位/无容器/被过滤/结构未识别），web2md.py 打印「🧭 导航诊断」，AI 助手据此判断「真没有」还是「漏识别」，不再需要网络访问。
+  3. **流程**：SKILL.md AI 判断通道改为「本地证据优先 → web_fetch 补充 → 全失败如实报告由用户确认」，核心纪律「无法核实 ≠ 确认没有」。
+- **排查方法**：脚本报「无导航子页面」但页面导航里明显有子页面时：① 看页面是否 RTD 主题（`nav.wy-nav-side` / `li.current`），当前项 href 是否 `#`；② 用 `nav_children.collect_children` 的 notes 诊断；③ 核对历史 `logs/intermediate/<项目根名>/children_list.md` 与同站产物；④ 网络可达性用 skill 的 Python 环境（`config.py` python_path）验证，WebFetch 失败不代表站点不可达。
+- **网络路径证据**（2026-08-08 实测）：WebFetch（claude.ai 平台侧）预检查失败 `Unable to verify if domain nuttx.apache.org is safe to fetch`；本机 Python requests 直连 200（无代理环境变量）；git 代理 `socks5://127.0.0.1:7890` curl 可用、Python 缺 PySocks（不必安装，直连已通）。
+- **代理配置补充**（2026-08-08 新增 `proxy` 配置键后）：系统已配置环境变量 `HTTP_PROXY`/`HTTPS_PROXY`=`http://127.0.0.1:7890`（大小写两套），requests 自动读取（`get_environ_proxies` 实测解析出 `{'https': ..., 'http': ...}`），curl 直连/代理均 200；`web2md_config.proxy` 键显式配置时优先于环境变量（单一配置源），AI 判断通道核实脚本同样从 config.py 读 proxy。验证初期曾遇网络抖动（TLS 握手超时 4/4 失败），恢复后 4/4 全通——排查时先排除网络抖动再判断配置问题。
+
 ## [2026-08-07] merge_paragraphs 把表格行当普通段落合并成单行，表格后与公式块粘连（kalmanfilter.net，已修复）
 
 - **现象**：转换产物中表格全部拍扁成单行（如 `|  | Notes | | --- | --- | | a | b |`），且表格行与后续 `$$` 公式块之间无空行（Typora 渲染异常）。kalman1d 页 5 个表格全部损坏，之前（alphabeta 页）误判为「markdownify 把行列合并成单行」，实际根因在 merge_paragraphs。
