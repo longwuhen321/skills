@@ -4,14 +4,17 @@
 用法:
     python scan_visible.py <input.txt> [input2.txt ...]
 
-输出格式: [SEG号] 可见文本（跳过空段与纯 PROTECT 标记段）
-可见文本 = 内容行不含 @@MD2ZH:PROTECT:@@ 标记，即需要翻译的裸文本。
+输出格式: [SEG号] 完整 SEG 内容（跳过空段与纯 PROTECT 标记段）
+若去掉 PROTECT 标记后仍有可见文本，则输出完整内容（含标记），供翻译时原样保留结构。
 SEG 后的多行内容属于同一段（段落级 unit），合并显示。
 """
 import io
+import re
 import sys
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+PROTECT_RE = re.compile(r'@@MD2ZH:PROTECT:[A-Za-z0-9_-]+:[0-9]+@@')
 
 
 def scan(path):
@@ -27,7 +30,7 @@ def scan(path):
                 content_lines.append(lines[i])
                 i += 1
             text = '\n'.join(content_lines).strip()
-            if text and '@@MD2ZH:PROTECT:' not in text:
+            if text and PROTECT_RE.sub('', text).strip():
                 print(f'[{num}] {text}')
         else:
             i += 1

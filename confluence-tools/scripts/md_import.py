@@ -14,9 +14,14 @@ import re
 import sys
 import io
 import html
+import json
 import argparse
 import datetime
 import secrets
+
+from dependency_check import require_dependencies
+require_dependencies()
+
 import requests
 from pathlib import Path
 
@@ -28,14 +33,21 @@ from urllib.parse import unquote
 import markdown2
 
 from common import (SKILL_ROOT, load_config, request_with_retry,
-                    collect_space_pages, build_block_template)
+                    collect_space_page_records, build_block_template)
 from debug_utils import cleanup_debug
+
+
+LOOKUP_FOUND = 'FOUND'
+LOOKUP_NOT_FOUND = 'NOT_FOUND'
+LOOKUP_ERROR = 'ERROR'
+_ANY_PARENT = object()
 
 
 class MarkdownImporter:
     """Markdown 导入 Confluence 的主类"""
 
-    def __init__(self, space_key=None, math_align=None, fix_hierarchy=None):
+    def __init__(self, space_key=None, math_align=None, fix_hierarchy=None,
+                 force=False):
         cfg = load_config()
         common = cfg['common_config']
         import_cfg = cfg['import_config']
@@ -50,6 +62,7 @@ class MarkdownImporter:
         # 树导入（--dir）配置：tree_import 功能开关；fix_hierarchy 命中已有页面的层级处理
         self.tree_import = bool(import_cfg.get('tree_import', False))
         self.fix_hierarchy = fix_hierarchy if fix_hierarchy is not None else import_cfg.get('fix_hierarchy', 'confirm')
+        self.force = bool(force)
         # 自动目录宏：子标题（H2~H6）数量达到 toc_min_headings 时，在正文最前插入 toc 宏
         self.toc_enabled = bool(import_cfg.get('toc_enabled', True))
         self.toc_min_headings = int(import_cfg.get('toc_min_headings', 4))
@@ -57,6 +70,7 @@ class MarkdownImporter:
             self.fix_hierarchy = 'confirm'
         # 树导入时记录"标题 → 页面 id"映射，供子节点挂载/移动解析
         self._title_id_map = {}
+        self._page_records = None
         self.block_template = build_block_template(self.math_align)
         self.token = common['confluence_token']
         self.session = requests.Session()
@@ -425,32 +439,81 @@ class MarkdownImporter:
             cleaned_parts.append(part)
         return ''.join(cleaned_parts)
 
-    def _find_page_by_title(self, title):
-        """根据标题在空间中查找已有页面，返回 (page_id, version_number) 或 (None, None)
+    def _ensure_page_index(self):
+        """Load the complete space page index once per importer instance."""
+        if self._page_records is None:
+            self._page_records = collect_space_page_records(
+                self.session, self.base_url, self.space_key, headers=self.headers)
+        return self._page_records
+
+    def _remember_page(self, page_id, title, version, parent_id):
+        """Update the in-memory index after a successful local write."""
+        if self._page_records is None:
+            return
+        page_id = str(page_id)
+        self._page_records = [r for r in self._page_records
+                              if str(r.get('id')) != page_id]
+        self._page_records.append({
+            'id': page_id,
+            'title': title,
+            'version': version,
+            'parent_id': str(parent_id) if parent_id not in (None, []) else None,
+        })
+
+    def _find_page_by_title(self, title, parent_id=_ANY_PARENT, page_id=None,
+                            allow_move=False):
+        """Resolve a page as ``(FOUND|NOT_FOUND|ERROR, id, version)``.
 
         用内存匹配而非 CQL/标题端点：Confluence 的 title 查询在 Cloud/Server
         上大小写行为相反（已知 bug），且含特殊字符的标题会导致 CQL 失败。
-        先精确匹配，再大小写不敏感匹配，多个候选时提示并选第一个。
+        ``page_id`` is exact. ``parent_id`` scopes duplicate titles. Ambiguity and
+        collection failures are ERROR and must never be treated as NOT_FOUND.
         """
         try:
-            pages = collect_space_pages(self.session, self.base_url, self.space_key, headers=self.headers)
+            pages = self._ensure_page_index()
         except Exception as e:
             print(f"查找页面失败: {e}")
-            return None, None
-        if not pages:
-            return None, None
+            return LOOKUP_ERROR, None, None
 
-        candidates = [p for p in pages if p[1] == title]
-        if not candidates:
-            candidates = [p for p in pages if p[1].lower() == title.lower()]
-        if not candidates:
-            return None, None
+        if page_id is not None:
+            candidates = [p for p in pages if str(p.get('id')) == str(page_id)]
+            if len(candidates) != 1:
+                print(f"❌ 指定页面 ID 不存在于空间 {self.space_key}: {page_id}")
+                return LOOKUP_ERROR, None, None
+            found = candidates[0]
+            return LOOKUP_FOUND, str(found['id']), found['version']
 
-        if len(candidates) > 1:
-            print("⚠️ 发现多个同名页面，将更新第一个（其余请用 --parent-id 精确定位）:")
-            for pid, ptitle, _v in candidates:
-                print(f"  - 「{ptitle}」(ID: {pid})")
-        return candidates[0][0], candidates[0][2]
+        candidates = [p for p in pages if p.get('title') == title]
+        if not candidates:
+            candidates = [p for p in pages
+                          if str(p.get('title', '')).lower() == title.lower()]
+        if not candidates:
+            return LOOKUP_NOT_FOUND, None, None
+
+        if parent_id is not _ANY_PARENT:
+            target_parent = None if parent_id in (None, '') else str(parent_id)
+            scoped = [p for p in candidates
+                      if (None if p.get('parent_id') in (None, '')
+                          else str(p.get('parent_id'))) == target_parent]
+            if len(scoped) == 1:
+                found = scoped[0]
+                return LOOKUP_FOUND, str(found['id']), found['version']
+            if len(scoped) > 1:
+                candidates = scoped
+            elif not allow_move:
+                return LOOKUP_NOT_FOUND, None, None
+            elif len(candidates) == 1:
+                found = candidates[0]
+                return LOOKUP_FOUND, str(found['id']), found['version']
+
+        if len(candidates) == 1:
+            found = candidates[0]
+            return LOOKUP_FOUND, str(found['id']), found['version']
+
+        print("❌ 发现多个同名页面，拒绝猜测；请用 --page-id 或 --parent-id 消歧:")
+        for page in candidates:
+            print(f"  - 「{page['title']}」(ID: {page['id']}, 父页面: {page.get('parent_id') or '根'})")
+        return LOOKUP_ERROR, None, None
 
     def _create_page(self, title, content, parent_id=None):
         """通过 Confluence REST API 创建新页面，返回 (page_id, version=1) 或 (None, None)"""
@@ -489,7 +552,7 @@ class MarkdownImporter:
     def _update_page(self, page_id, title, content, version_number, ancestors=None):
         """通过 Confluence REST API 更新已有页面，返回 (page_id, new_version) 或 (None, None)
 
-        版本冲突 (409，页面被他人修改) 时自动拉取最新版本重试一次。
+        版本冲突 (409) 默认拒绝覆盖；仅 ``--force`` 拉取最新版本重试一次。
 
         ancestors: 可选，目标父页面 ID 或列表。传值则更新时设置页面层级（移动页面）：
                    None = 不设置（保持当前位置，单文件模式默认）；[] = 移到空间根；
@@ -512,11 +575,14 @@ class MarkdownImporter:
             response = request_with_retry(self.session, 'PUT', url, json=payload, headers=self.headers)
             if response.status_code == 409:
                 latest = self._fetch_latest_version(page_id)
-                if latest is not None:
-                    print(f"⚠️ 版本冲突（v{version_number + 1}），拉取最新 v{latest} 重试...")
+                if latest is not None and self.force:
+                    print(f"⚠️ 版本冲突（v{version_number + 1}），--force 使用最新 v{latest} 重试...")
                     payload["version"]["number"] = latest + 1
                     response = request_with_retry(self.session, 'PUT', url,
                                                   json=payload, headers=self.headers)
+                else:
+                    print("❌ 页面已被并发修改；默认不覆盖。确认覆盖时显式传 --force。")
+                    return None, None
             response.raise_for_status()
             return response.json()['id'], payload["version"]["number"]
         except Exception as e:
@@ -527,6 +593,11 @@ class MarkdownImporter:
 
     def _convert_md_to_storage(self, md_content):
         """Markdown → Confluence storage HTML（保护→转换→还原→宏转换→清理）"""
+        # 0. [toc] 闭环：只接受独占物理行，先保护避免 markdown2 当普通文本。
+        toc_placeholder = f'<!-- TOC_MARKER_{self._token} -->'
+        md_content = re.sub(r'(?im)^[ \t]*\[toc\][ \t]*$',
+                            toc_placeholder, md_content)
+
         # 0. 保护代码区域
         protected_md, code_spans = self._protect_code_spans(md_content)
 
@@ -551,6 +622,12 @@ class MarkdownImporter:
         html_content = self._convert_code_blocks(html_content)
         html_content = self._convert_highlight_marks(html_content)
         html_content = self._clean_unnecessary_backslashes(html_content)
+        toc_macro = ('<ac:structured-macro ac:name="toc" ac:schema-version="1" '
+                     'data-layout="default"/>')
+        html_content = re.sub(
+            rf'<p>\s*{re.escape(toc_placeholder)}\s*</p>', toc_macro,
+            html_content, flags=re.DOTALL)
+        html_content = html_content.replace(toc_placeholder, toc_macro)
         # 5.5 清理 markdown2 在块级元素外层包裹的 <p> 标签
         # 用 (?:(?!<p).)*? 替代 .*?：防止跨段匹配吞掉段落间的 <p>/</p>，导致 XHTML 畸形
         html_content = re.sub(
@@ -570,6 +647,9 @@ class MarkdownImporter:
         """
         if not self.toc_enabled:
             return html_content
+        if re.search(r'<ac:structured-macro\b[^>]*ac:name=["\']toc["\']',
+                     html_content):
+            return html_content
         heading_count = len(re.findall(r'<h([2-6])(?=[\s>])', html_content))
         if heading_count < self.toc_min_headings:
             return html_content
@@ -578,8 +658,11 @@ class MarkdownImporter:
         print(f"ℹ️ 检测到 {heading_count} 个子标题（阈值 {self.toc_min_headings}），已自动插入目录宏")
         return toc_macro + html_content
 
-    def import_markdown(self, md_file_path, parent_id=None, page_name=None):
+    def import_markdown(self, md_file_path, parent_id=None, page_name=None,
+                        page_id=None):
         """Markdown 导入主函数"""
+        self.failed_images = []
+        self.data_images_skipped = 0
         with open(md_file_path, 'r', encoding='utf-8') as f:
             md_content = f.read()
         # 优先级：CLI --page-name > 配置 default_page_name > md 文件名（不含扩展名）
@@ -590,8 +673,12 @@ class MarkdownImporter:
         html_content = self._convert_md_to_storage(md_content)
 
         # 6. 创建或更新页面
-        existing_id, existing_version = self._find_page_by_title(title)
-        if existing_id:
+        parent_scope = parent_id if parent_id is not None else _ANY_PARENT
+        lookup, existing_id, existing_version = self._find_page_by_title(
+            title, parent_id=parent_scope, page_id=page_id)
+        if lookup == LOOKUP_ERROR:
+            return False
+        if lookup == LOOKUP_FOUND:
             print(f"页面已存在 (ID: {existing_id}, v{existing_version})，执行更新...")
             page_id, current_version = self._update_page(
                 existing_id, title, html_content, existing_version)
@@ -603,7 +690,12 @@ class MarkdownImporter:
         # 7. 处理图片链接（需 page_id 上传附件），在最新版本号上再 +1
         final_content = self._convert_md_links(html_content, md_file_path, page_id)
         if final_content != html_content:
-            self._update_page(page_id, title, final_content, current_version)
+            updated_id, current_version = self._update_page(
+                page_id, title, final_content, current_version)
+            if not updated_id:
+                return False
+
+        self._remember_page(page_id, title, current_version, parent_id)
 
         if self.failed_images:
             print("⚠️ 以下图片未能上传，已在页面中保留原始引用：")
@@ -612,6 +704,10 @@ class MarkdownImporter:
 
         if self.data_images_skipped:
             print(f"ℹ️ 跳过 {self.data_images_skipped} 张 base64 内嵌图片（data: URI），已保留原始引用")
+
+        if self.failed_images:
+            print("❌ 导入存在附件失败，任务未完整完成。")
+            return False
 
         print(f"✅ 导入完成: {md_file_path} → {title} (ID: {page_id})")
         return page_id
@@ -674,37 +770,90 @@ class MarkdownImporter:
             raise SystemExit(f"❌ {root_dir} 下没有任何含 .md 的文件夹")
         return tree
 
-    def _build_plan(self, node, parent_title=None, depth=0):
+    def _record_for_id(self, page_id):
+        for record in self._page_records or []:
+            if str(record.get('id')) == str(page_id):
+                return record
+        return None
+
+    def _build_plan(self, node, parent_title=None, depth=0,
+                    target_parent_id=None, parent_pending=False,
+                    claimed_page_ids=None):
         """只读生成导入计划（查重 + 当前父级判定），不执行任何写操作
 
-        返回节点：{title, md_path, status, parent_title, depth, children}
-        status: 'skip'（跳级节点）/ 'new' / 'update' / 'move'
+        计划固化 page_id/version，执行阶段不再重复查询。status 还包括
+        ``error``（同名歧义或索引错误），出现 error 时整批禁止写入。
         """
+        if claimed_page_ids is None:
+            claimed_page_ids = set()
         if node['md_path'] is None:
             return {'title': node['name'], 'md_path': None, 'status': 'skip',
-                    'parent_title': parent_title, 'depth': depth,
-                    'children': [self._build_plan(c, parent_title, depth) for c in node['children']]}
+                    'page_id': None, 'version': None,
+                    'parent_title': parent_title,
+                    'target_parent_id': target_parent_id,
+                    'depth': depth, 'completed': False,
+                    'children': [self._build_plan(
+                        c, parent_title, depth, target_parent_id, parent_pending,
+                        claimed_page_ids)
+                        for c in node['children']]}
         title = node['name']
-        existing_id, _v = self._find_page_by_title(title)
-        status = 'new'
-        if existing_id:
-            _cur_pid, cur_ptitle = self._get_page_parent(existing_id)
-            if self.fix_hierarchy != 'off' and cur_ptitle != parent_title:
-                status = 'move'
+        parent_selector = _ANY_PARENT if parent_pending else target_parent_id
+        lookup, existing_id, existing_version = self._find_page_by_title(
+            title, parent_id=parent_selector, allow_move=True)
+        if lookup == LOOKUP_FOUND:
+            identity = str(existing_id)
+            if identity in claimed_page_ids:
+                print(f"❌ 页面 ID {identity} 被多个树节点命中，拒绝重复分配: {title}")
+                lookup = LOOKUP_ERROR
+                existing_id = None
+                existing_version = None
             else:
-                status = 'update'
-        return {'title': title, 'md_path': node['md_path'], 'status': status,
-                'parent_title': parent_title, 'depth': depth,
-                'children': [self._build_plan(c, title, depth + 1) for c in node['children']]}
+                claimed_page_ids.add(identity)
+        if lookup == LOOKUP_ERROR:
+            status = 'error'
+        elif lookup == LOOKUP_NOT_FOUND:
+            status = 'new'
+        else:
+            record = self._record_for_id(existing_id) or {}
+            current_parent = record.get('parent_id')
+            wanted_parent = None if target_parent_id in (None, '') else str(target_parent_id)
+            hierarchy_differs = parent_pending or (
+                (None if current_parent in (None, '') else str(current_parent))
+                != wanted_parent)
+            status = ('move' if self.fix_hierarchy != 'off' and hierarchy_differs
+                      else 'update')
+
+        plan = {
+            'title': title,
+            'md_path': str(node['md_path']),
+            'status': status,
+            'page_id': existing_id,
+            'version': existing_version,
+            'parent_title': parent_title,
+            'target_parent_id': target_parent_id,
+            'depth': depth,
+            'completed': False,
+            'children': [],
+        }
+        child_parent_id = existing_id if lookup == LOOKUP_FOUND else None
+        child_parent_pending = lookup != LOOKUP_FOUND
+        plan['children'] = [self._build_plan(
+            child, title, depth + 1, child_parent_id, child_parent_pending,
+            claimed_page_ids)
+            for child in node['children']]
+        return plan
 
     def _print_plan(self, plan):
-        mark = {'new': '🆕 新建', 'update': '🔄 更新', 'move': '📦 移动'}.get(plan['status'], '')
+        mark = {'new': '🆕 新建', 'update': '🔄 更新', 'move': '📦 移动',
+                'error': '❌ 歧义'}.get(plan['status'], '')
         prefix = '  ' * plan['depth']
         if plan['status'] != 'skip':
             extra = ''
             if plan['status'] in ('new', 'move'):
                 extra = f"（目标父级: {plan['parent_title'] or '根'}）"
-            print(f"{prefix}{mark} {plan['title']}{extra}")
+            identity = (f" [ID: {plan['page_id']}, v{plan['version']}]"
+                        if plan.get('page_id') else '')
+            print(f"{prefix}{mark} {plan['title']}{identity}{extra}")
         for c in plan['children']:
             self._print_plan(c)
 
@@ -713,31 +862,85 @@ class MarkdownImporter:
             return True
         return any(self._plan_has_move(c) for c in plan['children'])
 
-    def _execute_plan(self, plan, parent_id=None):
-        """按计划执行导入，返回结果节点。维护 _title_id_map（标题→id）供子节点挂载/移动解析。"""
+    def _plan_has_error(self, plan):
+        if plan['status'] == 'error':
+            return True
+        return any(self._plan_has_error(c) for c in plan['children'])
+
+    def _duplicate_plan_page_ids(self, plan):
+        """Return page IDs assigned to more than one logical plan node."""
+        seen = set()
+        duplicates = set()
+
+        def visit(node):
+            page_id = node.get('page_id')
+            if page_id:
+                identity = str(page_id)
+                if identity in seen:
+                    duplicates.add(identity)
+                else:
+                    seen.add(identity)
+            for child in node.get('children', []):
+                visit(child)
+
+        visit(plan)
+        return duplicates
+
+    def _result_has_failure(self, result):
+        if result['status'] == 'failed':
+            return True
+        return any(self._result_has_failure(c) for c in result['children'])
+
+    def _execute_plan(self, plan, parent_id=None, checkpoint=None):
+        """Execute a frozen plan and checkpoint each completed node for resume."""
         if plan['status'] == 'skip':
-            children = [self._execute_plan(c, parent_id) for c in plan['children']]
+            children = [self._execute_plan(c, parent_id, checkpoint)
+                        for c in plan['children']]
             return {'title': plan['title'], 'status': 'skip', 'page_id': None, 'children': children}
+
+        if plan['status'] == 'error':
+            return {'title': plan['title'], 'status': 'failed',
+                    'page_id': None, 'children': []}
+
+        if plan.get('completed'):
+            page_id = plan.get('page_id')
+            if page_id:
+                self._title_id_map[plan['title']] = page_id
+            children = [self._execute_plan(c, page_id or parent_id, checkpoint)
+                        for c in plan['children']]
+            return {'title': plan['title'], 'status': 'resumed',
+                    'page_id': page_id, 'children': children}
 
         title = plan['title']
         with open(plan['md_path'], 'r', encoding='utf-8') as f:
             md_content = f.read()
         html_content = self._convert_md_to_storage(md_content)
 
-        existing_id, existing_version = self._find_page_by_title(title)
         status = plan['status']
+        result_status = status
         page_id = None
+        existing_id = plan.get('page_id')
+        existing_version = plan.get('version')
+        target_parent = plan.get('target_parent_id')
+        if target_parent is None and plan.get('parent_title'):
+            target_parent = self._title_id_map.get(plan['parent_title'])
+            if target_parent is None:
+                print(f"❌ 失败: {title}（目标父页面未完成）")
+                return {'title': title, 'status': 'failed',
+                        'page_id': None, 'children': []}
+
         if existing_id:
             if status == 'move':
-                # 期望父级：plan 里是标题，从 _title_id_map 解析为 id（父级应先处理完）
-                target = self._title_id_map.get(plan['parent_title']) if plan['parent_title'] else []
                 page_id, current_version = self._update_page(
-                    existing_id, title, html_content, existing_version, ancestors=target)
+                    existing_id, title, html_content, existing_version,
+                    ancestors=target_parent if target_parent is not None else [])
             else:
                 page_id, current_version = self._update_page(
                     existing_id, title, html_content, existing_version)
         else:
-            page_id, current_version = self._create_page(title, html_content, parent_id)
+            page_id, current_version = self._create_page(
+                title, html_content,
+                target_parent if target_parent is not None else parent_id)
 
         if not page_id:
             print(f"❌ 失败: {title}")
@@ -745,31 +948,89 @@ class MarkdownImporter:
                 print(f"⏭️ 跳过 {c['title']}（父级失败）")
             return {'title': title, 'status': 'failed', 'page_id': None, 'children': []}
 
+        # Persist identity immediately: if attachment conversion fails, resume updates
+        # this page instead of creating a duplicate.
+        plan['page_id'] = page_id
+        plan['version'] = current_version
+        plan['status'] = 'update'
+        if checkpoint:
+            checkpoint()
         self._title_id_map[title] = page_id
 
         # 图片处理（与单文件流程一致），在最新版本号上再 +1
+        self.failed_images = []
+        self.data_images_skipped = 0
         final_content = self._convert_md_links(html_content, plan['md_path'], page_id)
         if final_content != html_content:
-            self._update_page(page_id, title, final_content, current_version)
+            updated_id, current_version = self._update_page(
+                page_id, title, final_content, current_version)
+            if not updated_id:
+                return {'title': title, 'status': 'failed',
+                        'page_id': page_id, 'children': []}
+            plan['version'] = current_version
+            if checkpoint:
+                checkpoint()
         if self.failed_images:
-            print(f"⚠️ {title} 以下图片未能上传：{self.failed_images}")
+            print(f"❌ {title} 以下图片未能上传：{self.failed_images}")
             self.failed_images = []
+            self.data_images_skipped = 0
+            return {'title': title, 'status': 'failed',
+                    'page_id': page_id, 'children': []}
         if self.data_images_skipped:
             print(f"ℹ️ {title} 跳过 {self.data_images_skipped} 张 base64 内嵌图片")
             self.data_images_skipped = 0
 
-        children = [self._execute_plan(c, page_id) for c in plan['children']]
-        return {'title': title, 'status': status, 'page_id': page_id, 'children': children}
+        self._remember_page(page_id, title, current_version, target_parent)
+        plan['completed'] = True
+        if checkpoint:
+            checkpoint()
+        children = [self._execute_plan(c, page_id, checkpoint)
+                    for c in plan['children']]
+        return {'title': title, 'status': result_status,
+                'page_id': page_id, 'children': children}
 
     def _print_results(self, res, prefix=''):
         mark = {'new': '🆕 新建', 'update': '🔄 更新', 'move': '📦 移动',
-                'failed': '❌ 失败'}.get(res['status'], '')
+                'resumed': '⏩ 已完成', 'failed': '❌ 失败'}.get(res['status'], '')
         if res['status'] != 'skip':
             print(f"{prefix}{mark} {res['title']} (ID: {res['page_id']})")
         for c in res['children']:
             self._print_results(c, prefix + '  ')
 
-    def import_tree(self, root_dir, plan_only=False, yes=False):
+    def _write_tree_checkpoint(self, path, document):
+        Path(path).write_text(
+            json.dumps(document, ensure_ascii=False, indent=2) + '\n',
+            encoding='utf-8')
+
+    def _new_tree_checkpoint(self, root_dir, plan):
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        folder = Path(self.debug_dir) / timestamp
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / 'tree_plan.json'
+        document = {
+            'format_version': 1,
+            'space_key': self.space_key,
+            'root_dir': str(Path(root_dir).resolve()),
+            'plan': plan,
+        }
+        self._write_tree_checkpoint(path, document)
+        return path, document
+
+    def _load_tree_checkpoint(self, resume_file):
+        path = Path(resume_file).resolve()
+        try:
+            document = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f'❌ 无法读取恢复计划 {path}: {exc}') from exc
+        if document.get('format_version') != 1 or not isinstance(document.get('plan'), dict):
+            raise SystemExit(f'❌ 恢复计划格式不受支持: {path}')
+        if document.get('space_key') != self.space_key:
+            raise SystemExit(
+                f"❌ 恢复计划空间 {document.get('space_key')} 与当前空间 {self.space_key} 不一致")
+        return path, document
+
+    def import_tree(self, root_dir=None, plan_only=False, yes=False,
+                    resume_file=None):
         """批量导入文件夹树（--dir 模式），保留层级关系
 
         plan_only: 仅输出计划（只读查重），不执行任何写操作
@@ -778,26 +1039,51 @@ class MarkdownImporter:
         if not self.tree_import:
             raise SystemExit(
                 "❌ --dir 树导入未启用：请在 config.py 的 import_config.tree_import 设为 True")
-        tree = self._scan_tree(root_dir)
+        if resume_file:
+            checkpoint_path, document = self._load_tree_checkpoint(resume_file)
+            plan = document['plan']
+            print(f"\n⏩ 从计划恢复: {checkpoint_path}")
+        else:
+            if not root_dir:
+                raise SystemExit('❌ 必须指定 --dir，或使用 --resume <tree_plan.json>')
+            tree = self._scan_tree(root_dir)
+            self._ensure_page_index()
+            plan = self._build_plan(
+                tree, target_parent_id=self.default_parent_id,
+                parent_pending=False)
+            checkpoint_path, document = self._new_tree_checkpoint(root_dir, plan)
 
         print("\n📋 导入计划：")
-        plan = self._build_plan(tree)
         self._print_plan(plan)
+        print(f"计划文件: {checkpoint_path}")
+        duplicate_ids = self._duplicate_plan_page_ids(plan)
+        if duplicate_ids:
+            print("❌ 计划把同一页面 ID 分配给多个节点，未执行任何写操作: "
+                  + ', '.join(sorted(duplicate_ids)))
+            return False
+        if self._plan_has_error(plan):
+            print("❌ 计划含同名歧义或查询错误，未执行任何写操作。")
+            return False
         if plan_only:
             print("\n（仅计划，未执行任何操作）")
-            return
+            return True
 
         if self._plan_has_move(plan) and self.fix_hierarchy == 'confirm' and not yes:
             ans = input("⚠️ 检测到需移动层级的页面，确认执行？[y/N] ").strip().lower()
             if ans != 'y':
                 print("已取消，未执行任何操作。")
-                return
+                return False
 
         print("\n🚀 开始导入...")
-        results = self._execute_plan(plan)
+        checkpoint = lambda: self._write_tree_checkpoint(checkpoint_path, document)
+        results = self._execute_plan(plan, checkpoint=checkpoint)
         print("\n📄 导入结果：")
         self._print_results(results)
+        if self._result_has_failure(results):
+            print(f"❌ 树导入存在失败；可用 --resume {checkpoint_path} 继续。")
+            return False
         print("✅ 树导入完成。")
+        return True
 
 
 if __name__ == "__main__":
@@ -805,6 +1091,8 @@ if __name__ == "__main__":
     parser.add_argument('md_file', nargs='?', help='Markdown 文件路径（与 --dir 二选一）')
     parser.add_argument('--dir', default=None,
                         help='批量导入文件夹树（保留层级；需 config.py 的 import_config.tree_import 开启）')
+    parser.add_argument('--resume', default=None, metavar='TREE_PLAN_JSON',
+                        help='从先前生成的 tree_plan.json 断点继续树导入')
     parser.add_argument('--plan-only', action='store_true',
                         help='仅输出导入计划（新建/更新/移动，只读查重），不执行')
     parser.add_argument('--yes', action='store_true',
@@ -812,30 +1100,40 @@ if __name__ == "__main__":
     parser.add_argument('--fix-hierarchy', default=None, choices=['confirm', 'auto', 'off'],
                         help='树导入命中已有页面的层级处理：confirm 预览确认 / auto 直接移动 / off 不移动（默认从 config.py 读取）')
     parser.add_argument('--parent-id', default=None,
-                        help='父页面 ID（导入为它的子页面；默认从 config.py 的 import_config.default_parent_id 读取，留空不挂父级）')
+                        help='父页面 ID；新建时挂载，查重时用于同名页面消歧')
+    parser.add_argument('--page-id', default=None,
+                        help='精确更新指定页面 ID（同名页面无法按父级消歧时使用）')
     parser.add_argument('--page-name', default=None,
                         help='自定义页面标题（默认从 config.py 的 import_config.default_page_name 读取，为空取 md 文件名）')
     parser.add_argument('--space', default=None,
                         help='空间 Key（默认从 config.py 的 import_config.space 读取）')
     parser.add_argument('--align', default=None, choices=['left', 'center'],
                         help='公式对齐方式：left 左对齐 / center 居中（默认从 config.py 读取）')
+    parser.add_argument('--force', action='store_true',
+                        help='409 版本冲突时确认用最新远端版本重试覆盖；默认安全失败')
     args = parser.parse_args()
 
     print("=" * 60)
     print("📘 Markdown → Confluence 导入工具")
     print("=" * 60)
 
-    if args.dir:
+    if args.dir or args.resume:
         importer = MarkdownImporter(space_key=args.space, math_align=args.align,
-                                    fix_hierarchy=args.fix_hierarchy)
-        importer.import_tree(args.dir, plan_only=args.plan_only, yes=args.yes)
+                                    fix_hierarchy=args.fix_hierarchy,
+                                    force=args.force)
+        ok = importer.import_tree(args.dir, plan_only=args.plan_only,
+                                  yes=args.yes, resume_file=args.resume)
+        sys.exit(0 if ok else 1)
     else:
         if not args.md_file:
             parser.error("必须指定 md 文件路径，或使用 --dir 批量导入文件夹树")
-        importer = MarkdownImporter(space_key=args.space, math_align=args.align)
+        importer = MarkdownImporter(space_key=args.space, math_align=args.align,
+                                    force=args.force)
         result = importer.import_markdown(
             args.md_file,
             parent_id=args.parent_id,
-            page_name=args.page_name
+            page_name=args.page_name,
+            page_id=args.page_id,
         )
         print("🎉 导入成功!" if result else "❌ 导入失败，请检查调试文件。")
+        sys.exit(0 if result else 1)

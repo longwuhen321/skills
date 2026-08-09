@@ -73,7 +73,7 @@ class FormulaIntegrityTests(unittest.TestCase):
         )
         self.assertIn('$$\n' + payload + '\n$$', updated)
 
-    def test_fixer_ignores_code_and_fixes_outside_text(self):
+    def test_fixer_ignores_code_and_prose_and_fixes_math(self):
         markdown = (
             'Inline `code\\_value and code\\*value`\n'
             '```sh\n'
@@ -85,7 +85,7 @@ class FormulaIntegrityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('`code\\_value and code\\*value`', updated)
         self.assertIn('code\\_value code\\*value $name', updated)
-        self.assertIn('Outside $x_{1}^{*}$ and prose_value.', updated)
+        self.assertIn('Outside $x_{1}^{*}$ and prose\\_value.', updated)
 
     def test_finder_ignores_code_and_reports_outside_candidate(self):
         markdown = (

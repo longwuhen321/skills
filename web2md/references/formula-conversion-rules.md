@@ -174,7 +174,7 @@ Sphinx 页面（`class="math"` 的 `\(...\)` / `\[...\]`）转换后仍需人工
 | 裸 LaTeX 文本命令（非公式） | `\textsl{streamwise pressure discontinuity}` | 按语义转 Markdown 斜体 `*...*` 或包成 `$...$` |
 | `aligned`/`split` 环境内的 `\label` | `k\cdot\sigma^n\label{eq:thrustmodel}\\` | MathJax 3 的 `\label` 仅限编号环境（equation/align/gather），嵌套会报错致公式渲染失败；无对应 `\ref` 时直接删除 |
 
-> 判断边界：`\(...\)` 已由脚本自动转 `$...$`（`delimited` 标志，2026-08-02 修复；2026-08-07 起 `convert_plain_tex_delimiters` 另覆盖非平台结构页面的文本节点裸定界符，见 `references/custom-site-rules.md`）；如发现仍残留 `\(` / `\)`，说明脚本版本过旧或跨节点配对等特殊结构（定界符与内容被标签打断），逐条转 `$...$` 并记录。
+> 判断边界：`\(...\)` 已由脚本自动转 `$...$`（`delimited` 标志，2026-08-02 修复；2026-08-07 起 `convert_plain_tex_delimiters` 另覆盖非平台结构页面的裸定界符，见 `references/custom-site-rules.md`）；可靠的同块中性 `span` 跨节点配对也会自动转换。若仍残留 `\(` / `\)`，说明候选跨块、命中保护/格式子树、跨越 Comment/Doctype 等非正文节点、存在歧义或超出边界，必须逐条结合上下文处理并记录，不得猜测补定界符。
 
 ## 4. 碎片化行内公式序列
 

@@ -18,7 +18,7 @@ if len(sys.argv) < 2:
 
 fpath = Path(sys.argv[1]).resolve()
 text = fpath.read_text(encoding='utf-8', errors='replace')
-lines = text.splitlines()
+raw_lines = text.splitlines()
 scan_text = mask_markdown_code(text)
 scan_lines = scan_text.splitlines()
 BS = '\\'
@@ -49,24 +49,29 @@ def find_delimiter(value, delimiter, start):
         pos += len(delimiter)
 
 
-def math_spans(value):
+def parse_math_spans(value):
+    spans = []
+    unmatched = []
     pos = 0
     while pos < len(value):
         start = find_delimiter(value, '$', pos)
         if start < 0:
-            return
+            break
         if value.startswith('$$', start):
             end = find_delimiter(value, '$$', start + 2)
             if end < 0:
-                return
-            yield start, end + 2, value[start + 2:end]
+                unmatched.append(start)
+                break
+            spans.append((start, end + 2, value[start + 2:end]))
             pos = end + 2
             continue
         end = find_delimiter(value, '$', start + 1)
         if end < 0:
-            return
-        yield start, end + 1, value[start + 1:end]
+            unmatched.append(start)
+            break
+        spans.append((start, end + 1, value[start + 1:end]))
         pos = end + 1
+    return spans, unmatched
 
 
 def is_balanced_latex(value):
@@ -82,10 +87,11 @@ def is_balanced_latex(value):
     return depth == 0
 
 
-# 公式转义与展示定界符
-esc_underscore = scan_text.count(BS + '_')
-esc_star = scan_text.count(BS + '*')
-left_broken = scan_text.count(BS + 'left{')
+# 公式转义与展示定界符。散文中的 Markdown 合法转义不属于公式错误。
+math_blocks, unmatched_math = parse_math_spans(scan_text)
+esc_underscore = sum(latex.count(BS + '_') for _, _, latex in math_blocks)
+esc_star = sum(latex.count(BS + '*') for _, _, latex in math_blocks)
+left_broken = sum(latex.count(BS + 'left{') for _, _, latex in math_blocks)
 if esc_underscore:
     failures.append('存在转义下划线')
 if esc_star:
@@ -95,6 +101,13 @@ if left_broken:
 report('转义下划线', esc_underscore)
 report('转义星号', esc_star)
 report(r'\left{（损坏）', left_broken)
+
+if unmatched_math:
+    failures.append(
+        '未配对的 $ 定界符：'
+        + ', '.join(str(scan_text.count('\n', 0, pos) + 1) for pos in unmatched_math)
+    )
+report('未配对的 $ 定界符', len(unmatched_math))
 
 mixed_display = [
     i for i, line in enumerate(scan_lines, 1)
@@ -114,7 +127,6 @@ if unclosed_fence is not None:
     failures.append(f'代码围栏未闭合：{fence_line}')
 report('未闭合的代码围栏', int(unclosed_fence is not None))
 
-math_blocks = list(math_spans(scan_text))
 unbalanced_formula_lines = [
     scan_text.count('\n', 0, start) + 1
     for start, _, latex in math_blocks
@@ -215,13 +227,13 @@ report('失效的相对链接', len(missing_relative_links))
 report('遗留的 Sphinx #cmd 锚点', len(legacy_sphinx_anchors))
 
 blockquote_syntax_lines = []
-for index, line in enumerate(lines):
+for index, line in enumerate(scan_lines):
     if not re.match(r'^\s*\*\*Command Syntax\**[:.]?\s*$', line, re.I):
         continue
     next_index = index + 1
-    while next_index < len(lines) and not lines[next_index].strip():
+    while next_index < len(scan_lines) and not scan_lines[next_index].strip():
         next_index += 1
-    if next_index < len(lines) and re.match(r'^\s*>\s+(?!```)', lines[next_index]):
+    if next_index < len(scan_lines) and re.match(r'^\s*>\s+(?!```)', scan_lines[next_index]):
         blockquote_syntax_lines.append(next_index + 1)
 if blockquote_syntax_lines:
     reviews.append(
@@ -246,10 +258,10 @@ def is_separator(cells):
 
 
 definition_tables = [
-    i for i, line in enumerate(lines, 1) if re.match(r'^\s*:\s+\|', line)
+    i for i, line in enumerate(scan_lines, 1) if re.match(r'^\s*:\s+\|', line)
 ]
 indented_tables = [
-    i for i, line in enumerate(lines, 1) if re.match(r'^(?: {4}|\t)\|', line)
+    i for i, line in enumerate(scan_lines, 1) if re.match(r'^(?: {4}|\t)\|', line)
 ]
 if definition_tables:
     failures.append('表格仍嵌套在定义列表中')
@@ -259,14 +271,14 @@ report('定义列表中的表格', len(definition_tables))
 report('缩进表格', len(indented_tables))
 
 index = 0
-while index < len(lines):
-    if not lines[index].strip().startswith('|'):
+while index < len(scan_lines):
+    if not scan_lines[index].strip().startswith('|'):
         index += 1
         continue
     start = index
     block = []
-    while index < len(lines) and lines[index].strip().startswith('|'):
-        block.append(lines[index])
+    while index < len(scan_lines) and scan_lines[index].strip().startswith('|'):
+        block.append(scan_lines[index])
         index += 1
     rows = [table_cells(line) for line in block]
     separators = [i for i, cells in enumerate(rows) if is_separator(cells)]
@@ -274,7 +286,7 @@ while index < len(lines):
     if not separators:
         reviews.append(f'行 {line_no} 表格没有分隔行')
         continue
-    if index < len(lines) and lines[index].strip():
+    if index < len(raw_lines) and raw_lines[index].strip():
         failures.append(f'行 {line_no} 表格后缺空行')
     expected = len(rows[separators[0]])
     if any(len(cells) != expected for cells in rows):
@@ -296,18 +308,18 @@ report('表格语义复核项', len(reviews), reviews)
 image_start_pattern = re.compile(r'!\[[^\]]*\]\(')
 missing_images = []
 remote_relative = []
-for m in image_start_pattern.finditer(text):
+for m in image_start_pattern.finditer(scan_text):
     i = m.end()
-    if i < len(text) and text[i] == '<':
-        j = text.find('>', i)
+    if i < len(scan_text) and scan_text[i] == '<':
+        j = scan_text.find('>', i)
         if j == -1:
             continue
-        target = text[i + 1:j]
+        target = scan_text[i + 1:j]
     else:
         depth = 0
         j = i
-        while j < len(text):
-            c = text[j]
+        while j < len(scan_text):
+            c = scan_text[j]
             if c == '(':
                 depth += 1
             elif c == ')':
@@ -315,7 +327,7 @@ for m in image_start_pattern.finditer(text):
                     break
                 depth -= 1
             j += 1
-        target = text[i:j]
+        target = scan_text[i:j]
     # 剥离 Markdown 图片 title 后缀（如 ![](path "title")），只保留路径本身
     target = re.sub(r'\s+["\x27][^"\x27]*["\x27]\s*$', '', target).strip()
     lowered = target.lower()

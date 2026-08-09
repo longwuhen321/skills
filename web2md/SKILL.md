@@ -21,7 +21,7 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 
 读取 `<skill-directory>/scripts/config.py`（本 skill 的共享配置）：
 
-- `config.py` 存在且 `python_path` 有效 → **先跑配置同步检查**（`scripts/check_config_sync.py`，对比 `config.example.py` 的 `web2md_config` 键集合与值类型；只比结构不比 `python_path` 值本身）：
+- `config.py` 存在且 `python_path` 有效 → **先跑配置同步检查**（`scripts/check_config_sync.py`，通过 AST 定位 `web2md_config` 并仅用 `ast.literal_eval` 解析；导入、函数调用和副作用语句直接拒绝；对比 `config.example.py` 的键集合与值类型，只比结构不比 `python_path` 值本身）：
   - 通过（退出码 0）→ 直接使用，不再询问
   - **不一致（退出码 1/2）→ 中断任务**，按输出报告在 `config.py` 补齐/修正缺失或漂移的键后重跑（缺键的后果是 `load_config()` 静默降级到默认值，必须显式配置）
 - `config.py` 缺失 / 损坏 / 路径失效 → 走配置向导：
@@ -50,9 +50,11 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 |------|------|------|
 | `web2md.py` | 主抓取脚本 | 第三步 |
 | `nav_children.py` | 导航子/孙页面收集（基座+策略+汇总，`collect_children` 返回 `{structure, children, notes}`；空结果输出诊断 notes 供 AI 判断） | 第三步（子页面收集） |
+| `config_literal.py` | AST 定位并安全解析纯字面量配置字典（拒绝执行配置代码） | 第一步 |
 | `markdown_code.py` | 代码 span/fence 掩码工具（被其他脚本共用） | 各阶段 |
 | `check_config_sync.py` | 配置同步强制检查（第一步门禁） | 第一步 |
-| `fix_escapes.py` | `\_` `\*` → `_` `*`（忽略代码内） | 第四步-A |
+| `package_check.py` | 发布前只读敏感文件检查（不进入禁用目录、不读取被拒文件内容） | 发布前 |
+| `fix_escapes.py` | 仅公式内 `\_` `\*` → `_` `*`（散文与代码不动） | 第四步-A |
 | `list_display_fixes.py` | 自动升级确定性 `$`→`$$` 候选 + 列出其余候选（`--apply`） | 第四步-B |
 | `find_all_missed.py` | 扫描伪公式模式（忽略代码内） | 第四步-C 辅助 |
 | `merge_paragraphs.py` | 合并段落内的源码硬换行（通用能力，所有站点适用） | 第五步（可选） |
@@ -85,6 +87,20 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 ```
 
 > 文件夹名默认取页面标题（经文件系统命名规范化，非法字符如 `/` 替换）；AI 助手可酌情调整，但必须符合文件夹命名规范。
+> 脚本同时处理 Windows 保留名（含点前被 Windows 忽略的尾随空格/点）与路径预算；若不同标题清洗成同名，保留首个名称，后续冲突项追加稳定 URL 哈希。不得用覆盖既有目录的方式消除冲突。
+
+#### 渲染后 DOM 自动降级通道（`--rendered-html`）
+
+开启子页面收集而静态 HTML 导航为空时，按以下顺序执行：
+
+1. 使用当前可用的浏览器或网页访问能力打开**同一个父页面**，等待页面导航渲染完成，取得渲染后的 DOM 快照，同时记录浏览器地址栏中的最终 URL。
+2. 将 DOM 快照保存到任务临时目录，以 UTF-8 执行：
+   ```powershell
+   & "<python路径>" "<skill-directory>/scripts/web2md.py" "<URL>" "{项目根目录}" --children --rendered-html "{DOM快照路径}" --rendered-url "{浏览器最终URL}"
+   ```
+3. 仅当静态导航为空时使用快照。脚本先校验 `--rendered-url`（或快照中的 canonical / `og:url` / `base href`）与实际抓取后的父页面一致；页面 identity 保留 query，`?id=` 不同不得视为同页。候选再次限制为同域、稳定版本路径前缀和最多两级；不合格候选直接拒绝。
+4. 快照缺失、基准 URL 不可校验或渲染后仍无可靠结果时，输出 `REVIEW` 并以非零退出码阻止把任务误判为完成，转入下方 `--children-from` 清单流程；证据仍不足时询问用户。禁止把不可核实静默当成没有子页面。已识别主题且已定位的真实叶子页不触发该门禁。
+5. 使用完删除临时 DOM 快照，不把它纳入 Skill 发布包。
 
 #### AI 助手判断通道（`--children-from <file>`）
 
@@ -137,25 +153,23 @@ description: 抓取网页内容，生成 Typora 兼容的 Markdown 文件（含�
 
 ### 第四步：审核数学公式
 
-脚本 `process_math_formulas` 只识别五种标签转为 `$...$` / `$$...$$`：Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>`（MathML）、`class="math"`、MathJax SVG `<mjx-container>`（含 MathML 递归转换与函数名还原，如 `sin` → `\sin `）。另有 `convert_plain_tex_delimiters` 兜底转换非平台结构页面的裸 `\(...\)` / `\[...\]` 定界符。
+脚本 `process_math_formulas` 只识别五种标签转为 `$...$` / `$$...$$`：Wikipedia `.mwe-math-element`、MathJax `<script>`、`<math>`（MathML）、`class="math"`、MathJax SVG `<mjx-container>`（含 MathML 递归转换与函数名还原，如 `sin` → `\sin `）。另有 `convert_plain_tex_delimiters` 兜底转换非平台结构页面的裸 `\(...\)` / `\[...\]` 定界符：同一正文文本节点直接配对；同一块边界内仅跨中性 `span`、节点数和长度受限且配对唯一时自动转换；HTML 注释、Doctype/声明等非正文节点不参与，跨越它们的候选保持原文并只报告 `REVIEW`。跨块、保护子树、格式化标签或歧义候选同样不得猜测转换。
 
-**非平台结构页面（自定义站点）**：抓取输出报告命中（「检测到裸 TeX 定界符」/「跨节点疑似」/「段落切碎检测」）时，先读取 `references/custom-site-rules.md` 按章执行（特征清单、转换规则、处理流程；规则不常驻上下文，仅命中时读取）。
+**非平台结构页面（自定义站点）**：抓取输出报告命中（「检测到裸 TeX 定界符」/「REVIEW」/「段落切碎检测」）时，先读取 `references/custom-site-rules.md` 按章执行（特征清单、转换规则、处理流程；规则不常驻上下文，仅命中时读取）。
 
 生成 .md 后，完成以下阶段审核：
 
 #### 阶段 A：脚本自动修复（`fix_escapes.py`）
 
-修复 markdownify 造成的 `\_` `\*` 错误转义（下标 `x_{k}` → `x\_{k}`、上标 `q^{*}` → `q^{\*}`）。
+修复 markdownify 造成的 `\_` `\*` 错误转义（下标 `x\_{k}` → `x_{k}`、上标 `q^{\*}` → `q^{*}`）。
 
 ```powershell
 & "<python路径>" "<skill-directory>/scripts/fix_escapes.py" "{md文件路径}"
 ```
 
-脚本会先掩码 Markdown 代码（围栏 / 行内），**只修复代码外的公式与散文**。内部逻辑：`$$` 和 `$` 块内（限长 2000 字符防孤立 `$`）`\_` → `_`、`\*` → `*`，再对代码外文本全局兜底。
+脚本会先掩码 Markdown 代码（围栏 / 行内），**只修复公式**。内部逻辑：`$$` 块和长度不超过 2000 字符的 `$...$` 块内，`\_` → `_`、`\*` → `*`；散文中的合法 Markdown 转义及代码内容逐字节不动，未配对 `$` 也不触发替换。
 
 > **不在此阶段修 `\{` `\}`**——它们是 `\left\{` `\right\}` 的合法 LaTeX 组件。
->
-> 注意：代码外全局兜底也会把散文中合法表示字面量的 `\_` / `\*` 一并替换，复核时留意这类非公式转义。
 
 #### 阶段 B：`$` vs `$$` 自动升级 + 复核（`list_display_fixes.py` + AI 助手判断）
 
@@ -233,7 +247,9 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 & "<python路径>" "<skill-directory>/scripts/final_verify.py" "{md文件路径}"
 ```
 
-**FAIL 项必须为零**。验证器先掩码代码，再检查：`\_` / `\*` 清零、`$$` 独占一行且成对、代码围栏闭合、LaTeX 花括号平衡、`aligned` 完整性、`\left\{` 未破坏、正文无未保护尖括号占位符（URL 除外）、无 Sphinx 图标残留、相对链接目标存在、无 `#cmd` 锚点、表格结构有效（分隔行 / 列数一致）、本地图片引用存在、AI 助手清单全部打勾。存在 REVIEW 项或 FAIL 项时退出码非零：FAIL 必须全部修掉；REVIEW 项需 AI 助手逐条复核后重跑，直到无 FAIL、无 REVIEW（退出码 0）为止。
+**FAIL 项必须为零**。验证器先用保留换行与偏移的掩码排除围栏 / 行内代码，再自动检查：公式内 `\_` / `\*` 清零、未转义 `$` 定界符成对、`$$` 独占一行、代码围栏闭合、LaTeX 花括号平衡、`aligned` 完整性、`\left\{` 未破坏、正文无未保护尖括号占位符（URL 除外）、无 Sphinx 图标残留、相对链接目标存在、无 `#cmd` 锚点、表格结构有效（分隔行 / 列数一致 / 块后空行）、本地图片引用存在。存在 REVIEW 项或 FAIL 项时退出码非零：FAIL 必须全部修掉；REVIEW 项需 AI 助手逐条复核后重跑，直到无 FAIL、无 REVIEW（退出码 0）为止。
+
+阶段 C / D 的 AI 助手清单是**人工工作流门禁**，不属于 `final_verify.py` 的输入或自动检查能力；运行收尾验证前必须由 AI 助手逐项确认全部打勾。
 
 ### 第五步：段落合并（可选，通用能力）与输出
 
@@ -252,7 +268,7 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 规则：普通段落合并为一行（空格连接、保留首行缩进）；列表项 + 2 空格缩进文字续行并入
 首行（去尾部 hard-break 空格）；`$$` 公式块内部、公式标签行（缩进 + 行尾两空格）、
-嵌套子列表、Sphinx 定义列表（term + 缩进定义段）逐字节保护；双空行压缩为单个（块外）。
+嵌套子列表、Sphinx 定义列表（term + 缩进定义段）逐字节保护；公式标签行同时保留原始 CRLF/LF/CR 行尾，文件读写禁用换行翻译；双空行压缩为单个（块外）。
 合并后需重跑 final_verify 确认结构未破坏（`merge_paragraphs` 默认关闭，见「配置」）。
 
 **收尾自查**：本次会话是否改动了 `scripts/*.py`、`SKILL.md`、`config.example.py`、`references/*.md`？
@@ -295,7 +311,9 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 │   └── script-development-rules.md   # 脚本技术要点（防御性设计 + 红线，改动 scripts/*.py 前必读）
 └── scripts/
     ├── config.py                   # 真实配置（gitignore 排除）
+    ├── config_literal.py           ← AST + ast.literal_eval 安全配置解析
     ├── check_config_sync.py        ← 第一步门禁：配置同步检查
+    ├── package_check.py            ← 发布前只读敏感文件检查
     ├── web2md.py                   ← 主抓取
     ├── nav_children.py             ← 导航子/孙页面收集（基座+策略+汇总，含 notes 诊断）
     ├── markdown_code.py            ← 代码掩码工具
@@ -306,9 +324,11 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
     ├── final_verify.py             ← 收尾验证
     └── test/                      ← 本地测试（git 追踪）
         ├── selftest.py             ← 测试入口
+        ├── test_config_sync.py     ← 临时 fixture 配置结构测试（不读真实配置）
         ├── test_formula_integrity.py
         ├── test_sphinx_conversion.py
-        └── test_custom_site.py     ← 自定义站点/段落合并测试
+        ├── test_custom_site.py     ← 配置/子页面/段落/验证器回归
+        └── test_remaining_optimizations.py ← 安全配置/发布/命名/DOM 降级/跨节点公式回归
 ```
 
 - 可复用脚本一律放 `<skill-directory>/scripts/`，**不复制进项目**
@@ -325,19 +345,27 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 - 模板：`<skill-directory>/config.example.py`（占位符 + 中文注释）
 - 真实配置：`<skill-directory>/scripts/config.py`（**gitignore 排除**，禁止提交）
 - 分组：`web2md_config` dict — `python_path`（必填，AI 助手执行脚本的解释器）、`proxy`（请求代理，空字符串=环境变量自动检测，非空=显式配置优先；仅支持 http:// 形式，socks5:// 需 PySocks 未安装）、`timeout`（请求超时秒数，默认 30）、`collect_children`（是否收集导航子页面，默认 false，可被 CLI 覆盖）、`merge_paragraphs`（是否合并段落内源码硬换行，默认 false，可被 CLI `--merge-paragraphs` 覆盖）、`table_formula_inline`（是否把表格单元格内显示公式 `\[...\]` 行内化为 `$...$`，默认 true，可被 CLI `--table-formula-inline` / `--no-table-formula-inline` 覆盖；false 时表格内显示公式保持 `$$` 转换，表格可能撕裂需 AI 重建）、`page_nav`（是否在抓取到子/孙页面时于父页面 md 末尾追加 Sub-pages 导航块，默认 true，可被 CLI `--page-nav` / `--no-page-nav` 覆盖）
-- 加载：`web2md.py` 内 `load_config()`（exec 读取；缺失/损坏时降级默认值并提示首次配置，不退出——脚本仍可独立命令行运行）
+- 加载：`web2md.py` 内 `load_config()` 通过 `config_literal.py` 用 AST 定位 `web2md_config`，再以 `ast.literal_eval` 解析；只接受一项普通 `web2md_config = {...}` 纯字面量字典赋值，拒绝带注解赋值、导入、函数调用、其他赋值和副作用语句。缺失/损坏时降级默认值并提示首次配置，不退出——脚本仍可独立命令行运行
 - 同步强制：第一步先跑 `scripts/check_config_sync.py`——`config.py` 与 `config.example.py` 的 `web2md_config` **键集合与值类型**不一致（缺键 / 多余键 / 类型不符）即**中断任务**，补齐后再继续（只比结构，不比 `python_path` 占位符 vs 真实路径等值）
 - 首次配置：由第一步的配置向导写入，或手动复制 `config.example.py` → `scripts/config.py` 后填真实值（写入后跑一次 `check_config_sync.py` 复核）
 
 ## 测试（本地，git 追踪）
 
-`scripts/test/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、导航解析 collect_children、`--children-from` 清单解析、裸定界符转换、段落合并）：
+`scripts/test/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、导航解析 collect_children、渲染后 DOM 降级、`--children-from` 清单解析、同节点/跨节点裸定界符转换、段落合并、配置安全解析和发布检查）：
 
 ```powershell
 & "<python路径>" "<skill-directory>/scripts/test/selftest.py"
 ```
 
 **修改 scripts/ 下任何脚本后必须运行并全绿。**
+
+发布前先把允许发布的文件复制到隔离暂存目录（不得复制真实 `config.py`、`logs` 或缓存），再执行只读检查：
+
+```powershell
+& "<python路径>" "<skill-directory>/scripts/package_check.py" --root "{待发布目录}"
+```
+
+退出码 `0` 表示通过；`1` 表示发现 `config.py`、`.env`、logs、缓存、Token 文件、符号链接/junction/reparse point、禁用目录、Token 前后缀配置键的真实值或已知 Token 格式；`2` 表示目录或文件无法完整读取。检查器对被拒文件只看路径元数据，不打开内容；对禁用目录不进入、不枚举内部文件。
 
 ---
 

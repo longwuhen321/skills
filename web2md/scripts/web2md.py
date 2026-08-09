@@ -12,12 +12,13 @@ web2md - 将网页抓取为 Markdown 文件，图片下载到本地 .assets 文�
 用法：python web2md.py <URL> [输出目录]
 """
 
-import os, re, sys, time, mimetypes, datetime, argparse
+import os, re, sys, time, mimetypes, datetime, argparse, hashlib
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, urlsplit, unquote
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit, unquote
 import requests
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, NavigableString, Tag
 from markdownify import markdownify as md
+from config_literal import ConfigLiteralError, parse_literal_dict
 from nav_children import collect_children
 
 if sys.platform == 'win32':
@@ -31,25 +32,33 @@ def load_config() -> dict:
     """从 scripts/config.py 读取配置，返回 web2md_config 分组 dict。
 
     缺失/损坏时打印提示并降级为默认值（脚本仍可独立命令行运行），
-    首次配置请参考 config.example.py 或运行 /web2md 配置向导。
+    首次配置请参考 config.example.py 或运行 $web2md 配置向导。
     """
     defaults = {'python_path': '', 'timeout': 30, 'collect_children': False,
                 'merge_paragraphs': False, 'table_formula_inline': True, 'page_nav': True,
                 'proxy': ''}
     if not os.path.exists(CONFIG_PATH):
         print(f"⚠️ 找不到配置文件: {CONFIG_PATH}")
-        print("   请先运行 /web2md 完成首次配置（复制 config.example.py → scripts/config.py）")
+        print("   请先运行 $web2md 完成首次配置（复制 config.example.py → scripts/config.py）")
         return defaults
     try:
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-            exec(f.read(), ns := {})
-    except Exception as e:
+            cfg = parse_literal_dict(f.read(), 'web2md_config')
+    except (OSError, ConfigLiteralError) as e:
         print(f"⚠️ 配置文件读取失败: {e}，使用默认值")
         return defaults
-    cfg = ns.get('web2md_config', {})
     merged = dict(defaults)
-    merged.update({k: v for k, v in cfg.items() if v})
+    merged.update({key: cfg[key] for key in defaults if key in cfg})
     return merged
+
+
+WINDOWS_RESERVED_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    *(f'COM{i}' for i in range(1, 10)),
+    *(f'LPT{i}' for i in range(1, 10)),
+}
+MAX_OUTPUT_PATH = 240
+MAX_IMAGE_FILENAME = 80
 
 
 def sanitize_filename(name: str, max_len: int = 80) -> str:
@@ -57,8 +66,72 @@ def sanitize_filename(name: str, max_len: int = 80) -> str:
     name = re.sub(r'[\\/:*?"<>|]', '-', name)
     name = re.sub(r'\s+', ' ', name).strip().strip('.')
     if len(name) > max_len:
-        name = name[:max_len].rstrip()
-    return name or "untitled"
+        name = name[:max_len].rstrip(' .')
+    name = name or "untitled"
+    windows_stem = name.split('.', 1)[0].rstrip(' .').upper()
+    if windows_stem in WINDOWS_RESERVED_NAMES:
+        name = ('_' + name)[:max_len].rstrip(' .') or '_'
+    return name
+
+
+def _canonical_source_url(source_url: str) -> str:
+    try:
+        parsed = urlsplit(source_url)
+        return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path,
+                           parsed.query, ''))
+    except ValueError:
+        return source_url.split('#', 1)[0]
+
+
+def _output_name_budget(output_root, path_limit: int) -> int:
+    root_length = len(str(Path(output_root).resolve()))
+    # Longest generated path: root/name/name.assets/<image filename>.
+    # Three separators + '.assets' (7) + MAX_IMAGE_FILENAME = 90 chars.
+    return (path_limit - root_length - 90) // 2
+
+
+def _existing_output_matches(article_dir: Path, name: str, source_url: str) -> bool:
+    md_path = article_dir / f'{name}.md'
+    if not md_path.is_file():
+        return False
+    try:
+        prefix = md_path.read_text(encoding='utf-8')[:4096]
+    except OSError:
+        return False
+    canonical = _canonical_source_url(source_url)
+    for line in prefix.splitlines():
+        if not line.startswith('> 原文链接: ') or '](' not in line or not line.endswith(')'):
+            continue
+        candidate = line.split('](', 1)[1][:-1]
+        if _canonical_source_url(candidate) == canonical:
+            return True
+    return False
+
+
+def resolve_output_name(output_root, title: str, source_url: str,
+                        path_limit: int = MAX_OUTPUT_PATH) -> str:
+    """Return a Windows-safe, path-budgeted folder name with stable collision hash."""
+    output_root = Path(output_root)
+    budget = min(80, _output_name_budget(output_root, path_limit))
+    if budget < 1:
+        raise ValueError(f'输出根目录过长，无法在 {path_limit} 字符路径预算内创建页面目录')
+    base = sanitize_filename(title, max_len=budget)
+    article_dir = output_root / base
+    if not article_dir.exists() or _existing_output_matches(article_dir, base, source_url):
+        return base
+
+    digest = hashlib.sha256(_canonical_source_url(source_url).encode('utf-8')).hexdigest()
+    for hash_length in (8, 12, 16, 24, 32, 64):
+        suffix = '-' + digest[:hash_length]
+        if len(suffix) >= budget:
+            continue
+        stem = sanitize_filename(title, max_len=budget - len(suffix))
+        candidate = stem + suffix
+        candidate_dir = output_root / candidate
+        if (not candidate_dir.exists()
+                or _existing_output_matches(candidate_dir, candidate, source_url)):
+            return candidate
+    raise ValueError('标题清洗后发生无法消解的输出路径冲突')
 
 
 def get_image_ext(url: str, content_type: str = "") -> str:
@@ -123,7 +196,9 @@ def download_images(soup, img_dir: Path, base_url: str, session: requests.Sessio
             if filename in seen_names:
                 seen_names[filename] += 1
                 n, e = os.path.splitext(filename)
-                filename = f"{n}_{seen_names[filename]}{e}"
+                suffix = f"_{seen_names[filename]}"
+                n = n[:max(1, MAX_IMAGE_FILENAME - len(e) - len(suffix))]
+                filename = f"{n}{suffix}{e}"
             else:
                 seen_names[filename] = 0
 
@@ -546,6 +621,14 @@ def process_math_formulas(soup) -> int:
 
 
 PLAIN_TEX_OPEN = re.compile(r'\\([\[(])')
+PLAIN_TEX_TOKEN = re.compile(r'\\(\(|\)|\[|\])')
+PLAIN_TEX_BLOCKS = {
+    'p', 'li', 'td', 'th', 'dt', 'dd', 'blockquote',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'figcaption', 'div',
+}
+SAFE_CROSS_TEX_TAGS = {'span'}
+MAX_CROSS_TEX_NODES = 12
+MAX_CROSS_TEX_CHARS = 2000
 
 
 def _find_plain_close(text: str, start: int, closer: str) -> int:
@@ -553,7 +636,7 @@ def _find_plain_close(text: str, start: int, closer: str) -> int:
 
     闭定界符是「反斜杠 + 括号」（\\) / \\]），不是裸括号；
     \\) / \\] 前一个字符是反斜杠时视为转义（如 \\] 行距闭合），跳过。
-    找不到返回 -1（= 跨节点配对，交 AI 复核）。
+    找不到返回 -1（随后进入有界跨节点配对；不可靠候选只报 REVIEW）。
     """
     tok = '\\' + closer
     j = text.find(tok, start)
@@ -565,10 +648,153 @@ def _find_plain_close(text: str, start: int, closer: str) -> int:
     return -1
 
 
+def _plain_tex_tokens(text: str):
+    """Return unescaped raw TeX delimiter tokens with source offsets."""
+    tokens = []
+    for match in PLAIN_TEX_TOKEN.finditer(text):
+        backslashes = 0
+        before = match.start() - 1
+        while before >= 0 and text[before] == '\\':
+            backslashes += 1
+            before -= 1
+        if backslashes % 2:
+            continue
+        tokens.append((match, match.group(1)))
+    return tokens
+
+
+def _plain_tex_block(node):
+    for parent in node.parents:
+        if getattr(parent, 'name', None) in PLAIN_TEX_BLOCKS:
+            return parent
+    return None
+
+
+def _is_body_text_node(node) -> bool:
+    """Accept only ordinary DOM text, excluding comments, doctypes and declarations."""
+    return type(node) is NavigableString
+
+
+def _cross_tex_range_is_safe(nodes, start_index, end_index, block) -> bool:
+    if end_index - start_index + 1 > MAX_CROSS_TEX_NODES:
+        return False
+    for node in nodes[start_index:end_index + 1]:
+        if is_protected_text_node(node):
+            return False
+        parent = node.parent
+        while parent is not None and parent is not block:
+            if not isinstance(parent, Tag) or parent.name not in SAFE_CROSS_TEX_TAGS:
+                return False
+            if is_math_container(parent):
+                return False
+            parent = parent.parent
+        if parent is not block:
+            return False
+
+    current = nodes[start_index]
+    stop = nodes[end_index]
+    while current is not None and current is not stop:
+        current = current.next_element
+        if current is stop:
+            break
+        if isinstance(current, NavigableString) and not _is_body_text_node(current):
+            return False
+        if isinstance(current, Tag):
+            if current.name in PROTECTED_TEXT_TAGS or is_math_container(current):
+                return False
+            if current.name not in SAFE_CROSS_TEX_TAGS:
+                return False
+    return current is stop
+
+
+def _convert_cross_node_tex(soup, table_formula_inline: bool):
+    """Convert uniquely paired raw delimiters across bounded neutral ``span`` nodes."""
+    inline = display = 0
+    while True:
+        converted = False
+        all_nodes = [node for node in soup.find_all(string=True)
+                     if (_is_body_text_node(node)
+                         and not is_protected_text_node(node))]
+        for open_node in all_nodes:
+            open_tokens = _plain_tex_tokens(str(open_node))
+            for open_match, opener in open_tokens:
+                if opener not in ('(', '['):
+                    continue
+                block = _plain_tex_block(open_node)
+                if block is None:
+                    continue
+                nodes = [node for node in block.find_all(string=True)
+                         if (_is_body_text_node(node)
+                             and _plain_tex_block(node) is block)]
+                try:
+                    start_index = nodes.index(open_node)
+                except ValueError:
+                    continue
+                next_token = None
+                for node_index in range(start_index, len(nodes)):
+                    node = nodes[node_index]
+                    for token_match, token in _plain_tex_tokens(str(node)):
+                        if node is open_node and token_match.start() <= open_match.start():
+                            continue
+                        next_token = (node_index, node, token_match, token)
+                        break
+                    if next_token:
+                        break
+                closer = ')' if opener == '(' else ']'
+                if not next_token or next_token[3] != closer:
+                    continue
+                end_index, close_node, close_match, _ = next_token
+                if close_node is open_node:
+                    continue
+                if not _cross_tex_range_is_safe(nodes, start_index, end_index, block):
+                    continue
+
+                payload_parts = [str(open_node)[open_match.end():]]
+                payload_parts.extend(str(node) for node in nodes[start_index + 1:end_index])
+                payload_parts.append(str(close_node)[:close_match.start()])
+                payload = ''.join(payload_parts)
+                if (len(payload) > MAX_CROSS_TEX_CHARS
+                        or '\\(' in payload or '\\[' in payload
+                        or '\\)' in payload or '\\]' in payload):
+                    continue
+
+                in_table_cell = bool(
+                    table_formula_inline
+                    and (block.find_parent('td') is not None or block.name in ('td', 'th')
+                         or block.find_parent('th') is not None)
+                )
+                replacement = '$' if opener == '(' or in_table_cell else '$$'
+                prefix = str(open_node)[:open_match.start()]
+                suffix = str(close_node)[close_match.end():]
+                open_node.replace_with(NavigableString(prefix + replacement + payload + replacement))
+                for node in nodes[start_index + 1:end_index]:
+                    node.replace_with(NavigableString(''))
+                close_node.replace_with(NavigableString(suffix))
+                if opener == '(' or in_table_cell:
+                    inline += 1
+                else:
+                    display += 1
+                converted = True
+                break
+            if converted:
+                break
+        if not converted:
+            break
+
+    review = 0
+    for node in soup.find_all(string=True):
+        if not _is_body_text_node(node) or is_protected_text_node(node):
+            continue
+        review += sum(1 for _, token in _plain_tex_tokens(str(node)) if token in ('(', '['))
+    return inline, display, review
+
+
 def convert_plain_tex_delimiters(soup, table_formula_inline: bool = True) -> tuple:
     """把 KaTeX auto-render / MathJax tex2jax 站点的裸 TeX 定界符转为 Typora 定界符。
 
-    只处理文本节点内的配对：
+    先处理文本节点内的配对；再处理同一块级容器内、最多 12 个文本节点且只跨
+    中性 span 的唯一配对。跨块、受保护子树、格式化标签、歧义或超长候选保持原文。
+    具体规则：
       - \\(...\\) → $...$（行内）
       - \\[...\\] → $$...$$（显示，独占一行由 html_to_markdown 的 $$ 机制兜底）
       - table_formula_inline 时，<td>/<th> 单元格内的 \\[...\\] → $...$（行内）——
@@ -577,12 +803,11 @@ def convert_plain_tex_delimiters(soup, table_formula_inline: bool = True) -> tup
         references/custom-site-rules.md §2 的 aligned 化规则处理）
     \\[ 行距（\\[0.5em]、前字符为反斜杠）与 \\left( \\left[ 不匹配（反斜杠不在括号前），
     不受影响；class="math" 等受保护子树已由 process_math_formulas 处理，不重复转换。
-    跨节点配对（定界符与内容被 span 打断）不做替换，返回疑似计数交 AI 复核。
-    返回 (行内数, 显示数, 跨节点疑似数)。
+    返回 (行内数, 显示数, REVIEW 数)；不可靠的跨节点候选只计 REVIEW。
     """
-    inline = display = cross = 0
+    inline = display = 0
     for node in soup.find_all(string=True):
-        if is_protected_text_node(node):
+        if not _is_body_text_node(node) or is_protected_text_node(node):
             continue
         text = str(node)
         if not text or ('\\(' not in text and '\\[' not in text):
@@ -607,10 +832,9 @@ def convert_plain_tex_delimiters(soup, table_formula_inline: bool = True) -> tup
                                    ('$' if (m.group(1) == '(' or in_table_cell) else '$$')
             j = _find_plain_close(text, m.end(), closer)
             if j == -1:
-                # 跨节点配对（或本站残缺定界符）：保留原文，交 AI 复核
+                # 可能跨节点或残缺；保留，稍后走有界跨节点配对。
                 parts.append(text[i:m.end()])
                 i = m.end()
-                cross += 1
                 continue
             parts.append(text[i:m.start()] + repl + text[m.end():j] + repl)
             changed = True
@@ -621,7 +845,9 @@ def convert_plain_tex_delimiters(soup, table_formula_inline: bool = True) -> tup
             i = j + 2   # 跳过整个闭定界符（\ 和括号两个字符）
         if changed:
             node.replace_with(NavigableString(''.join(parts)))
-    return inline, display, cross
+    cross_inline, cross_display, review = _convert_cross_node_tex(
+        soup, table_formula_inline)
+    return inline + cross_inline, display + cross_display, review
 
 
 def _paragraph_stats(text: str) -> tuple:
@@ -783,6 +1009,180 @@ def fetch_page(url: str, session: requests.Session, timeout: int = 30) -> tuple:
     return soup, resp.url, resp.text
 
 
+def _page_identity(url: str):
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    path = parsed.path.rstrip('/')
+    if path.endswith('/index.html'):
+        path = path[:-len('/index.html')]
+    elif path.endswith('/index'):
+        path = path[:-len('/index')]
+    elif path.endswith('.html'):
+        path = path[:-len('.html')]
+    return (
+        parsed.scheme.lower(), parsed.netloc.lower(), path.rstrip('/'), parsed.query,
+    )
+
+
+def _snapshot_matches_page(rendered_soup, page_url: str, declared_url=None):
+    """Validate rendered snapshot page metadata before trusting its navigation."""
+    exact_candidates = []
+    if declared_url:
+        exact_candidates.append(('命令行 --rendered-url', declared_url))
+    canonical = rendered_soup.find('link', rel=lambda value: value and 'canonical' in value)
+    if canonical and canonical.get('href'):
+        exact_candidates.append(('canonical', urljoin(page_url, canonical['href'])))
+    for attrs in ({'property': 'og:url'}, {'name': 'twitter:url'}):
+        meta = rendered_soup.find('meta', attrs=attrs)
+        if meta and meta.get('content'):
+            exact_candidates.append((next(iter(attrs.values())), urljoin(page_url, meta['content'])))
+
+    expected = _page_identity(page_url)
+    if exact_candidates:
+        for source, candidate in exact_candidates:
+            if _page_identity(candidate) != expected:
+                return False, f'{source} 与当前页面 URL 不一致: {candidate}'
+        return True, ''
+
+    base = rendered_soup.find('base', href=True)
+    if base:
+        candidate = urlsplit(urljoin(page_url, base['href']))
+        expected_url = urlsplit(page_url)
+        if expected_url.query:
+            return False, 'base href 无法核实带 query 的页面 identity；请提供 --rendered-url'
+        base_path = candidate.path
+        if not base_path.endswith('/'):
+            base_path = base_path.rsplit('/', 1)[0] + '/'
+        if ((candidate.scheme.lower(), candidate.netloc.lower())
+                == (expected_url.scheme.lower(), expected_url.netloc.lower())
+                and expected_url.path.startswith(base_path)):
+            return True, ''
+        return False, f'base href 与当前页面域名/版本路径不一致: {base["href"]}'
+    return False, '快照缺少 --rendered-url、canonical/og:url 或可校验的 base href'
+
+
+VERSION_PATH_SEGMENT = re.compile(
+    r'^(?:v?\d+(?:[._-]\d+)*(?:[-_]?(?:alpha|beta|rc)\d*)?'
+    r'|latest|stable|current|main|master|dev|nightly)$',
+    re.IGNORECASE,
+)
+
+
+def _navigation_scope_prefix(path: str) -> str:
+    """Return a slash-terminated tree/version prefix without collapsing ``/v1`` to ``/``."""
+    segments = [segment for segment in path.split('/') if segment]
+    version_index = None
+    for index, segment in enumerate(segments):
+        if VERSION_PATH_SEGMENT.fullmatch(segment):
+            version_index = index
+    if version_index is not None:
+        return '/' + '/'.join(segments[:version_index + 1]) + '/'
+    if not segments:
+        return '/'
+    if path.endswith('/'):
+        return '/' + '/'.join(segments) + '/'
+
+    last = segments[-1].casefold()
+    if last in ('index', 'index.html', 'index.htm') or '.' in last:
+        parent_segments = segments[:-1]
+        return '/' + ('/'.join(parent_segments) + '/' if parent_segments else '')
+    if len(segments) == 1:
+        return '/' + segments[0] + '/'
+    return '/' + '/'.join(segments[:-1]) + '/'
+
+
+def _navigation_scope(url: str, page_url: str) -> bool:
+    try:
+        child = urlsplit(urljoin(page_url, url))
+        page = urlsplit(page_url)
+    except ValueError:
+        return False
+    base_dir = _navigation_scope_prefix(page.path)
+    return (
+        child.scheme.lower() == page.scheme.lower()
+        and child.netloc.lower() == page.netloc.lower()
+        and child.path.startswith(base_dir)
+    )
+
+
+def _validate_navigation_tree(children, page_url: str):
+    """Re-check same-domain/version scope and hard-limit navigation to two levels."""
+    accepted = []
+    rejected = 0
+    for child in children:
+        if not _navigation_scope(child.get('url', ''), page_url):
+            rejected += 1
+            continue
+        grandchildren = []
+        for grand in child.get('children', []):
+            if not _navigation_scope(grand.get('url', ''), page_url):
+                rejected += 1
+                continue
+            if grand.get('children'):
+                rejected += len(grand['children'])
+            grandchildren.append({
+                'title': grand.get('title') or grand.get('url', ''),
+                'url': grand.get('url', ''),
+                'children': [],
+            })
+        accepted.append({
+            'title': child.get('title') or child.get('url', ''),
+            'url': child.get('url', ''),
+            'children': grandchildren,
+        })
+    return accepted, rejected
+
+
+def collect_navigation(static_soup, page_url: str, rendered_html=None, rendered_url=None):
+    """Collect static navigation, falling back to a validated rendered DOM snapshot."""
+    static_result = dict(collect_children(static_soup, page_url))
+    static_children, rejected = _validate_navigation_tree(static_result['children'], page_url)
+    static_result['children'] = static_children
+    static_result['source'] = 'static'
+    static_result['review_required'] = False
+    if rejected:
+        static_result.setdefault('notes', []).append(
+            f'静态导航有 {rejected} 项超出同域/同版本/两级范围，已拒绝')
+    if static_children or rendered_html is None:
+        notes_text = '\n'.join(static_result.get('notes', []))
+        static_navigation_missing = (
+            static_result.get('structure') in ('unknown', 'generic')
+            or '未定位到当前页' in notes_text
+        )
+        if not static_children and rendered_html is None and static_navigation_missing:
+            static_result.setdefault('notes', []).append(
+                'REVIEW: 静态导航为空且没有渲染后 DOM 快照；请提供快照或 --children-from 清单')
+            static_result['review_required'] = True
+        return static_result
+
+    rendered_soup = BeautifulSoup(rendered_html, 'lxml')
+    valid, reason = _snapshot_matches_page(rendered_soup, page_url, rendered_url)
+    if not valid:
+        static_result.setdefault('notes', []).append(
+            f'REVIEW: 渲染后 DOM 快照未通过基准 URL 校验（{reason}）；未使用快照')
+        static_result['review_required'] = True
+        return static_result
+
+    rendered_result = dict(collect_children(rendered_soup, page_url))
+    children, rendered_rejected = _validate_navigation_tree(
+        rendered_result['children'], page_url)
+    rendered_result['children'] = children
+    rendered_result['source'] = 'rendered'
+    rendered_result['review_required'] = not bool(children)
+    rendered_result['notes'] = list(static_result.get('notes', [])) + [
+        '静态导航为空，已使用通过基准 URL 校验的渲染后 DOM 快照'
+    ] + list(rendered_result.get('notes', []))
+    if rendered_rejected:
+        rendered_result['notes'].append(
+            f'渲染后导航有 {rendered_rejected} 项超出同域/同版本/两级范围，已拒绝')
+    if not children:
+        rendered_result['notes'].append(
+            'REVIEW: 渲染后 DOM 仍未得到可核实子页面；请使用 --children-from 清单')
+    return rendered_result
+
+
 TITLE_MATH_UNICODE = {
     # 希腊字母（小写）
     '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ', '\\delta': 'δ',
@@ -810,7 +1210,7 @@ TITLE_MATH_UNICODE = {
 
 
 def clean_title_math(text: str) -> str:
-    """把标题中的裸 TeX 数学命令转 Unicode、去掉 \( \) \[ \] 定界符并压缩空白。
+    r"""把标题中的裸 TeX 数学命令转 Unicode、去掉 \( \) \[ \] 定界符并压缩空白。
 
     部分站点作者在标题里用数学模式写希腊字母（如 `<h1>The \( \alpha \) filter</h1>`），
     若原样进入 sanitize_filename，`\` 会被当作路径分隔符替换成 `-`（文件夹乱码），
@@ -868,16 +1268,16 @@ def process_page(soup, final_url, raw_html, title_text, output_root, cfg, sessio
 
     返回 (folder_name, md_path)；失败返回 None（已保存调试快照）。
     """
-    folder_name = sanitize_filename(title_text)
-    assets_folder_name = f"{folder_name}.assets"
-    article_dir = output_root / folder_name
-    assets_dir = article_dir / assets_folder_name
-    article_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"📄 标题: {title_text}")
-    print(f"📁 文件夹: {article_dir}")
-
     try:
+        folder_name = resolve_output_name(output_root, title_text, final_url)
+        assets_folder_name = f"{folder_name}.assets"
+        article_dir = output_root / folder_name
+        assets_dir = article_dir / assets_folder_name
+        article_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"📄 标题: {title_text}")
+        print(f"📁 文件夹: {article_dir}")
+
         normalize_stats = normalize_document_html(soup, final_url, title_text)
         if any(normalize_stats.values()):
             print(
@@ -894,17 +1294,18 @@ def process_page(soup, final_url, raw_html, title_text, output_root, cfg, sessio
             print(f"  转换了 {math_count} 个数学公式")
 
         # KaTeX auto-render / MathJax tex2jax 站点：公式是裸文本 \(...\) / \[...\] 定界符，
-        # 无 class="math" 等标记，此处兜底转换（跨节点配对交 AI 复核）
-        inline_n, display_n, cross_n = convert_plain_tex_delimiters(
+        # 无 class="math" 等标记，此处兜底转换（可靠跨节点配对自动转，其余报 REVIEW）
+        inline_n, display_n, review_n = convert_plain_tex_delimiters(
             soup, cfg.get('table_formula_inline', True))
-        if inline_n or display_n or cross_n:
+        if inline_n or display_n or review_n:
             print(
                 f"  🔎 检测到裸 TeX 定界符（KaTeX auto-render 站点）: "
-                f"行内 {inline_n}，显示 {display_n}，跨节点疑似 {cross_n}"
+                f"行内 {inline_n}，显示 {display_n}，REVIEW {review_n}"
             )
-            print("  ✅ 已自动转换为 $ / $$ 定界符")
-            if cross_n:
-                print(f"  ⚠️ {cross_n} 处疑似跨节点配对（定界符与内容被标签打断），需 AI 助手复核（见 references/custom-site-rules.md）")
+            if inline_n or display_n:
+                print("  ✅ 可靠配对已自动转换为 $ / $$ 定界符")
+            if review_n:
+                print(f"  ⚠️ {review_n} 处不可靠配对仅报告 REVIEW，需 AI 助手复核（见 references/custom-site-rules.md）")
 
         img_mapping = download_images(soup, assets_dir, final_url, session, cfg['timeout'])
 
@@ -1014,39 +1415,46 @@ def append_nav_block(md_path, entries):
         f.write(block)
 
 
-def _fetch_child_tree(node, output_root, cfg, session, depth, prefix=''):
+def _fetch_child_tree(node, output_root, cfg, session, depth, prefix='', failures=None):
     """抓取导航树中的一个子/孙节点，落盘到 output_root 下（标题文件夹嵌套），递归孙页面。
 
     返回 {'title': 实际标题, 'rel': 相对父 md 的链接路径, 'children': [孙节点...]}，
-    供父页面生成 Sub-pages 导航块；抓取失败返回 None。
+    供父页面生成 Sub-pages 导航块；抓取失败返回 None，并把失败 URL 追加到 failures。
     """
+    if failures is None:
+        failures = []
     pad = '  ' * depth
     print(f"{pad}📂 子页面「{node['title']}」({node['url']})")
     try:
         soup, final_url, raw_html = fetch_page(node['url'], session, cfg['timeout'])
     except Exception as e:
-        print(f"{pad}❌ 获取失败: {e}")
+        failures.append(node['url'])
+        print(f"{pad}❌ 获取失败 [{node['url']}]: {e}")
         return None
     title_text = extract_title(soup)
     result = process_page(soup, final_url, raw_html, title_text, output_root, cfg, session)
     if result is None:
+        failures.append(node['url'])
+        print(f"{pad}❌ 处理失败 [{node['url']}]")
         return None
     folder, _ = result
     rel = f"{prefix}{folder}/{folder}.md"
     grandchildren = []
     for grand in node.get('children', []):
         g = _fetch_child_tree(grand, output_root / folder, cfg, session, depth + 1,
-                              prefix=f"{prefix}{folder}/")
+                              prefix=f"{prefix}{folder}/", failures=failures)
         if g:
             grandchildren.append(g)
     return {'title': title_text, 'rel': rel, 'children': grandchildren}
 
 
-def fetch_and_process(url, output_root, cfg, session, children_mode=False, children_list=None):
+def fetch_and_process(url, output_root, cfg, session, children_mode=False, children_list=None,
+                      rendered_html=None, rendered_url=None):
     """抓取一个页面并按标题文件夹落盘。
 
     children_mode: 解析侧边栏导航递归抓取子/孙页面（规则路径）。
     children_list: AI 助手提供的子页面清单（--children-from），非 None 时优先于规则解析。
+    rendered_html/rendered_url: 静态导航为空时使用并校验的渲染后 DOM 快照。
     """
     print(f"🌐 获取: {url}")
     try:
@@ -1055,6 +1463,7 @@ def fetch_and_process(url, output_root, cfg, session, children_mode=False, child
         print(f"❌ 获取页面失败: {e}")
         return False
     title_text = extract_title(soup)
+    navigation_review_required = False
     # 先收集导航子页面：process_page 内部的 html_to_markdown 会删除 <nav>，必须在处理页面之前解析
     if children_list is not None:
         children = children_list
@@ -1062,8 +1471,12 @@ def fetch_and_process(url, output_root, cfg, session, children_mode=False, child
         # nav_children.collect_children 返回 dict：{structure, children, notes}；
         # 命中策略时 children 可能为空（真无子页面），未命中时 structure='unknown' 且
         # notes 带诊断——两种情况都不影响主流程，打印 notes 供 AI 助手判断
-        nav_result = collect_children(soup, final_url)
+        nav_result = collect_navigation(
+            soup, final_url, rendered_html=rendered_html, rendered_url=rendered_url)
         children = nav_result['children']
+        navigation_review_required = bool(nav_result.get('review_required'))
+        if nav_result.get('source') == 'rendered':
+            print('  🧭 静态导航为空，启用渲染后 DOM 降级通道')
         if nav_result['notes']:
             for note in nav_result['notes']:
                 print(f"  🧭 导航诊断: {note}")
@@ -1085,17 +1498,26 @@ def fetch_and_process(url, output_root, cfg, session, children_mode=False, child
 
     if not children:
         print("  (该页面无严格导航子页面)")
+        if navigation_review_required:
+            print("  ❌ 导航仍有 REVIEW，需提供可靠 DOM 快照或 --children-from 清单")
+            return False
         return True
     print(f"  📂 发现 {len(children)} 个导航子页面，开始逐个抓取...")
     child_root = output_root / folder
     nav_entries = []
+    failed_urls = []
     for child in children:
-        info = _fetch_child_tree(child, child_root, cfg, session, 1)
+        info = _fetch_child_tree(child, child_root, cfg, session, 1, failures=failed_urls)
         if info:
             nav_entries.append(info)
     if cfg.get('page_nav', True) and nav_entries:
         append_nav_block(child_root / f"{folder}.md", nav_entries)
         print(f"  📑 已在父页面末尾追加 Sub-pages 导航块（{len(nav_entries)} 个子页面）")
+    if failed_urls:
+        print(f"  ❌ 子页面批次失败：{len(failed_urls)} 个 URL（成功产物已保留）")
+        for failed_url in failed_urls:
+            print(f"     - {failed_url}")
+        return False
     return True
 
 
@@ -1107,8 +1529,13 @@ def main():
                         help='收集导航子页面（覆盖 config.py 的 collect_children）')
     parser.add_argument('--no-children', action='store_false', dest='children',
                         help='不收集导航子页面（覆盖 config.py 的 collect_children）')
-    parser.add_argument('--children-from', metavar='FILE',
-                        help='从 AI 助手写的子页面清单文件抓取子/孙页面（优先于规则解析；格式见 SKILL.md）')
+    nav_input = parser.add_mutually_exclusive_group()
+    nav_input.add_argument('--children-from', metavar='FILE',
+                           help='从 AI 助手写的子页面清单文件抓取子/孙页面（优先于规则解析；格式见 SKILL.md）')
+    nav_input.add_argument('--rendered-html', metavar='FILE',
+                           help='静态导航为空时使用浏览器保存的渲染后 DOM 快照')
+    parser.add_argument('--rendered-url', metavar='URL',
+                        help='渲染后 DOM 快照对应的页面 URL（用于基准 URL 校验）')
     parser.add_argument('--merge-paragraphs', action='store_true', default=None,
                         help='转换后合并段落内的源码硬换行（覆盖 config.py 的 merge_paragraphs）')
     parser.add_argument('--table-formula-inline', action='store_true', default=None,
@@ -1120,6 +1547,8 @@ def main():
     parser.add_argument('--no-page-nav', action='store_false', dest='page_nav',
                         help='不追加 Sub-pages 导航块（覆盖 config.py 的 page_nav）')
     args = parser.parse_args()
+    if args.rendered_url and not args.rendered_html:
+        parser.error('--rendered-url 必须与 --rendered-html 一起使用')
 
     url = args.url
     output_root = Path(args.output_root)
@@ -1137,6 +1566,14 @@ def main():
             children_list = parse_children_list(args.children_from)
         except ValueError as e:
             print(f"❌ {e}")
+            sys.exit(1)
+        collect = True
+    rendered_html = None
+    if args.rendered_html:
+        try:
+            rendered_html = Path(args.rendered_html).read_text(encoding='utf-8')
+        except OSError as e:
+            print(f'❌ 无法读取渲染后 DOM 快照: {e}')
             sys.exit(1)
         collect = True
 
@@ -1157,11 +1594,16 @@ def main():
     print(f"🌐 web2md: {url}")
     if children_list is not None:
         print(f"   子页面清单: {args.children_from}（{len(children_list)} 项，优先于规则解析）")
+    elif rendered_html is not None:
+        print(f"   渲染后 DOM 降级快照: {args.rendered_html}")
     else:
         print(f"   导航子页面收集: {'开启' if collect else '关闭'}")
     print("=" * 60)
 
-    ok = fetch_and_process(url, output_root, cfg, session, children_mode=collect, children_list=children_list)
+    ok = fetch_and_process(
+        url, output_root, cfg, session, children_mode=collect,
+        children_list=children_list, rendered_html=rendered_html,
+        rendered_url=args.rendered_url)
     sys.exit(0 if ok else 1)
 
 

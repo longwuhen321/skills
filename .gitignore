@@ -20,3 +20,6 @@ __pycache__/
 
 # 不提交项目中的调试日志快照（<skill>/logs/，体积可能很大）
 /*/logs
+
+# 验证依赖目录，不提交
+/.validation_deps

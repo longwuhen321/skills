@@ -30,7 +30,7 @@ md2zh 的配置**只有一份全局配置**：`<skill-directory>/scripts/config.
 - `ambiguous_content_decider`：`user`（模糊内容由用户决定）/ `ai`（由 AI 助手决定）
 - `output_dir`（选填）：翻译输出目录；留空 = 源文件同级（默认），指定 = 输出到该目录并把源旁 `<stem>.assets` 一并复制（图片引用不变）
 - `tree_translation`（选填，默认 true）：是否开启树形翻译；false = 目录不再自动触发树形，遇多个可翻译 .md 时停下询问指定单个文件
-- `max_block_chars`（选填，默认 16000，建议 10000–24000）：单块可译内容（等待翻译的字符，不含代码/公式/链接目标等保护内容）字符上限；以标题区间为天然边界，超限章节按 unit 边界拆分
+- `max_block_chars`（选填，默认 16000，建议 10000–24000）：单块可译内容（等待翻译的字符，不含代码/公式/链接目标等保护内容）的**软目标**；以标题区间为天然边界，超过目标的章节按 unit 边界拆分，不可再拆的单个 unit 仍可能超过该值
 
 检查 `md2zh_config.python_path`：
 
@@ -41,6 +41,8 @@ md2zh 的配置**只有一份全局配置**：`<skill-directory>/scripts/config.
   1. **先问用户** Python 解释器路径；用户不给才允许自动扫描（`where python`、Anaconda 目录、系统 PATH，优先选可用环境）
   2. 扫描候选 → 展示给用户确认；无结果 → **中断任务**（无 Python 无法执行 pipeline，必需项）
   3. 确认后由 pipeline `configure` 子命令写入 `scripts/config.py`（模板 `config.example.py`，gitignore 排除；`--python-path` 缺省时自动探测**当前解释器**），**写入后立即跑 `scripts/check_config_sync.py` 复核**——确认没有缺键（含向导未覆盖的新增键）才继续
+
+配置读取只接受模块说明字符串和 `md2zh_config = {...}` 等**字面量赋值**：脚本用 AST 定位分组并通过 `ast.literal_eval` 解析，不导入配置模块。配置中出现 import、函数调用、属性写入、控制流或其他副作用语句时直接拒绝，且不会执行这些代码。
 
 > **禁止预填**：向导阶段不自动读取历史配置/旧会话日志预填任何值。
 
@@ -54,7 +56,7 @@ md2zh 的配置**只有一份全局配置**：`<skill-directory>/scripts/config.
 
 确认 `scripts/md2zh_pipeline.py` 存在。缺失 / 损坏时**不要直接重写**——先向用户报告并确认是否需要恢复，确认后按 git 恢复（注意恢复的是最近提交版本，之后未提交改动会丢失）。
 
-另确认 `scripts/check_config_sync.py` 存在（第一步门禁依赖）。
+另确认 `scripts/config_literal.py` 与 `scripts/check_config_sync.py` 存在（安全配置解析与第一步门禁依赖）。
 
 ## 执行流程
 
@@ -65,15 +67,16 @@ md2zh 的配置**只有一份全局配置**：`<skill-directory>/scripts/config.
 ```
 
 - 内部保护段是重建元数据，**不要暴露或翻译** state 文件。
-- 分块以**标题区间为天然边界**：章节（含无标题头部）不超 `max_block_chars` 就整块翻译（上下文完整）；超限章节在 unit 边界（段落/行）拆分。普通段落合并为多行 unit（段落内可自由断句）。
+- 单文件流程不传 `--glossary`：pipeline 在 `state.json` 同级创建或复用 `glossary.json`。树形流程传 `--glossary "<树级任务根>/glossary.json"`，令所有页面复用同一术语表；文件必须是 `{"schema_version": 1, "terms": {"源术语": "统一译法"}}`。
+- 分块以**标题区间为天然边界**：章节（含无标题头部）不超 `max_block_chars` 就整块翻译（上下文完整）；超过软目标的章节在 unit 边界（段落/行）拆分，pipeline 不会切开不可分 unit，因此单块仍可能超过软目标。普通段落合并为多行 unit（段落内可自由断句），列表项、嵌套列表项与引用行保持逐行 unit。
 
-**结构摘要（主流程，AI 分块依据）**——extract 后生成摘要 md，AI 通读后**确认默认分块方案**或给出调整指令（如"2.2 拆两块，边界在 2.2.2 前"）再进入分块；不给调整 = 用默认方案：
+**结构摘要（主流程，AI 分块依据）**——extract 后生成摘要 md，AI 通读并**确认采用 pipeline 的默认分块方案**后再进入分块：
 
 ```powershell
 & "<python>" "<skill-directory>/scripts/md2zh_pipeline.py" summarize "<state.json>" "<summary.md>"
 ```
 
-- 摘要内容：标题树（到 3 级）+ 每章节可译字符数 + 代码/公式块位置（保护区间，不参与翻译）+ 默认分块方案表（✅ 整块 / ⚠️ 超限）
+- 摘要内容：标题树（到 3 级）+ 每章节可译字符数 + 代码/公式块行号范围（保护区间，不参与翻译）+ 默认分块方案表（✅ 目标内 / ⚠️ 超软目标）
 
 ### 2. 模糊内容决策
 
@@ -86,9 +89,58 @@ md2zh 的配置**只有一份全局配置**：`<skill-directory>/scripts/config.
 & "<python>" "<skill-directory>/scripts/md2zh_pipeline.py" record-decisions "<state.json>" "<decisions.json>"
 ```
 
+`decisions.json` 必须恰好覆盖 state 中的每个 region ID 一次（不得缺失、重复或出现未知 ID）：
+
+```json
+{
+  "decisions": [
+    {
+      "region_id": "unknown-0001",
+      "decision": "protect",
+      "reason": "保留未知指令载荷",
+      "selected_spans": []
+    },
+    {
+      "region_id": "unknown-0002",
+      "decision": "translate",
+      "reason": "该载荷是读者可见文字",
+      "selected_spans": [
+        {"source_start": 120, "source_end": 138, "text": "Exact source text"}
+      ]
+    }
+  ]
+}
+```
+
+若存在 `translate` 决策，命令输出中的 `extra_translations_skeleton` 会列出 `unknown-xxxx:<span-index>` 键。把该对象保存为 UTF-8 `extra-translations.json`，将每个空字符串替换为对应中文译文；`protect` 决策不产生额外翻译键。
+
+命令输出片段：
+
+```json
+{
+  "passed": 2,
+  "rejected": 0,
+  "extra_translations_skeleton": {
+    "translations": {
+      "unknown-0002:0": ""
+    }
+  }
+}
+```
+
+可直接复制其中的 `extra_translations_skeleton` 对象为文件并填写译文：
+
+```json
+{
+  "translations": {
+    "unknown-0002:0": "精确源文字的中文译文"
+  }
+}
+```
+
 ### 3. 分块运行
 
-AI 审阅摘要（确认默认方案或给调整指令）后执行：
+AI 审阅摘要并确认采用默认方案后执行：
 
 ```powershell
 & "<python>" "<skill-directory>/scripts/md2zh_pipeline.py" plan-blocks "<state.json>" "<run-directory>"
@@ -98,7 +150,13 @@ AI 审阅摘要（确认默认方案或给调整指令）后执行：
 
 ### 4. 逐块翻译（AI 助手）
 
-1. 先读全部 `*.input.txt` 一遍，建立任务级术语表并跨块保留。
+1. 先读全部 `*.input.txt` 与 state 输出指向的 `glossary.json`，复用已确认术语；发现新术语时，把增量写成 `{"terms": {"源术语": "统一译法"}}`，再运行：
+
+   ```powershell
+   & "<python>" "<skill-directory>/scripts/md2zh_pipeline.py" update-glossary "<state.json>" "<术语增量.json>"
+   ```
+
+   已有术语出现不同译法时命令默认拒绝；只有完成上下文复核并明确要替换时才追加 `--replace`。每个后续块和树内后续文件都重新读取同一 `glossary.json`。
 2. **使用当前 AI 助手会话翻译**，不启动嵌套子代理/独立模型会话（丢失共享上下文、增加开销）。
 3. 一次翻译一个完整块表面：
    - 每行 `@@MD2ZH:SEG:block-....:....@@` **原样保留且顺序不变**；SEG 行后的内容可占**多行**（段落级 unit）
@@ -127,9 +185,10 @@ AI 审阅摘要（确认默认方案或给调整指令）后执行：
 & "<python>" "<skill-directory>/scripts/md2zh_pipeline.py" verify "<state.json>" "<translations.json>" "<candidate.md>"
 ```
 
-- `merge-blocks` 由 pipeline 重建内部 ID 映射，AI 不产生大 JSON 映射。
+- `merge-blocks` 由 pipeline 重建内部 ID 映射，AI 不产生大 JSON 映射。仅存在 `translate` 模糊决策时，在上面的 merge 命令末尾追加 `--extra-translations "<extra-translations.json>"`；没有时保持原命令。pipeline 要求额外翻译键与已接受的 translate spans 完全一致且译文非空。
+- `merge-blocks`、`render`、成功的 `verify` 会把各自产物路径与 SHA-256 写入任务根 `completion.json`；重跑前序阶段会自动撤销过期的后续阶段标记。
 - render 把渲染结果写入传入的 `<candidate.md>`（中间产物）；**最终文件位置由 AI 读 `md2zh_config.output_dir` 放置**——留空 = `<stem>_zh.md` 与源文件同级；指定 = `<目录>/<stem>_zh.md`（目录不存在自动创建）。
-- 源旁存在 `<stem>.assets` 时，render 后用 `copy-assets` 复制到输出目录（保持源 stem 命名，md 内图片引用不变；不复制会导致图片无法显示）：
+- 源旁存在 `<stem>.assets` 时，render 后用 `copy-assets` 复制到输出目录（保持源 stem 命名，md 内图片引用不变；不复制会导致图片无法显示）。源和目标 assets 是同一路径时安全 no-op；不同路径的目标 assets 已存在时拒绝静默合并或覆盖，先由用户处理目标冲突：
 
 ```powershell
 & "<python>" "<skill-directory>/scripts/md2zh_pipeline.py" copy-assets "<源.md>" "<输出.md>"
@@ -142,7 +201,12 @@ AI 审阅摘要（确认默认方案或给调整指令）后执行：
 render 输出后、清理前，**AI 通读完整译文**（含长文档每个一级标题下至少完整读一遍），对照 `references/translation-quality.md` 四章逐项检查：硬性错误（数字/术语/漏译增译）、流畅性（翻译腔/“的的的/被被被”）、风格适配、自检（屏蔽原文测试——仅凭中文能否完整理解）。
 
 - 检查结果写入 `<skill-directory>/logs/intermediate/<task-id>/review.md`（问题清单：位置 + 类型 + 处理；无问题也记录已通读达标）
-- 发现问题 → 定位受影响块 → 改 `output.txt` → `validate-block ... --replace-accepted` → 重 merge / render / verify → 重读复查，**循环到干净**
+- 发现问题 → 定位受影响块 → 改 `output.txt` → `validate-block ... --replace-accepted` → 重 merge → `render ... --allow-overwrite` → verify → 重读复查，**循环到干净**。`--allow-overwrite` 只允许覆盖既有 candidate；pipeline 仍拒绝把源文件作为 render 输出。
+- 复查干净后显式写入 AI 终检完成标记；该命令要求 `verify` 已成功，且把 `review.md`、译文映射和候选文件哈希绑定：
+
+  ```powershell
+  & "<python>" "<skill-directory>/scripts/md2zh_pipeline.py" mark-reviewed "<state.json>" "<translations.json>" "<candidate.md>" "<review.md>"
+  ```
 
 ### 8. 收尾
 
@@ -150,7 +214,8 @@ render 输出后、清理前，**AI 通读完整译文**（含长文档每个一
 & "<python>" "<skill-directory>/scripts/md2zh_pipeline.py" cleanup-run "<manifest.json>"
 ```
 
-- 任务目录（`<task-id>/`）**归档移入 `<skill-directory>/logs/_archive/`** 而非删除（便于排查）；`_archive/` 只保留最近 20 个条目，超出删最旧。
+- `cleanup-run` 必须同时确认所有块 accepted，以及 `merge`、`render`、`verify`、`review` 四个完成标记仍与当前文件哈希一致；缺失或标记后被修改均拒绝归档。
+- 任务目录（`<task-id>/`）**归档移入 `<skill-directory>/logs/_archive/`** 而非删除（便于排查）。同名 task-id 已存在时追加唯一时间后缀，绝不覆盖或删除既有归档；共享树级术语表的当前快照作为归档内 `glossary.json` 保存。
 - 保留决策日志、源文件、最终输出。
 
 ## 树形翻译（多文件目录树）
@@ -177,8 +242,8 @@ render 输出后、清理前，**AI 通读完整译文**（含长文档每个一
 **流程**：
 
 1. **扫描目录树**：每个含 .md 的文件夹 = 一个翻译任务（源 = 与文件夹**同名**的 .md；无同名取唯一 .md；多个 .md 时跳过并提示；`.assets/` 忽略）。
-2. **树级术语表**：先扫全树所有页面，建立**共享术语表**（跨子页面保持一致，如同一术语在全树各页用相同译法），再逐文件翻译时复用。
-3. **逐文件夹执行完整 pipeline 流程**：对每个任务跑 extract → summarize（AI 审阅摘要确认/调整分块）→（模糊决策）→ plan-blocks → 逐块翻译 → validate-block → merge-blocks → render → verify → AI 终检（review.md）→ cleanup-run（每文件独立 task-id、独立状态与产物）。
+2. **树级术语表**：在本次树形翻译的任务根创建一份共享 `glossary.json`；先扫全树所有页面建立初始术语表，随后每个页面的 `extract` 都追加 `--glossary "<同一 glossary.json>"`，并通过 `update-glossary` 持续复用和补充。
+3. **逐文件夹执行完整 pipeline 流程**：对每个任务跑 extract → summarize（AI 审阅摘要并确认默认分块）→（模糊决策）→ plan-blocks → 逐块翻译 → validate-block → merge-blocks → render → verify → AI 终检（review.md）→ mark-reviewed → cleanup-run（每文件独立 task-id、独立状态与产物，共享树级 glossary；归档保存当时快照）。
 4. **输出镜像树**：默认在源目录旁新建 `<根名>_zh/`；`md2zh_config.output_dir` 指定时镜像树根建在该目录下。保持原层级结构，每文件夹内生成**与源同名的 `.md`**，并把该文件夹的 `.assets` 一并复制到镜像对应位置（`copy-assets` 逐文件执行，图片引用不变）；`_zh` 后缀命名仅用于单文件模式。**不修改源文件**。输出示例：
 
    ```
@@ -206,12 +271,13 @@ render 输出后、清理前，**AI 通读完整译文**（含长文档每个一
 
 - 模板：`<skill-directory>/config.example.py`（占位符 + 中文注释）
 - 真实配置：`<skill-directory>/scripts/config.py`（gitignore 排除，禁止提交）
-- 分组：`md2zh_config` — `python_path`（必填）+ `ambiguous_content_decider`（user / ai）+ `output_dir`（选填，留空 = 源文件同级）+ `tree_translation`（选填，默认 true）+ `max_block_chars`（选填，默认 16000，建议 10000–24000）
+- 分组：`md2zh_config` — `python_path`（必填）+ `ambiguous_content_decider`（user / ai）+ `output_dir`（选填，留空 = 源文件同级）+ `tree_translation`（选填，默认 true）+ `max_block_chars`（选填，默认 16000，正整数软目标，建议 10000–24000）
 - 全局 `scripts/config.py` 由 pipeline `configure` 子命令管理（首次配置向导写入）
 - 同步强制：首次运行时先跑 `scripts/check_config_sync.py`——`config.py` 与 `config.example.py` 的 `md2zh_config` **键集合与值类型**不一致（缺键 / 多余键 / 类型不符）即**中断任务**，补齐后再继续（只比结构，不比 `python_path` 占位符 vs 真实路径等值）
 - `configure` 支持 `--output-dir <目录>` / `--tree-translation true|false` / `--max-block-chars <N>` 临时覆盖（缺省保留现值，不会清空已配置值）
 - `configure` / `extract` 支持 `--config <path>` 临时指定配置文件（默认 `<skill>/scripts/config.py`；selftest 用其隔离真实配置，正常流程不使用）
-- `extract` 支持 `--tools-root <path>` 临时指定日志根目录（默认 `<skill>/debug`；仅 selftest 隔离用，正常流程不使用）
+- `extract` 支持 `--tools-root <path>` 临时指定日志根目录（默认 `<skill>/logs`；仅 selftest 隔离用，正常流程不使用）
+- `extract` 支持 `--glossary <path>` 指定树级共享术语表；不传则使用 `state.json` 同级的任务术语表
 
 ## 测试（本地）
 
@@ -223,14 +289,23 @@ render 输出后、清理前，**AI 通读完整译文**（含长文档每个一
 
 **修改 `scripts/*.py` 后必须运行并全绿。**
 
+发布前对**待发布暂存目录**运行只读检查（不要把安装态含真实 `config.py` / `logs` 的目录直接当作发布包）：
+
+```powershell
+& "<python>" "<skill-directory>/scripts/package_check.py" --root "<待发布目录>"
+```
+
+退出码 0 = 通过，1 = 发现禁项，2 = 用法或读取错误。检查器先按路径拒绝并跳过 `config.py`、`logs`、缓存和禁用目录，不读取其内容；随后只扫描允许的文本配置文件，拒绝非占位 Token 或其他敏感赋值。
+
 ## 容错与安全
 
 - **失败隔离**：单块翻译/验证失败只改该块 manifest 条目，初始尝试 + 最多 2 轮修正；已接受块不重启，绝不因单块失败重跑整篇。
 - **断点续传**：`plan-blocks` 重跑保留已接受块（提取计划不变时）；中断后可恢复。
-- **结构摘要**：`summarize` 输出标题树/章节字符统计/默认分块方案，AI 审阅确认或给调整指令；无调整用默认方案。
+- **结构摘要**：`summarize` 输出标题树/章节字符统计/默认分块方案，AI 审阅并确认采用默认方案。
 - **决策日志**：所有 accepted / rejected / retried 决策持久化在 `<skill-directory>/logs/decision_logs/*.jsonl`，任务完成后保留（诊断与规则改进用）。
 - **编码安全**：译文必须 UTF-8 直接写入 `*.output.txt`，禁止经 shell 管道/heredoc 传输（防编码错乱）；`validate-block` 是编码与契约闸门。
 - **凭据安全**：真实配置只存在于 `scripts/config.py`（gitignore 排除）；`config.example.py` 用占位符，禁止出现真实路径/密钥。不把文档内容发送给外部机器翻译服务。
+- **安全解析与发布**：配置只按 AST 字面量解析，不执行 Python 配置代码；发布暂存目录必须通过 `package_check.py`，禁项只按路径报告且不读取内容。
 
 ## 任务产物与清理
 
@@ -239,10 +314,12 @@ render 输出后、清理前，**AI 通读完整译文**（含长文档每个一
 ├── decision_logs/           # 决策日志 *.jsonl（完成后保留）
 ├── intermediate/
 │   └── <task-id>/           # 单次任务目录（含 state/blocks、run/、summary.md、review.md、translations.json、candidate.md）
-└── _archive/                # 已完成任务的归档（最多 20 个条目，超出删最旧）
+│       ├── glossary.json    # 单任务术语表，或共享树级术语表的归档快照
+│       └── completion.json  # merge/render/verify/review 哈希绑定完成标记
+└── _archive/                # 已完成任务的只增归档；同名追加唯一后缀
 ```
 
-- `cleanup-run` 把**本任务目录** `<task-id>/` 移入 `_archive/`，要求所有块 accepted 且传入精确的 `<task-id>/run/manifest.json`。
+- `cleanup-run` 把**本任务目录** `<task-id>/` 移入 `_archive/`，要求所有块 accepted、四阶段完成标记有效，且传入精确的 `<task-id>/run/manifest.json`。
 - **残留任务清理**：`intermediate/` 中**非本次任务**或**已确认弃用**的任务目录，任务结束后人工清理（删除，或移入 `_archive/` 便于排查）；`cleanup-run` 拒收的 unfinished 任务（未完成块）需先处理未完成块，或确认弃用后人工删除——不留残留，避免 `intermediate/` 日积月累堆积。
 - **保留**：全部决策日志、源文件、非本任务数据、最终输出。
 - **历史遗留**：旧版项目级 `{项目根}/.md2zh_tools/config.json` 不再读取，可直接删除。
@@ -262,12 +339,16 @@ md2zh/
 │   └── translation-quality.md  # 翻译质量评判标准（翻译前必读：硬性/流畅性/风格/自检）
 └── scripts/
     ├── config.py               # 真实配置（不提交，从 example 拷贝）
+    ├── config_literal.py       # AST + literal_eval 安全配置解析（不执行配置代码）
     ├── check_config_sync.py    # 配置同步强制检查（首次运行时门禁）
+    ├── package_check.py        # 待发布目录只读敏感文件/值检查
     ├── md2zh_pipeline.py       # 分块/保护/校验 pipeline（纯标准库 Python）
     ├── scan_visible.py         # 扫描块 input.txt 列出可见文本段（供翻译）
     ├── apply_translations.py   # 按 SEG 映射生成 output.txt（译文写回，支持多行段）
     └── test/
-        └── selftest.py         # 离线黑盒测试（改脚本后必须全绿）
+        ├── selftest.py         # 离线黑盒测试（改脚本后必须全绿）
+        ├── test_config_sync.py # 配置结构检查测试（只用临时 fixture）
+        └── test_packaging.py   # 发布检查测试（只用临时 fixture）
 忽略规则（.gitignore）位于仓库根目录：`md2zh/scripts/config.py` 与 `md2zh/logs/` 被排除。
 ```
 

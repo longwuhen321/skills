@@ -12,9 +12,10 @@
 退出码：0 = 同步；1 = 存在差异；2 = 无法验证（文件缺失/损坏）
 """
 import argparse
-import ast
 import sys
 from pathlib import Path
+
+from config_literal import LiteralConfigError, parse_config_group
 
 if sys.platform == 'win32':
     sys.stdin.reconfigure(encoding='utf-8', errors='replace')
@@ -30,17 +31,13 @@ class ConfigUnverifiable(Exception):
 def parse_config_text(text, group=DEFAULT_GROUP):
     """解析 Python 配置文件文本，返回 group 分组 dict（键→值类型）。
 
-    与 md2zh_pipeline.py load_global_config() 同样用 exec 提取，只保留指定分组。
-    损坏（语法错误等）抛 ConfigUnverifiable。
+    与 md2zh_pipeline.py load_global_config() 共用 AST 字面量解析器。
+    import、函数调用、副作用语句与损坏语法均抛 ConfigUnverifiable。
     """
     try:
-        ns = {}
-        exec(text, ns)
-    except Exception as e:
+        cfg = parse_config_group(text, group)
+    except LiteralConfigError as e:
         raise ConfigUnverifiable(f"配置解析失败: {e}")
-    cfg = ns.get(group)
-    if not isinstance(cfg, dict):
-        raise ConfigUnverifiable(f"{group} 分组缺失或不是 dict")
     return {k: type(v).__name__ for k, v in cfg.items()}
 
 

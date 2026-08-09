@@ -56,6 +56,11 @@ def _fenced_code_spans(text):
     return _scan_fenced_code(text)[0]
 
 
+def markdown_fenced_code_spans(text):
+    """Return fenced-code spans, including an unclosed fence through EOF."""
+    return _fenced_code_spans(text)
+
+
 def unclosed_fence_start(text):
     """Return the source offset of an unclosed fence, or None."""
     return _scan_fenced_code(text)[1]
@@ -111,7 +116,7 @@ def _inline_code_spans(text, fenced_spans):
 
 def markdown_code_spans(text):
     """Return sorted, non-overlapping fenced and inline code spans."""
-    fenced = _fenced_code_spans(text)
+    fenced = markdown_fenced_code_spans(text)
     return sorted(fenced + _inline_code_spans(text, fenced))
 
 

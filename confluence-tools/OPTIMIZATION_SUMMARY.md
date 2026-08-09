@@ -343,4 +343,4 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 - Confluence：9.2.1（Data Center，build 9109），PAT Bearer 认证
 - Python：`<python 解释器路径>`（需安装 requests / markdown2）
-- 测试命令：`"<python>" scripts/debug/selftest.py` → 全部用例通过
+- 测试命令：`"<python>" -X utf8 scripts/test/selftest.py` → 全部用例通过

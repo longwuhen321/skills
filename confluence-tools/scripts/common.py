@@ -9,6 +9,9 @@
 import os
 import sys
 import time
+from urllib.parse import urljoin
+
+from config_parser import ConfigParseError, parse_config_text
 
 SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(SKILL_ROOT, 'scripts', 'config.py')
@@ -63,36 +66,82 @@ def request_with_retry(session, method, url, max_retries=3, timeout=DEFAULT_TIME
     return resp
 
 
+def collect_paginated_results(session, url, *, base_url=None, params=None,
+                              headers=None, page_size=200):
+    """Fetch every ``results`` page and propagate request/JSON errors.
+
+    Confluence endpoints vary: newer responses expose ``_links.next`` while
+    older ones require ``start``/``limit`` pagination until an empty page.
+    """
+    all_results = []
+    request_url = url
+    request_params = dict(params or {})
+    request_params.setdefault('limit', page_size)
+    request_params.setdefault('start', 0)
+    fallback_start = int(request_params['start'])
+    while True:
+        resp = request_with_retry(
+            session, 'GET', request_url, params=request_params or None,
+            headers=headers, retry_on=(429, 500, 502, 503, 504))
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get('results')
+        if not isinstance(results, list):
+            raise ValueError(f"分页响应缺少 results 列表: {request_url}")
+        all_results.extend(results)
+
+        links = data.get('_links')
+        next_link = links.get('next') if isinstance(links, dict) else None
+        if next_link:
+            request_url = urljoin(base_url or request_url, next_link)
+            request_params = None
+            continue
+        if isinstance(links, dict) or not results:
+            break
+
+        limit = int(request_params.get('limit', page_size))
+        fallback_start += limit
+        request_params = dict(params or {})
+        request_params['limit'] = limit
+        request_params['start'] = fallback_start
+    return all_results
+
+
+def collect_space_page_records(session, base_url, space_key, headers=None,
+                               page_size=200):
+    """Return complete page records including direct parent metadata."""
+    if not space_key:
+        raise ValueError('空间 Key 为空，无法收集页面')
+    rows = collect_paginated_results(
+        session, f"{base_url}/rest/api/content", base_url=base_url,
+        headers=headers, page_size=page_size,
+        params={
+            'spaceKey': space_key,
+            'type': 'page',
+            'expand': 'version,ancestors',
+            'limit': page_size,
+        })
+    records = []
+    for row in rows:
+        ancestors = row.get('ancestors') or []
+        records.append({
+            'id': str(row['id']),
+            'title': row['title'],
+            'version': row['version']['number'],
+            'parent_id': str(ancestors[-1]['id']) if ancestors else None,
+        })
+    return records
+
+
 def collect_space_pages(session, base_url, space_key, headers=None, page_size=200):
     """分页拉取空间内全部页面元数据，返回 [(id, title, version), ...]
 
     供 md_import（标题内存匹配）与 math_upgrade（空间批量升级）共用。
     空间页数多时可能触发 429，已内置重试。
     """
-    if not space_key:
-        print("❌ 空间 Key 为空，无法收集页面")
-        return []
-    all_pages = []
-    start = 0
-    url = f"{base_url}/rest/api/content"
-    while True:
-        params = {
-            'spaceKey': space_key,
-            'type': 'page',
-            'limit': page_size,
-            'start': start,
-            'expand': 'version',
-        }
-        resp = request_with_retry(session, 'GET', url, params=params, headers=headers,
-                                  retry_on=(429, 500, 502, 503, 504))
-        resp.raise_for_status()
-        results = resp.json().get('results', [])
-        if not results:
-            break
-        all_pages.extend(
-            (r['id'], r['title'], r['version']['number']) for r in results)
-        start += page_size
-    return all_pages
+    records = collect_space_page_records(
+        session, base_url, space_key, headers=headers, page_size=page_size)
+    return [(row['id'], row['title'], row['version']) for row in records]
 
 
 def fetch_page(session, base_url, page_id, expand='body.storage,version,space'):
@@ -127,31 +176,33 @@ def load_config():
         export_config   — md_export 专属（输出目录、递归、空间）
         debug_config    — 调试日志（阈值、保留数）
 
-    返回值即为这四个 dict 组成的 dict，脚本按需取用。
+    返回值即为这五个 dict 组成的 dict，脚本按需取用。
     缺失文件时报错退出并引导用户首次配置。
     """
     if not os.path.exists(CONFIG_PATH):
         print(f"❌ 找不到配置文件: {CONFIG_PATH}")
-        print("   请先运行 /confluence-tools 完成首次配置")
+        print("   请先运行 $confluence-tools 完成首次配置")
         print("   或手动复制 config.example.py → scripts/config.py 后填入真实值")
         sys.exit(1)
 
     try:
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-            exec(f.read(), ns := {})
-    except Exception as e:
+            ns = parse_config_text(f.read())
+    except (OSError, ConfigParseError) as e:
         print(f"❌ 配置文件读取失败: {e}")
         sys.exit(1)
 
     # 组装为嵌套 dict
     common = ns.get('common_config', {})
-    if not common.get('confluence_url') or not common.get('confluence_token'):
-        print("❌ common_config 缺少 confluence_url 或 confluence_token")
-        print("   请先运行 /confluence-tools 完成首次配置")
-        sys.exit(1)
 
     # 环境变量覆盖真实凭据（优先于 config.py），共享机器/CI 上可不落盘 token
     env_token = os.environ.get('CONFLUENCE_TOKEN')
+    effective_token = env_token or common.get('confluence_token')
+    if not common.get('confluence_url') or not effective_token:
+        print("❌ common_config 缺少 confluence_url 或 confluence_token")
+        print("   请先运行 $confluence-tools 完成首次配置")
+        sys.exit(1)
+
     if env_token:
         common['confluence_token'] = env_token
 

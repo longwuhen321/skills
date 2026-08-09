@@ -8,7 +8,7 @@ Confluence → Markdown 导出工具 (Confluence 9.x)
 - toc 宏 → [toc]
 - note / info / warning / tip 等提示宏 → 引用块
 - 图片附件下载到 <标题>.assets/，md 内引用改写为相对路径
-- 输出目录结构：<标题>/<标题>.md + <标题>.assets/（与 web2md / md_import --dir 对齐，
+- 输出目录结构：<page_id>_<标题>/<标题>.md + <标题>.assets/（页面 ID 防同名覆盖，
   导出的目录树可直接用 md_import --dir 反向导入）
 
 用法:
@@ -27,6 +27,10 @@ import json
 import argparse
 import secrets
 import datetime
+
+from dependency_check import require_dependencies
+require_dependencies()
+
 import requests
 from pathlib import Path
 
@@ -34,18 +38,11 @@ from pathlib import Path
 if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-try:
-    from bs4 import BeautifulSoup
-    import markdownify
-    _DEPS_OK = True
-except ImportError:
-    # 依赖缺失：不在 import 时退出（selftest 等场景仍可导入），启动/实例化时明确提示
-    BeautifulSoup = None
-    markdownify = None
-    _DEPS_OK = False
+from bs4 import BeautifulSoup
+import markdownify
 
 from common import (SKILL_ROOT, load_config, request_with_retry,
-                    collect_space_pages, fetch_page)
+                    collect_space_pages, collect_paginated_results, fetch_page)
 from debug_utils import cleanup_debug
 
 
@@ -53,9 +50,6 @@ class ConfluenceExporter:
     """Confluence 页面 → Typora 兼容 Markdown 导出器"""
 
     def __init__(self, space_key=None, recursive=None, output_dir=None):
-        if not _DEPS_OK:
-            sys.exit("❌ 缺少依赖 beautifulsoup4 / markdownify：请先安装 "
-                     '"<python路径>" -m pip install beautifulsoup4 markdownify')
         cfg = load_config()
         common = cfg['common_config']
         export_cfg = cfg.get('export_config', {})
@@ -90,6 +84,7 @@ class ConfluenceExporter:
         # 统计
         self.stats = {'pages': 0, 'images': 0, 'failed_images': 0,
                       'skipped_macros': set()}
+        self.failed_pages = []
 
     # ── 1. 数据获取 ──
 
@@ -100,35 +95,27 @@ class ConfluenceExporter:
     def get_child_pages(self, page_id):
         """拉取直接子页面，返回 [(id, title), ...]"""
         url = f"{self.base_url}/rest/api/content/{page_id}/child/page"
-        resp = request_with_retry(self.session, 'GET', url,
-                                  params={'limit': 200},
-                                  retry_on=(429, 500, 502, 503, 504))
-        resp.raise_for_status()
-        return [(r['id'], r['title']) for r in resp.json().get('results', [])]
+        rows = collect_paginated_results(
+            self.session, url, base_url=self.base_url, params={'limit': 200})
+        return [(r['id'], r['title']) for r in rows]
 
     def fetch_attachments(self, page_id):
         """分页拉取页面全部附件列表"""
         if page_id in self._attachments_cache:
             return self._attachments_cache[page_id]
         url = f"{self.base_url}/rest/api/content/{page_id}/child/attachment"
-        result = []
-        while url:
-            resp = request_with_retry(self.session, 'GET', url,
-                                      params={'expand': 'version'},
-                                      retry_on=(429, 500, 502, 503, 504))
-            resp.raise_for_status()
-            data = resp.json()
-            result.extend(data.get('results', []))
-            nxt = data.get('_links', {}).get('next')
-            if not nxt:
-                break
-            url = nxt if nxt.startswith('http') else self.base_url + nxt
+        result = collect_paginated_results(
+            self.session, url, base_url=self.base_url,
+            params={'expand': 'version', 'limit': 200})
         self._attachments_cache[page_id] = result
         return result
 
     def _download_attachment(self, attachment, assets_dir):
         """下载单个附件到 assets 目录，返回本地文件名（{id}_{原名}）；失败返回 None"""
-        filename = f"{attachment['id']}_{attachment['title']}"
+        raw_title = str(attachment.get('title', '')).replace('\\', '/')
+        basename = self._sanitize_filename(raw_title.rsplit('/', 1)[-1])
+        safe_id = re.sub(r'[^A-Za-z0-9_-]', '_', str(attachment.get('id', 'attachment')))
+        filename = f"{safe_id}_{basename}"
         dl = attachment.get('_links', {}).get('download')
         if not dl:
             print(f"  ⚠️ 附件无下载链接: {attachment.get('title')}")
@@ -138,7 +125,13 @@ class ConfluenceExporter:
             resp = request_with_retry(self.session, 'GET', url, stream=True,
                                       timeout=60, retry_on=(429, 500, 502, 503, 504))
             resp.raise_for_status()
-            with open(assets_dir / filename, 'wb') as f:
+            assets_root = Path(assets_dir).resolve()
+            destination = (assets_root / filename).resolve()
+            try:
+                destination.relative_to(assets_root)
+            except ValueError:
+                raise ValueError(f'附件路径越界: {filename}')
+            with open(destination, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
@@ -252,11 +245,23 @@ class ConfluenceExporter:
             elif name == 'anchor':
                 macro.decompose()
             else:
-                # 未知宏：占位符还原为注释（markdownify 会把 HTML 注释当纯文本，直接替换会丢标记）
+                # 未知宏：保留正文，并在正文前放可还原的原始 XHTML 注释。
+                raw_xhtml = str(macro)
+                for i, cdata in enumerate(self._cdata):
+                    raw_xhtml = raw_xhtml.replace(
+                        self._placeholder('CDATA', i), cdata)
+                encoded_xhtml = html.escape(raw_xhtml, quote=False).replace(
+                    '--', '&#45;&#45;')
                 p = ph('UNK')
-                unknowns.append((p, name))
+                unknowns.append((p, name, encoded_xhtml))
                 div = soup.new_tag('div')
-                div.string = p
+                marker = soup.new_tag('span')
+                marker.string = p
+                div.append(marker)
+                body = macro.find(['ac:rich-text-body', 'ac:plain-text-body'])
+                if body is not None:
+                    for child in list(body.children):
+                        div.append(child.extract())
                 macro.replace_with(div)
                 self.stats['skipped_macros'].add(name)
 
@@ -308,6 +313,16 @@ class ConfluenceExporter:
             a.string = text
             link.replace_with(a)
 
+        # ri:url may also appear directly inside an unknown macro body.
+        for ri in soup.find_all('ri:url'):
+            href = ri.get('ri:value', '')
+            if not href:
+                ri.decompose()
+                continue
+            a = soup.new_tag('a', href=href)
+            a.string = href
+            ri.replace_with(a)
+
     def _code_language_callback(self, el):
         """markdownify 的 convert_pre 把 <pre> 元素传给回调，需从内部
         <code class="language-xx"> 提取语言（新版 markdownify 默认无提取）"""
@@ -320,23 +335,36 @@ class ConfluenceExporter:
         return ''
 
     def _convert_images(self, soup, page_id, page_dir):
-        """把 <ac:image><ri:attachment> 下载为本地图片并改写为 <img>
+        """把附件或外链 ``ac:image`` 改写为 ``img``。
 
         assets 目录懒创建：页面无图时不产生 <标题>.assets/ 文件夹。
         """
-        assets_dir = page_dir / f"{page_dir.name}.assets"
-        attachments = self.fetch_attachments(page_id)
-        by_name = {a.get('title'): a for a in attachments}
+        title = page_dir.name.split('_', 1)[1] if '_' in page_dir.name else page_dir.name
+        assets_dir = page_dir / f"{title}.assets"
+        by_name = None
         for image in soup.find_all('ac:image'):
             ri = image.find('ri:attachment')
+            ri_url = image.find('ri:url')
+            alt_param = image.find('ac:parameter', {'ac:name': 'alt'})
+            alt = (image.get('ac:alt')
+                   or (alt_param.get_text(strip=True)
+                       if alt_param and alt_param.get_text(strip=True) else ''))
+            if ri is None and ri_url is not None:
+                external_url = ri_url.get('ri:value', '').strip()
+                if external_url:
+                    img = soup.new_tag(
+                        'img', src=external_url, alt=alt or '图片')
+                    image.replace_with(img)
+                    continue
             if ri is None:
-                image.decompose()
+                self.stats['failed_images'] += 1
+                image.replace_with('<!-- 图片未导出: 缺少附件或外链地址 -->')
                 continue
             filename = ri.get('ri:filename', '')
-            alt_param = image.find('ac:parameter', {'ac:name': 'alt'})
-            alt = (alt_param.get_text(strip=True)
-                   if alt_param and alt_param.get_text(strip=True)
-                   else (filename or '图片'))
+            alt = alt or filename or '图片'
+            if by_name is None:
+                attachments = self.fetch_attachments(page_id)
+                by_name = {a.get('title'): a for a in attachments}
             att = by_name.get(filename)
             if att:
                 assets_dir.mkdir(parents=True, exist_ok=True)
@@ -346,7 +374,7 @@ class ConfluenceExporter:
                     image.replace_with(img)
                     self.stats['images'] += 1
                     continue
-                self.stats['failed_images'] += 1
+            self.stats['failed_images'] += 1
             image.replace_with(f'<!-- 图片未导出: {filename or "?"} -->')
 
     def _protect_complex_tables(self, soup):
@@ -391,14 +419,18 @@ class ConfluenceExporter:
 
         self._drop_empty_pres(soup)
         math_blocks, math_inlines, codes, tocs, unknowns = self._convert_macros(soup)
-        self._convert_links(soup)
         self._convert_images(soup, page_id, page_dir)
+        self._convert_links(soup)
         tables = self._protect_complex_tables(soup)
 
         md = markdownify.MarkdownConverter(
             heading_style='ATX', bullets='-',
             code_language_callback=self._code_language_callback)
         text = md.convert(str(soup))
+
+        # 先整理结构空行。此时公式/代码/表格等载荷仍是单行占位符，
+        # 因而不会压缩代码或公式载荷内部的空行。
+        text = re.sub(r'\n{3,}', '\n\n', text)
 
         # 还原占位符（公式/代码/[toc]/未知宏注释/HTML 表格 原样输出，避免被 markdownify 转义）
         # 注意顺序：HTML 表格先还原（其内部可能含 CODE/MI/MB/TOC 等占位符），
@@ -413,22 +445,29 @@ class ConfluenceExporter:
             text = text.replace(p, content)
         for p in tocs:
             text = text.replace(p, '[toc]')
-        for p, name in unknowns:
-            text = text.replace(p, f'<!-- 未处理的宏: {name} -->')
+        for p, name, encoded_xhtml in unknowns:
+            safe_name = re.sub(r'-{2,}', '-', name).rstrip('-') or 'unknown'
+            text = text.replace(
+                p,
+                f'<!-- 未处理的宏: {safe_name}\n'
+                f'原始 Confluence XHTML: {encoded_xhtml} -->')
         for i, c in enumerate(self._cdata):
             text = text.replace(self._placeholder('CDATA', i), c)
 
-        # 整理空行与首尾空白
-        text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip() + '\n'
 
     # ── 3. 导出流程 ──
 
     def _sanitize_filename(self, name):
-        """移除非法文件名字符"""
+        """移除非法字符并避开 Windows 保留设备名。"""
         name = re.sub(r'[<>:"/\\|?*]', '', name).strip()
         name = re.sub(r'\s+', ' ', name)
-        return name or 'untitled'
+        name = name.rstrip(' .') or 'untitled'
+        stem = name.split('.', 1)[0].upper()
+        if (stem in {'CON', 'PRN', 'AUX', 'NUL'}
+                or re.fullmatch(r'(?:COM|LPT)[1-9]', stem)):
+            name = '_' + name
+        return name
 
     def _front_matter(self, page):
         """Typora front-matter：title（JSON 转义防冒号/引号破坏 YAML）、date、math"""
@@ -450,13 +489,20 @@ class ConfluenceExporter:
             f.write(page['storage'])
         return path
 
-    def export_page(self, page_id, parent_path=None):
+    def export_page(self, page_id, parent_path=None, recursive=None, _visited=None):
         """导出单页（recursive 时递归子页面），返回 md 文件路径"""
+        if _visited is None:
+            _visited = set()
+        page_id = str(page_id)
+        if page_id in _visited:
+            print(f"⚠️ 跳过重复页面 ID: {page_id}")
+            return None
+        _visited.add(page_id)
         parent = Path(parent_path) if parent_path else self.output_dir
         page = self.fetch_page(page_id)
         self._save_storage_debug(page)
         title = self._sanitize_filename(page['title'])
-        page_dir = parent / title
+        page_dir = parent / f"{page_id}_{title}"
         page_dir.mkdir(parents=True, exist_ok=True)
 
         md_text = self._convert_storage_to_markdown(page['storage'], page_dir, page_id)
@@ -465,9 +511,15 @@ class ConfluenceExporter:
         self.stats['pages'] += 1
         print(f"✅ {page['title']} → {md_path}")
 
-        if self.recursive:
+        use_recursive = self.recursive if recursive is None else recursive
+        if use_recursive:
             for cid, _ct in self.get_child_pages(page_id):
-                self.export_page(cid, str(page_dir))
+                try:
+                    self.export_page(cid, str(page_dir), recursive=True,
+                                     _visited=_visited)
+                except Exception as exc:
+                    self.failed_pages.append((str(cid), str(exc)))
+                    print(f"❌ 子页面 {cid} 导出失败: {exc}")
         return md_path
 
     def export_space(self, space_key=None):
@@ -480,18 +532,25 @@ class ConfluenceExporter:
         print(f"📂 空间「{key}」共 {len(pages)} 个页面")
         for pid, _t, _v in pages:
             try:
-                self.export_page(pid)
+                # 空间清单已包含每一页；这里禁止再次递归，避免重复导出。
+                self.export_page(pid, recursive=False)
             except Exception as e:
                 print(f"❌ 页面 {pid} 导出失败: {e}")
+                self.failed_pages.append((str(pid), str(e)))
+        return not self.failed_pages and self.stats['failed_images'] == 0
 
     def _print_summary(self):
-        line = (f"📊 导出完成: {self.stats['pages']} 页, 下载图片 {self.stats['images']} 张"
+        line = (f"📊 导出结果: {self.stats['pages']} 页, 下载图片 {self.stats['images']} 张"
                 + (f", 图片失败 {self.stats['failed_images']} 张（md 中已保留注释）"
                    if self.stats['failed_images'] else ""))
         print(line)
         if self.stats['skipped_macros']:
             print("ℹ️ 未处理的宏（已在 md 中保留为注释）: "
                   + ', '.join(sorted(self.stats['skipped_macros'])))
+        if self.failed_pages:
+            print(f"❌ 导出失败页面: {len(self.failed_pages)}")
+            for page_id, reason in self.failed_pages:
+                print(f"  - {page_id}: {reason}")
 
 
 if __name__ == "__main__":
@@ -517,10 +576,17 @@ if __name__ == "__main__":
 
     exporter = ConfluenceExporter(space_key=args.space, recursive=args.recursive,
                                   output_dir=args.output)
+    ok = True
     try:
         if args.page_id:
             exporter.export_page(args.page_id)
+            ok = (not exporter.failed_pages
+                  and exporter.stats['failed_images'] == 0)
         else:
-            exporter.export_space(args.space)
+            ok = exporter.export_space(args.space)
+    except Exception as exc:
+        print(f"❌ 导出失败: {exc}")
+        ok = False
     finally:
         exporter._print_summary()
+    sys.exit(0 if ok else 1)

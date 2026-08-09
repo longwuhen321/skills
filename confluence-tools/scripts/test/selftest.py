@@ -33,6 +33,7 @@ from md_export import ConfluenceExporter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_config_sync import ConfigSyncTests
+import test_regressions
 
 MOCK_CFG = {
     'common_config': {
@@ -165,6 +166,17 @@ class TestCommon(unittest.TestCase):
                 cfg = load_config()
         self.assertEqual(cfg['common_config']['confluence_token'], 'env-token')
 
+    def test_env_token_allows_empty_file_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, 'config.py')
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                f.write("common_config = {'confluence_url': 'http://x',"
+                        " 'confluence_token': ''}\n")
+            with patch('common.CONFIG_PATH', cfg_path), \
+                 patch.dict(os.environ, {'CONFLUENCE_TOKEN': 'env-token'}):
+                cfg = load_config()
+        self.assertEqual(cfg['common_config']['confluence_token'], 'env-token')
+
     def test_env_token_not_set_uses_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = os.path.join(tmp, 'config.py')
@@ -195,9 +207,14 @@ class TestCommon(unittest.TestCase):
 class TestMdImport(unittest.TestCase):
 
     def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.skill_root_patcher = patch('md_import.SKILL_ROOT', self.tmp.name)
+        self.skill_root_patcher.start()
         self.load_patcher = patch('md_import.load_config', return_value=MOCK_CFG)
         self.load_patcher.start()
         self.importer = MarkdownImporter(space_key='TEST')
+        self.assertEqual(Path(self.importer.debug_dir),
+                         Path(self.tmp.name) / 'logs' / 'import')
         # 测试不写真实调试文件
         self.debug_patcher = patch.object(self.importer, '_save_debug_file')
         self.debug_patcher.start()
@@ -205,6 +222,8 @@ class TestMdImport(unittest.TestCase):
     def tearDown(self):
         self.debug_patcher.stop()
         self.load_patcher.stop()
+        self.skill_root_patcher.stop()
+        self.tmp.cleanup()
 
     def test_code_protect_restore_roundtrip(self):
         md = '```python\nprint("hi")\n```\n\nand `code` here'
@@ -353,17 +372,21 @@ class TestMdImport(unittest.TestCase):
 
 
     def test_find_page_memory_match(self):
-        with patch('md_import.collect_space_pages',
-                   return_value=[('1', 'Foo Page', 3), ('2', 'foo page', 5)]):
-            pid, ver = self.importer._find_page_by_title('Foo Page')
-            self.assertEqual((pid, ver), ('1', 3))
+        records = [
+            {'id': '1', 'title': 'Foo Page', 'version': 3, 'parent_id': None},
+            {'id': '2', 'title': 'Other', 'version': 5, 'parent_id': None},
+        ]
+        with patch('md_import.collect_space_page_records', return_value=records):
+            state, pid, ver = self.importer._find_page_by_title('Foo Page')
+            self.assertEqual((state, pid, ver), ('FOUND', '1', 3))
             # 大小写不敏感兜底
-            pid, ver = self.importer._find_page_by_title('FOO PAGE')
-            self.assertEqual((pid, ver), ('1', 3))
-            pid, ver = self.importer._find_page_by_title('Bar')
-            self.assertEqual((pid, ver), (None, None))
+            state, pid, ver = self.importer._find_page_by_title('FOO PAGE')
+            self.assertEqual((state, pid, ver), ('FOUND', '1', 3))
+            state, pid, ver = self.importer._find_page_by_title('Bar')
+            self.assertEqual((state, pid, ver), ('NOT_FOUND', None, None))
 
     def test_update_page_409_retries_once(self):
+        self.importer.force = True
         responses = [
             FakeResponse(409, text='version conflict'),
             FakeResponse(200, json_data={'id': '123', 'version': {'number': 8}}),
@@ -385,7 +408,8 @@ class TestMdImport(unittest.TestCase):
             md_path = f.name
         try:
             importer = self.importer
-            with patch.object(importer, '_find_page_by_title', return_value=('123', 3)):
+            with patch.object(importer, '_find_page_by_title',
+                              return_value=('FOUND', '123', 3)):
                 calls = []
                 def fake_update(page_id, title, content, version):
                     calls.append(version)
@@ -411,7 +435,8 @@ class TestMdImport(unittest.TestCase):
             with patch('md_import.load_config', return_value=cfg):
                 importer = MarkdownImporter(space_key='TEST')
             self.assertEqual(importer.default_parent_id, '777')
-            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
+            with patch.object(importer, '_find_page_by_title',
+                              return_value=('NOT_FOUND', None, None)), \
                  patch.object(importer, '_create_page', return_value=('999', 1)) as cp:
                 page_id = importer.import_markdown(md_path)
             self.assertEqual(page_id, '999')
@@ -431,7 +456,8 @@ class TestMdImport(unittest.TestCase):
             with patch('md_import.load_config', return_value=cfg):
                 importer = MarkdownImporter(space_key='TEST')
             self.assertEqual(importer.default_page_name, 'Config Title')
-            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
+            with patch.object(importer, '_find_page_by_title',
+                              return_value=('NOT_FOUND', None, None)), \
                  patch.object(importer, '_create_page', return_value=('999', 1)) as cp:
                 importer.import_markdown(md_path)
             self.assertEqual(cp.call_args[0][0], 'Config Title')  # title 用配置值
@@ -450,7 +476,8 @@ class TestMdImport(unittest.TestCase):
         try:
             with patch('md_import.load_config', return_value=cfg):
                 importer = MarkdownImporter(space_key='TEST')
-            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
+            with patch.object(importer, '_find_page_by_title',
+                              return_value=('NOT_FOUND', None, None)), \
                  patch.object(importer, '_create_page', return_value=('999', 1)) as cp:
                 importer.import_markdown(md_path, parent_id='888', page_name='CLI Title')
             self.assertEqual(cp.call_args[0][0], 'CLI Title')  # 标题被 CLI 覆盖
@@ -505,11 +532,11 @@ class TestMdImport(unittest.TestCase):
         importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
         node = {'name': 'Parent', 'md_path': 'P.md',
                 'children': [{'name': 'Child', 'md_path': 'C.md', 'children': []}]}
-        with patch.object(importer, '_find_page_by_title',
-                          side_effect=lambda t: ('11', 3) if t == 'Parent' else ('22', 3)), \
-             patch.object(importer, '_get_page_parent',
-                          side_effect=lambda pid: (None, None) if pid == '11' else ('99', 'Elsewhere')):
-            plan = importer._build_plan(node)
+        importer._page_records = [
+            {'id': '11', 'title': 'Parent', 'version': 3, 'parent_id': None},
+            {'id': '22', 'title': 'Child', 'version': 3, 'parent_id': '99'},
+        ]
+        plan = importer._build_plan(node)
         self.assertEqual(plan['status'], 'update')                    # Parent 命中且在根
         self.assertEqual(plan['children'][0]['status'], 'move')        # Child 命中但父级不符
 
@@ -523,8 +550,8 @@ class TestMdImport(unittest.TestCase):
             importer = None
             with patch('md_import.load_config', return_value=self._tree_cfg()):
                 importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
-            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
-                 patch.object(importer, '_create_page',
+            importer._page_records = []
+            with patch.object(importer, '_create_page',
                               side_effect=lambda t, c, pid: (str(len(importer._title_id_map) + 100), 1)) as cp, \
                  patch.object(importer, '_convert_md_links', side_effect=lambda h, p, pid: h):
                 importer.import_tree(td, yes=True)
@@ -538,9 +565,9 @@ class TestMdImport(unittest.TestCase):
             (root / 'Parent.md').write_text('# p', encoding='utf-8')
             with patch('md_import.load_config', return_value=self._tree_cfg()):
                 importer = MarkdownImporter(space_key='TEST', fix_hierarchy='off')
-            with patch.object(importer, '_find_page_by_title', return_value=('11', 3)), \
-                 patch.object(importer, '_get_page_parent', return_value=('99', 'Elsewhere')), \
-                 patch.object(importer, '_update_page', side_effect=lambda *a, **k: ('11', 4)) as up, \
+            importer._page_records = [
+                {'id': '11', 'title': root.name, 'version': 3, 'parent_id': '99'}]
+            with patch.object(importer, '_update_page', side_effect=lambda *a, **k: ('11', 4)) as up, \
                  patch.object(importer, '_convert_md_links', side_effect=lambda h, p, pid: h):
                 importer.import_tree(td, yes=True)
             self.assertNotIn('ancestors', up.call_args.kwargs)   # off：不移动
@@ -556,11 +583,11 @@ class TestMdImport(unittest.TestCase):
             (child / 'Child.md').write_text('# c', encoding='utf-8')
             with patch('md_import.load_config', return_value=self._tree_cfg()):
                 importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
-            with patch.object(importer, '_find_page_by_title',
-                              side_effect=lambda t: ('111' if t == 'Parent' else '222', 3)), \
-                 patch.object(importer, '_get_page_parent',
-                              side_effect=lambda pid: (None, None) if pid == '111' else ('999', 'Elsewhere')), \
-                 patch.object(importer, '_update_page',
+            importer._page_records = [
+                {'id': '111', 'title': 'Parent', 'version': 3, 'parent_id': None},
+                {'id': '222', 'title': 'Child', 'version': 3, 'parent_id': '999'},
+            ]
+            with patch.object(importer, '_update_page',
                               side_effect=lambda *a, **k: (a[0], a[3] + 1)) as up, \
                  patch.object(importer, '_convert_md_links', side_effect=lambda h, p, pid: h):
                 importer.import_tree(str(parent_dir), yes=True)
@@ -573,9 +600,9 @@ class TestMdImport(unittest.TestCase):
             (root / 'Parent.md').write_text('# p', encoding='utf-8')
             with patch('md_import.load_config', return_value=self._tree_cfg()):
                 importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
-            with patch.object(importer, '_find_page_by_title', return_value=('11', 3)), \
-                 patch.object(importer, '_get_page_parent', return_value=('99', 'Elsewhere')), \
-                 patch.object(importer, '_update_page', side_effect=lambda *a, **k: ('11', 4)) as up, \
+            importer._page_records = [
+                {'id': '11', 'title': root.name, 'version': 3, 'parent_id': '99'}]
+            with patch.object(importer, '_update_page', side_effect=lambda *a, **k: ('11', 4)) as up, \
                  patch.object(importer, '_convert_md_links', side_effect=lambda h, p, pid: h):
                 with patch('builtins.input', return_value='n') as inp:
                     importer.import_tree(td)
@@ -588,8 +615,8 @@ class TestMdImport(unittest.TestCase):
             (root / 'Parent.md').write_text('# p', encoding='utf-8')
             with patch('md_import.load_config', return_value=self._tree_cfg()):
                 importer = MarkdownImporter(space_key='TEST')
-            with patch.object(importer, '_find_page_by_title', return_value=(None, None)), \
-                 patch.object(importer, '_create_page') as cp, \
+            importer._page_records = []
+            with patch.object(importer, '_create_page') as cp, \
                  patch.object(importer, '_update_page') as up:
                 importer.import_tree(td, plan_only=True)
             cp.assert_not_called()
@@ -663,12 +690,19 @@ class TestMdImport(unittest.TestCase):
 class TestMathUpgrade(unittest.TestCase):
 
     def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.skill_root_patcher = patch('math_upgrade.SKILL_ROOT', self.tmp.name)
+        self.skill_root_patcher.start()
         self.load_patcher = patch('math_upgrade.load_config', return_value=MOCK_CFG)
         self.load_patcher.start()
         self.updater = ConfluenceMathUpdater(math_align='left')
+        self.assertEqual(Path(self.updater.debug_dir),
+                         Path(self.tmp.name) / 'logs' / 'upgrade')
 
     def tearDown(self):
         self.load_patcher.stop()
+        self.skill_root_patcher.stop()
+        self.tmp.cleanup()
 
     def test_block_template_left_uses_native_alignment(self):
         left = build_block_template('left')
@@ -875,6 +909,8 @@ class TestMdExport(unittest.TestCase):
         self.skill_root_patcher = patch('md_export.SKILL_ROOT', self.tmp.name)
         self.skill_root_patcher.start()
         self.exporter = ConfluenceExporter(output_dir=self.tmp.name)
+        self.assertEqual(Path(self.exporter.debug_dir),
+                         Path(self.tmp.name) / 'logs' / 'export')
         self.att_patcher = patch.object(self.exporter, 'fetch_attachments',
                                         return_value=[])
         self.att_patcher.start()
@@ -978,7 +1014,9 @@ class TestMdExport(unittest.TestCase):
                 '<ac:parameter ac:name="x">1</ac:parameter>'
                 '</ac:structured-macro>')
         md = self._convert(html)
-        self.assertIn('<!-- 未处理的宏: unknown-macro -->', md)
+        self.assertIn('<!-- 未处理的宏: unknown-macro', md)
+        self.assertIn('原始 Confluence XHTML:', md)
+        self.assertIn('&lt;ac:structured-macro', md)
         self.assertIn('unknown-macro', self.exporter.stats['skipped_macros'])
 
     def test_image_download_rewrites_reference(self):
@@ -1055,7 +1093,7 @@ class TestMdExport(unittest.TestCase):
         with patch.object(self.exporter, 'fetch_page', return_value=page), \
              patch.object(self.exporter, 'get_child_pages', return_value=[]):
             md_path = self.exporter.export_page('5')
-        md_path = Path(self.tmp.name) / '测试页' / '测试页.md'
+        md_path = Path(self.tmp.name) / '5_测试页' / '测试页.md'
         self.assertTrue(md_path.exists())
         text = md_path.read_text(encoding='utf-8')
         self.assertIn('title: "测试页"', text)
@@ -1096,11 +1134,13 @@ class TestMdExport(unittest.TestCase):
                           side_effect=[[('6', '子页')], []]):
             self.exporter.export_page('5')
         root = Path(self.tmp.name)
-        self.assertTrue((root / '父页' / '父页.md').exists())
-        self.assertTrue((root / '父页' / '子页' / '子页.md').exists())
+        self.assertTrue((root / '5_父页' / '父页.md').exists())
+        self.assertTrue((root / '5_父页' / '6_子页' / '子页.md').exists())
 
 
 if __name__ == '__main__':
-    suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
-    suite.addTests(unittest.TestLoader().loadTestsFromTestCase(ConfigSyncTests))
-    unittest.TextTestRunner(verbosity=2).run(suite)
+    loader = unittest.TestLoader()
+    suite = loader.loadTestsFromModule(sys.modules[__name__])
+    suite.addTests(loader.loadTestsFromModule(test_regressions))
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)
