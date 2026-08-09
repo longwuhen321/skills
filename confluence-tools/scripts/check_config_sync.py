@@ -8,13 +8,15 @@
 
 用法：python check_config_sync.py --groups common_config,import_config,...
      （可选 --example-file / --config-file 指定对比文件；--config-text 从 stdin 读取真实配置；
-       --groups 指定要检查的分组名（逗号分隔），默认全部）
+       --groups 指定要检查的分组名（逗号分隔），默认固定检查全部五分组）
 
 退出码：0 = 同步；1 = 存在差异；2 = 无法验证（文件缺失/损坏）
 """
 import argparse
 import sys
 from pathlib import Path
+
+from config_parser import ConfigParseError, parse_config_text as parse_literal_config
 
 if sys.platform == 'win32':
     sys.stdin.reconfigure(encoding='utf-8', errors='replace')
@@ -25,16 +27,24 @@ class ConfigUnverifiable(Exception):
     """config 文件缺失或损坏，无法完成对比。"""
 
 
+DEFAULT_GROUPS = (
+    'common_config',
+    'import_config',
+    'upgrade_config',
+    'export_config',
+    'debug_config',
+)
+
+
 def parse_config_text(text):
     """解析 Python 配置文件文本，返回 {分组名: {键: 类型名}} 嵌套 dict。
 
-    与 common.py load_config() 同样用 exec 提取，保留所有分组字典。
+    与 common.py load_config() 共用 AST + literal_eval 解析，保留所有分组字典。
     损坏（语法错误等）抛 ConfigUnverifiable。
     """
     try:
-        ns = {}
-        exec(text, ns)
-    except Exception as e:
+        ns = parse_literal_config(text)
+    except ConfigParseError as e:
         raise ConfigUnverifiable(f"配置解析失败: {e}")
     return {
         name: {k: type(v).__name__ for k, v in value.items()}
@@ -45,18 +55,31 @@ def parse_config_text(text):
 
 def read_config_file(path):
     """读取配置文件文本（显式 utf-8，Windows 无默认编码问题）。"""
-    return Path(path).read_text(encoding='utf-8')
+    try:
+        return Path(path).read_text(encoding='utf-8')
+    except (OSError, UnicodeError) as exc:
+        raise ConfigUnverifiable(f"无法读取 {path}: {exc}") from exc
 
 
 def check_config_sync(example_types, config_types, groups):
     """对比 example 与真实配置的键结构。返回 problems。
 
-    problems: [(category, group, key, detail)]，category ∈ missing / extra / type
+    problems: [(category, group, key, detail)]，
+    category ∈ missing-group / missing / extra / type
     """
     problems = []
     for group in groups:
-        ex = example_types.get(group, {})
-        cfg = config_types.get(group, {})
+        if group not in example_types:
+            problems.append(('missing-group', group, group,
+                             f"config.example.py 缺少请求分组 '{group}'"))
+        if group not in config_types:
+            problems.append(('missing-group', group, group,
+                             f"config.py 缺少请求分组 '{group}'"))
+        if group not in example_types or group not in config_types:
+            continue
+
+        ex = example_types[group]
+        cfg = config_types[group]
         for key in ex:
             if key not in cfg:
                 problems.append(('missing', group, key,
@@ -78,7 +101,7 @@ def main(argv=None):
     parser.add_argument('--config-text', action='store_true',
                         help='从 stdin 读取真实配置文本（供配置向导写入后复核）')
     parser.add_argument('--groups', default=None,
-                        help='要检查的分组名（逗号分隔，如 common_config,import_config；默认自动发现 example 中全部 *_config 分组）')
+                        help='要检查的分组名（逗号分隔，如 common_config,import_config；默认固定检查全部五分组）')
     args = parser.parse_args(argv)
 
     script_dir = Path(__file__).resolve().parent
@@ -109,9 +132,9 @@ def main(argv=None):
     if args.groups:
         groups = [g.strip() for g in args.groups.split(',') if g.strip()]
     else:
-        groups = sorted(example_types.keys())
+        groups = list(DEFAULT_GROUPS)
     if not groups:
-        print("❌ 未指定分组且 example 中未发现 *_config 分组")
+        print("❌ 没有可检查的配置分组")
         return 2
 
     problems = check_config_sync(example_types, config_types, groups)

@@ -7,7 +7,6 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 CHECKER = SCRIPT_DIR / 'check_config_sync.py'
 EXAMPLE = SCRIPT_DIR.parent / 'config.example.py'
-REAL_CONFIG = SCRIPT_DIR / 'config.py'
 
 
 def run_checker(args):
@@ -20,10 +19,13 @@ def run_checker(args):
 
 
 class ConfigSyncTests(unittest.TestCase):
-    def test_real_config_synced_passes(self):
-        """现状：真实 config.py 与 example 键集一致（5 个键），检查必须通过（退出码 0）。"""
-        result = run_checker([f'--example-file={EXAMPLE}', f'--config-file={REAL_CONFIG}'])
-        self.assertEqual(result.returncode, 0, result.stdout)
+    def test_example_derived_fixture_synced_passes(self):
+        """由脱敏 example 构造临时 config；测试不读取本机真实 config.py。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'config.py'
+            config.write_text(EXAMPLE.read_text(encoding='utf-8'), encoding='utf-8')
+            result = run_checker([f'--example-file={EXAMPLE}', f'--config-file={config}'])
+            self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_tmp_pair_synced_passes(self):
         """临时 example/config 键集一致 → 退出码 0。"""
@@ -89,8 +91,44 @@ class ConfigSyncTests(unittest.TestCase):
             result = run_checker([f'--example-file={example}', f'--config-file={config}'])
             self.assertEqual(result.returncode, 2)
 
+    def test_unsafe_python_is_rejected_without_side_effects(self):
+        """import/函数调用属于副作用代码；检查器拒绝且绝不执行。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            example = root / 'example.py'
+            config = root / 'config.py'
+            sentinel = root / 'must-not-exist.txt'
+            example.write_text("md2zh_config = {'python_path': 'x'}\n", encoding='utf-8')
+            config.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+                "md2zh_config = {'python_path': 'x'}\n",
+                encoding='utf-8',
+            )
+            result = run_checker([f'--example-file={example}', f'--config-file={config}'])
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('不允许', result.stdout)
+            self.assertFalse(sentinel.exists())
+
+    def test_annotation_call_is_rejected_without_running(self):
+        """类型注解中的函数调用也必须被语法门禁直接拒绝。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            example = root / 'example.py'
+            config = root / 'config.py'
+            sentinel = root / 'must-not-exist.txt'
+            example.write_text("md2zh_config = {'python_path': 'x'}\n", encoding='utf-8')
+            config.write_text(
+                f"md2zh_config: open({str(sentinel)!r}, 'w').write('executed') = "
+                "{'python_path': 'x'}\n",
+                encoding='utf-8',
+            )
+            result = run_checker([f'--example-file={example}', f'--config-file={config}'])
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse(sentinel.exists())
+
     def test_config_text_stdin(self):
-        """--config-text 从 stdin 读取真实配置：缺键判失败、补齐判通过。"""
+        """--config-text 从 stdin 读取临时配置文本：缺键判失败、补齐判通过。"""
         example_text = "md2zh_config = {'python_path': 'x', 'output_dir': ''}\n"
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'

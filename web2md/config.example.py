@@ -5,6 +5,8 @@
 #   1. 复制本文件到 scripts/config.py
 #   2. 将占位符替换为真实值
 #   3. scripts/config.py 不提交到 git（已在 .gitignore 中排除）
+# 安全格式：仅保留 web2md_config = {...} 这一项普通纯字面量字典赋值。
+# 带注解赋值、导入、函数调用、环境读取及其他可执行语句会被配置解析器拒绝。
 #
 # 配置分组说明：
 #   web2md_config — 通用配置（所有脚本共用）

@@ -7,7 +7,6 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 CHECKER = SCRIPT_DIR / 'check_config_sync.py'
 EXAMPLE = SCRIPT_DIR.parent / 'config.example.py'
-REAL_CONFIG = SCRIPT_DIR / 'config.py'
 
 
 def run_checker(args):
@@ -20,10 +19,13 @@ def run_checker(args):
 
 
 class ConfigSyncTests(unittest.TestCase):
-    def test_real_config_synced_passes(self):
-        """现状：真实 config.py 与 example 键集一致（6 个键），检查必须通过（退出码 0）。"""
-        result = run_checker([f'--example-file={EXAMPLE}', f'--config-file={REAL_CONFIG}'])
-        self.assertEqual(result.returncode, 0, result.stdout)
+    def test_example_derived_fixture_passes(self):
+        """由公开 example 构造临时配置，不读取本机 scripts/config.py。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'config.py'
+            config.write_text(EXAMPLE.read_text(encoding='utf-8'), encoding='utf-8')
+            result = run_checker([f'--example-file={EXAMPLE}', f'--config-file={config}'])
+            self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_tmp_pair_synced_passes(self):
         """临时 example/config 键集一致 → 退出码 0。"""
@@ -90,7 +92,7 @@ class ConfigSyncTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
 
     def test_config_text_stdin(self):
-        """--config-text 从 stdin 读取真实配置：缺键判失败、补齐判通过。"""
+        """--config-text 从 stdin 读取临时配置文本：缺键判失败、补齐判通过。"""
         example_text = "web2md_config = {'timeout': 30, 'page_nav': True}\n"
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'

@@ -33,6 +33,26 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-09：合并 codex 分支优化（术语表持久化 + 完成标记 + 决策/归档/软目标）
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | 新增 `config_literal.py`（AST + literal_eval 安全配置解析，消除 exec）、`package_check.py`（待发布目录只读检查） |
+| 脚本改动 | `md2zh_pipeline.py`：glossary 持久化（`--glossary`/`update-glossary`/`--replace`，树级共享，cleanup 归档快照）；decisions 全覆盖校验（每 region 恰好一次）+ `extra_translations_skeleton` + merge `--extra-translations`；`max_block_chars` 改**软目标**（不在不可分 unit 内硬切，文档同步）；copy-assets 同路径 no-op + 目标已存在拒绝；completion.json 完成标记（merge/render/verify 写哈希，重跑撤销过期标记）+ `mark-reviewed`；cleanup 四阶段校验 + 归档同名时间戳后缀（绝不覆盖） |
+| 脚本改动 | `scan_visible.py`：先剥 PROTECT 标记再判断可见文本，输出完整含标记段 |
+| 测试 | selftest 40 → 76 全绿；新增 `test_packaging.py`（118 行）；test_config_sync 改临时 fixture；selftest 退出码 `sys.exit(wasSuccessful)` |
+| 文档 | SKILL.md 采纳：glossary 全流程、decisions 全覆盖 + extra-translations 骨架、max_block_chars 软目标、copy-assets 冲突语义、completion.json/mark-reviewed/cleanup 校验、package_check；translation-rules.md 同步（空行/块级标记收紧、术语表持久化、debug→logs 修正） |
+
+**过程要点**：
+- 来源：`.codex/skills`（win_codex 分支 commit `474b305`，08-09 Codex 大规模优化）。移植策略：**借鉴实现不整目录复制**——纯脚本逻辑通用直接移植；SKILL.md 平台措辞（`$md2zh`）保留 claude 原样（`/md2zh`）。
+- `max_block_chars` 选型：codex 采用"软目标 + 文档明确不可拆单 unit 可超限"，未实现物理行/句子硬拆——采纳（与清单 #6 的建议选项二一致）。
+- 验证：selftest 76 全绿；`check_config_sync.py` 5 键通过。
+
+**遗留事项更新**：
+- （原）术语表只存在会话上下文 → 已实现 glossary.json 持久化（跨块/跨文件复用 + 任务归档）
+- （原）同名 task-id 归档覆盖旧归档 → 已实现时间戳后缀（绝不覆盖）
+- （原）cleanup 只检查块 accepted → 已实现 merge/render/verify/review 四阶段完成标记校验
+
 ### 2026-08-08：测试目录更名（scripts/debug/ → scripts/test/）
 
 | 类别 | 内容 |

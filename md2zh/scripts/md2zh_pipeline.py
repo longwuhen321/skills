@@ -17,13 +17,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from config_literal import LiteralConfigError, load_config_group
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 CONFIG_VALUES = {"user", "ai"}
 MINIMUM_PYTHON = (3, 8)
 CONFIG_PY_TEMPLATE = (
     "# ============================================================\n"
     "# md2zh — 真实配置（本机路径，已被 .gitignore 排除，禁止提交）\n"
-    "# 配置来源：/md2zh 配置向导（用户输入）。\n"
+    "# 配置来源：$md2zh 配置向导（用户输入）。\n"
     "# ============================================================\n"
     "\n"
     "# ==================== md2zh 配置 ====================\n"
@@ -36,8 +42,10 @@ CONFIG_PY_TEMPLATE = (
     "}}\n"
 )
 DEFAULT_MAX_BLOCK_CHARS = 16000
-ARCHIVE_MAX_ENTRIES = 20
 MAX_BLOCK_ATTEMPTS = 3
+GLOSSARY_SCHEMA_VERSION = 1
+COMPLETION_SCHEMA_VERSION = 1
+COMPLETION_STAGES = ("merge", "render", "verify", "review")
 TOKEN_RE = re.compile(r"(?:@@MD2ZH:PROTECT:[A-Za-z0-9_-]+:[0-9]+@@|⟦MD2ZH:[^⟧]+⟧)")
 SEGMENT_LINE_RE = re.compile(r"^@@MD2ZH:SEG:(block-[0-9]+):([0-9]+)@@$")
 SEGMENT_ANY_RE = re.compile(r"@@MD2ZH:SEG:[^@\r\n]+@@")
@@ -61,6 +69,9 @@ AUTOLINK_RE = re.compile(r"<(?:https?://[^<>\s]+|mailto:[^<>\s]+|[^<>\s@]+@[^<>\
 RAW_URL_RE = re.compile(r"https?://[^\s<>\"']+")
 LATIN_RE = re.compile(r"[A-Za-z]")
 DANGEROUS_TRANSLATION_RE = re.compile(r"[`*_\[\]<>|\\$]")
+BLOCK_MARKER_RE = re.compile(
+    r"^(?: {0,3}(?:#{1,6}(?:[ \t]+|$)|[-+*][ \t]+|>[ \t]?|\d+[.)][ \t]+|(?:=+|-+)[ \t]*$)|(?: {4,}| {0,3}\t)[ \t]*\S)"
+)
 
 
 class PipelineError(Exception):
@@ -187,7 +198,7 @@ def ensure_current_python(config: Dict[str, Any]) -> Dict[str, Any]:
     python_path = config.get("python_path")
     if not isinstance(python_path, str) or not python_path:
         raise ConfigRequiredError(
-            "md2zh_config has no python_path; run the /md2zh configuration wizard"
+            "md2zh_config has no python_path; run the $md2zh configuration wizard"
         )
     resolved = resolve_python(python_path)
     if not same_executable(sys.executable, resolved["executable"]):
@@ -200,16 +211,22 @@ def ensure_current_python(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _read_config_value(path: Path, key: str, default: Any = None) -> Any:
-    """Leniently read one md2zh_config key from a config file (missing/broken → default)."""
+    """Read one literal config value; a missing file uses the first-run default."""
+    path = Path(path)
+    if not path.exists():
+        return default
     try:
-        namespace: Dict[str, Any] = {}
-        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
-        config = namespace.get("md2zh_config")
-        if isinstance(config, dict):
-            return config.get(key, default)
-    except (OSError, SyntaxError, ValueError):
-        pass
-    return default
+        config = load_config_group(path, "md2zh_config")
+    except (OSError, LiteralConfigError) as exc:
+        raise PipelineError("cannot safely load {}: {}".format(path, exc)) from exc
+    return config.get(key, default)
+
+
+def validate_max_block_chars(value: Any) -> int:
+    """Return a valid positive block-size target or fail at the config boundary."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("max_block_chars must be a positive integer")
+    return value
 
 
 def configure_project(
@@ -240,8 +257,7 @@ def configure_project(
         tree_translation = True
     if max_block_chars is None:
         max_block_chars = _read_config_value(path, "max_block_chars", DEFAULT_MAX_BLOCK_CHARS)
-    if not isinstance(max_block_chars, int) or isinstance(max_block_chars, bool):
-        max_block_chars = DEFAULT_MAX_BLOCK_CHARS
+    max_block_chars = validate_max_block_chars(max_block_chars)
     payload = CONFIG_PY_TEMPLATE.format(
         python_path=str(Path(resolved["executable"]).resolve()),
         decider=decider,
@@ -257,25 +273,21 @@ def load_global_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     path = Path(config_path) if config_path else global_config_path()
     if not path.exists():
         raise ConfigRequiredError(
-            "missing {}; run the /md2zh configuration wizard once".format(path)
+            "missing {}; run the $md2zh configuration wizard once".format(path)
         )
-    namespace: Dict[str, Any] = {}
     try:
-        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
-    except (OSError, SyntaxError, ValueError) as exc:
+        config = load_config_group(path, "md2zh_config")
+    except (OSError, LiteralConfigError) as exc:
         raise PipelineError("cannot load {}: {}".format(path, exc)) from exc
-    config = namespace.get("md2zh_config")
-    if not isinstance(config, dict):
-        raise ConfigRequiredError("missing md2zh_config dict in {}".format(path))
     decider = config.get("ambiguous_content_decider")
     if decider not in CONFIG_VALUES:
         raise ConfigRequiredError(
-            "missing ambiguous_content_decider in {}; run the /md2zh configuration wizard".format(path)
+            "missing ambiguous_content_decider in {}; run the $md2zh configuration wizard".format(path)
         )
     python_path = config.get("python_path")
     if not isinstance(python_path, str) or not python_path:
         raise ConfigRequiredError(
-            "missing python_path in {}; run the /md2zh configuration wizard".format(path)
+            "missing python_path in {}; run the $md2zh configuration wizard".format(path)
         )
     output_dir = config.get("output_dir")
     if not isinstance(output_dir, str):
@@ -283,9 +295,11 @@ def load_global_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     tree_translation = config.get("tree_translation")
     if not isinstance(tree_translation, bool):
         tree_translation = True
-    max_block_chars = config.get("max_block_chars")
-    if not isinstance(max_block_chars, int) or isinstance(max_block_chars, bool):
-        max_block_chars = DEFAULT_MAX_BLOCK_CHARS
+    max_block_chars = config.get("max_block_chars", DEFAULT_MAX_BLOCK_CHARS)
+    try:
+        max_block_chars = validate_max_block_chars(max_block_chars)
+    except ValueError as exc:
+        raise ConfigRequiredError("invalid max_block_chars in {}: {}".format(path, exc)) from exc
     return {
         "ambiguous_content_decider": decider,
         "python_path": python_path,
@@ -309,10 +323,7 @@ def ensure_state_runtime(state: Dict[str, Any]) -> None:
 
 
 def default_tools_root() -> Path:
-    """日志产物根目录：skill 根目录下的 logs/（skill 根 = scripts 的父目录）。
-
-    旧版为 {项目根}/.md2zh_tools/，2026-08-06 迁移到 <skill>/debug/，2026-08-08 更名 <skill>/logs/。
-    """
+    """日志产物根目录：skill 根目录下的 logs/（skill 根 = scripts 的父目录）。"""
     return Path(__file__).resolve().parent.parent / "logs"
 
 
@@ -322,6 +333,256 @@ def state_tools_root(state: Dict[str, Any]) -> Path:
     if isinstance(root, str) and root:
         return Path(root).resolve()
     return (Path(state["project_root"]) / ".md2zh_tools").resolve()
+
+
+def validate_glossary_payload(payload: Any, label: str = "glossary") -> Dict[str, str]:
+    terms = payload.get("terms") if isinstance(payload, dict) else None
+    if not isinstance(terms, dict):
+        raise PipelineError("{} must contain a terms object".format(label))
+    if not all(
+        isinstance(source, str)
+        and source.strip()
+        and isinstance(translation, str)
+        and translation.strip()
+        for source, translation in terms.items()
+    ):
+        raise PipelineError("{} terms must map non-empty strings to non-empty strings".format(label))
+    return terms
+
+
+def ensure_glossary(path: Path) -> Dict[str, str]:
+    path = Path(path).resolve()
+    if not path.exists():
+        write_json_atomic(
+            path,
+            {"schema_version": GLOSSARY_SCHEMA_VERSION, "terms": {}},
+        )
+        return {}
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        raise PipelineError("glossary must be a JSON object: {}".format(path))
+    if payload.get("schema_version") != GLOSSARY_SCHEMA_VERSION:
+        raise PipelineError("unsupported glossary schema in {}".format(path))
+    return validate_glossary_payload(payload, str(path))
+
+
+def glossary_path_from_state(state: Dict[str, Any], state_path: Path) -> Path:
+    value = state.get("glossary_path")
+    if isinstance(value, str) and value:
+        return Path(value).resolve()
+    return (Path(state_path).resolve().parent / "glossary.json").resolve()
+
+
+def update_glossary(
+    state_path: Path,
+    updates_path: Path,
+    replace: bool = False,
+) -> Dict[str, Any]:
+    state_path = Path(state_path).resolve(strict=True)
+    state = load_json(state_path)
+    ensure_state_runtime(state)
+    glossary_path = glossary_path_from_state(state, state_path)
+    terms = ensure_glossary(glossary_path)
+    updates = validate_glossary_payload(load_json(Path(updates_path)), str(updates_path))
+    conflicts = sorted(
+        source
+        for source, translation in updates.items()
+        if source in terms and terms[source] != translation
+    )
+    if conflicts and not replace:
+        raise PipelineError(
+            "glossary conflicts require --replace: {}".format(conflicts[:10])
+        )
+    merged = dict(terms)
+    merged.update(updates)
+    write_json_atomic(
+        glossary_path,
+        {"schema_version": GLOSSARY_SCHEMA_VERSION, "terms": merged},
+    )
+    return {
+        "glossary": str(glossary_path),
+        "term_count": len(merged),
+        "updated": len(updates),
+        "replaced": len(conflicts),
+    }
+
+
+def file_artifact(path: Path) -> Dict[str, str]:
+    path = Path(path).resolve(strict=True)
+    return {"path": str(path), "sha256": sha256_bytes(path.read_bytes())}
+
+
+def task_dir_from_state(state_path: Path, state: Dict[str, Any]) -> Path:
+    state_path = Path(state_path).resolve()
+    intermediate_root = (state_tools_root(state) / "intermediate").resolve()
+    try:
+        relative = state_path.relative_to(intermediate_root)
+    except ValueError:
+        return state_path.parent
+    if not relative.parts:
+        raise PipelineError("state file must be inside a task directory")
+    return intermediate_root / relative.parts[0]
+
+
+def completion_path_from_state(state_path: Path, state: Dict[str, Any]) -> Path:
+    return task_dir_from_state(state_path, state) / "completion.json"
+
+
+def _load_completion(state_path: Path, state: Dict[str, Any]) -> Dict[str, Any]:
+    path = completion_path_from_state(state_path, state)
+    if not path.exists():
+        return {
+            "schema_version": COMPLETION_SCHEMA_VERSION,
+            "source_sha256": state["source"]["sha256"],
+            "state_path": str(Path(state_path).resolve()),
+            "stages": {},
+        }
+    payload = load_json(path)
+    if (
+        payload.get("schema_version") != COMPLETION_SCHEMA_VERSION
+        or payload.get("source_sha256") != state["source"]["sha256"]
+        or Path(payload.get("state_path", "")).resolve() != Path(state_path).resolve()
+        or not isinstance(payload.get("stages"), dict)
+    ):
+        raise PipelineError("completion marker does not match the current translation state")
+    return payload
+
+
+def record_completion_stage(
+    state_path: Path,
+    state: Dict[str, Any],
+    stage: str,
+    artifacts: Dict[str, Path],
+) -> Path:
+    if stage not in COMPLETION_STAGES:
+        raise ValueError("unknown completion stage: {}".format(stage))
+    payload = _load_completion(state_path, state)
+    stage_index = COMPLETION_STAGES.index(stage)
+    for later in COMPLETION_STAGES[stage_index:]:
+        payload["stages"].pop(later, None)
+    record = {"state": file_artifact(state_path)}
+    record.update({name: file_artifact(path) for name, path in artifacts.items()})
+    payload["stages"][stage] = record
+    path = completion_path_from_state(state_path, state)
+    write_json_atomic(path, payload)
+    return path
+
+
+def invalidate_completion_from(state_path: Path, state: Dict[str, Any], stage: str) -> None:
+    path = completion_path_from_state(state_path, state)
+    if not path.exists():
+        return
+    payload = _load_completion(state_path, state)
+    stage_index = COMPLETION_STAGES.index(stage)
+    changed = False
+    for later in COMPLETION_STAGES[stage_index:]:
+        changed = payload["stages"].pop(later, None) is not None or changed
+    if changed:
+        write_json_atomic(path, payload)
+
+
+def validate_artifact(record: Any, label: str) -> Path:
+    if not isinstance(record, dict):
+        raise PipelineError("completion stage is missing {}".format(label))
+    path_value = record.get("path")
+    expected_hash = record.get("sha256")
+    if not isinstance(path_value, str) or not isinstance(expected_hash, str):
+        raise PipelineError("completion artifact {} is malformed".format(label))
+    path = Path(path_value).resolve(strict=True)
+    if sha256_bytes(path.read_bytes()) != expected_hash:
+        raise PipelineError("completion artifact {} changed after it was marked".format(label))
+    return path
+
+
+def validate_completion_for_cleanup(
+    state_path: Path,
+    state: Dict[str, Any],
+    manifest_path: Path,
+) -> Dict[str, Any]:
+    payload = _load_completion(state_path, state)
+    stages = payload["stages"]
+    missing = [stage for stage in COMPLETION_STAGES if stage not in stages]
+    if missing:
+        raise PipelineError(
+            "refusing to archive before completion stages: {}".format(", ".join(missing))
+        )
+    required_artifacts = {
+        "merge": ("manifest", "translations"),
+        "render": ("translations", "output"),
+        "verify": ("translations", "output"),
+        "review": ("translations", "output", "review"),
+    }
+    paths: Dict[str, Path] = {}
+    for stage in COMPLETION_STAGES:
+        record = stages[stage]
+        if not isinstance(record, dict):
+            raise PipelineError("completion stage {} is malformed".format(stage))
+        validate_artifact(record.get("state"), "{}.state".format(stage))
+        for name in required_artifacts[stage]:
+            paths["{}.{}".format(stage, name)] = validate_artifact(
+                record.get(name), "{}.{}".format(stage, name)
+            )
+    if paths.get("merge.manifest") != Path(manifest_path).resolve():
+        raise PipelineError("merge completion marker belongs to a different manifest")
+    translation_paths = {
+        paths.get("merge.translations"),
+        paths.get("render.translations"),
+        paths.get("verify.translations"),
+        paths.get("review.translations"),
+    }
+    output_paths = {
+        paths.get("render.output"),
+        paths.get("verify.output"),
+        paths.get("review.output"),
+    }
+    if None in translation_paths or len(translation_paths) != 1:
+        raise PipelineError("completion stages refer to different translations files")
+    if None in output_paths or len(output_paths) != 1:
+        raise PipelineError("completion stages refer to different rendered outputs")
+    return payload
+
+
+def mark_reviewed(
+    state_path: Path,
+    translations_path: Path,
+    output_path: Path,
+    review_path: Path,
+) -> Dict[str, Any]:
+    state_path = Path(state_path).resolve(strict=True)
+    state = load_json(state_path)
+    ensure_state_runtime(state)
+    payload = _load_completion(state_path, state)
+    verify_record = payload["stages"].get("verify")
+    if not isinstance(verify_record, dict):
+        raise PipelineError("successful verify is required before marking AI review complete")
+    validate_artifact(verify_record.get("state"), "verify.state")
+    verify_translations = validate_artifact(verify_record.get("translations"), "verify.translations")
+    verify_output = validate_artifact(verify_record.get("output"), "verify.output")
+    if verify_translations != Path(translations_path).resolve(strict=True):
+        raise PipelineError("review translations do not match the verified translations")
+    if verify_output != Path(output_path).resolve(strict=True):
+        raise PipelineError("review output does not match the verified output")
+    review_path = Path(review_path).resolve(strict=True)
+    task_dir = task_dir_from_state(state_path, state).resolve()
+    if not path_is_within(review_path, task_dir):
+        raise PipelineError("review file must be stored inside the current task directory")
+    try:
+        review_text = review_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise PipelineError("review must be UTF-8: {}".format(exc)) from exc
+    if not review_text.strip():
+        raise PipelineError("review file must record the completed AI quality review")
+    completion = record_completion_stage(
+        state_path,
+        state,
+        "review",
+        {
+            "translations": Path(translations_path),
+            "output": Path(output_path),
+            "review": review_path,
+        },
+    )
+    return {"reviewed": True, "completion": str(completion), "review": str(review_path)}
 
 
 def source_relative_path(source: Path, project_root: Path) -> str:
@@ -500,7 +761,7 @@ def protected_line_indexes(lines: Sequence[Dict[str, Any]]) -> set:
             fence_char = fence.group(1)[0]
             fence_length = len(fence.group(1))
             continue
-        if re.match(r"^( {4}|\t)", container_content):
+        if re.match(r"^(?: {4,}| {0,3}\t)", container_content):
             protected.add(index)
             continue
         if stripped.startswith("$$") and stripped.count("$$") == 1:
@@ -660,16 +921,28 @@ def table_cell_spans(content: str) -> List[Tuple[int, int]]:
     return spans
 
 
-def line_payload_span(content: str) -> Optional[Tuple[int, int, str, bool]]:
+def line_payload_span(content: str) -> Optional[Tuple[int, int, str, bool, bool]]:
     start = len(content) - len(content.lstrip(" \t"))
     cursor = start
+    is_line_level = False
     while True:
         match = re.match(r">[ \t]?", content[cursor:])
         if not match:
             break
+        is_line_level = True
         cursor += match.end()
+        nested_cursor = cursor
+        while (
+            nested_cursor < len(content)
+            and content[nested_cursor] == " "
+            and nested_cursor - cursor < 3
+        ):
+            nested_cursor += 1
+        if nested_cursor < len(content) and content[nested_cursor] == ">":
+            cursor = nested_cursor
     list_match = re.match(r"(?:[-+*]|\d+[.)])[ \t]+", content[cursor:])
     if list_match:
+        is_line_level = True
         cursor += list_match.end()
         task = re.match(r"\[[ xX]\][ \t]+", content[cursor:])
         if task:
@@ -690,7 +963,7 @@ def line_payload_span(content: str) -> Optional[Tuple[int, int, str, bool]]:
         end -= 1
     if end <= cursor:
         return None
-    return cursor, end, "heading" if is_heading else "text", is_heading
+    return cursor, end, "heading" if is_heading else "text", is_heading, is_line_level
 
 
 def trim_raw_url(value: str) -> str:
@@ -985,6 +1258,7 @@ def extract_files(
     project_root: Path,
     config_path: Optional[Path] = None,
     tools_root: Optional[Path] = None,
+    glossary_path: Optional[Path] = None,
     timestamp: Optional[str] = None,
 ) -> Dict[str, Any]:
     source_path = Path(source_path).resolve(strict=True)
@@ -992,8 +1266,14 @@ def extract_files(
     units_path = Path(units_path)
     project_root = Path(project_root).resolve(strict=True)
     tools_root = Path(tools_root).resolve() if tools_root else default_tools_root()
+    glossary_path = (
+        Path(glossary_path).resolve()
+        if glossary_path
+        else (state_path.resolve().parent / "glossary.json").resolve()
+    )
     config = load_global_config(config_path)
     runtime = ensure_current_python(config)
+    glossary_terms = ensure_glossary(glossary_path)
     raw = source_path.read_bytes()
     bom = raw.startswith(b"\xef\xbb\xbf")
     try:
@@ -1132,7 +1412,7 @@ def extract_files(
         if not span:
             flush_paragraph()   # 空行/纯结构行 = 段落边界
             continue
-        relative_start, relative_end, kind, is_heading = span
+        relative_start, relative_end, kind, is_heading, is_line_level = span
         if index in setext_headings:
             kind = "heading"
             is_heading = True
@@ -1150,6 +1430,16 @@ def extract_files(
             section = visible_template_text(heading_template).strip() or section
             if item:
                 item["section"] = section
+            continue
+        if is_line_level:
+            flush_paragraph()
+            add_unit(
+                line["start"] + relative_start,
+                line["start"] + relative_end,
+                kind,
+                line["number"],
+                section,
+            )
             continue
         # 普通文本：段落合并——连续文本行组成一个多行 unit
         abs_start = line["start"] + relative_start
@@ -1223,7 +1513,7 @@ def extract_files(
         state_units, max_chars=config["max_block_chars"]
     )
     state = {
-        "schema_version": 4,
+        "schema_version": 5,
         "project_root": str(project_root),
         "tools_root": str(tools_root),
         "source": {
@@ -1238,17 +1528,20 @@ def extract_files(
             "version": runtime["version"],
         },
         "decision_log": log_relative.as_posix(),
+        "glossary_path": str(glossary_path),
         "units": state_units,
         "translation_blocks": translation_blocks,
         "ambiguous_regions": ambiguous,
     }
     packet = {
-        "schema_version": 3,
+        "schema_version": 4,
         "source": {
             "relative_path": state["source"]["relative_path"],
             "sha256": source_hash,
         },
         "ambiguous_content_decider": config["ambiguous_content_decider"],
+        "glossary_path": str(glossary_path),
+        "glossary_term_count": len(glossary_terms),
         "blocks_are_in_source_order": True,
         "translation_blocks": packet_translation_blocks(state_units, translation_blocks),
         "ambiguous_regions": ambiguous,
@@ -1269,6 +1562,8 @@ def extract_files(
         "ambiguous_count": len(ambiguous),
         "max_block_chars": config["max_block_chars"],
         "decision_log": str(log_path),
+        "glossary": str(glossary_path),
+        "glossary_term_count": len(glossary_terms),
     }
 
 
@@ -1316,7 +1611,7 @@ def validate_decision(
     return errors
 
 
-def record_decisions(state_path: Path, decisions_path: Path) -> Dict[str, int]:
+def record_decisions(state_path: Path, decisions_path: Path) -> Dict[str, Any]:
     state = load_json(Path(state_path))
     ensure_state_runtime(state)
     raw = Path(state["source"]["path"]).read_bytes()
@@ -1327,6 +1622,30 @@ def record_decisions(state_path: Path, decisions_path: Path) -> Dict[str, int]:
     if not isinstance(decisions, list):
         raise DecisionValidationError("decisions file must contain a decisions list")
     regions = {item["id"]: item for item in state["ambiguous_regions"]}
+    supplied_ids = [
+        decision.get("region_id")
+        for decision in decisions
+        if isinstance(decision, dict) and isinstance(decision.get("region_id"), str)
+    ]
+    malformed_count = len(decisions) - len(supplied_ids)
+    duplicate_ids = sorted(
+        region_id for region_id, count in Counter(supplied_ids).items() if count > 1
+    )
+    unknown_ids = sorted(set(supplied_ids) - set(regions))
+    missing_ids = sorted(set(regions) - set(supplied_ids))
+    if malformed_count or duplicate_ids or unknown_ids or missing_ids:
+        details: List[str] = []
+        if missing_ids:
+            details.append("missing={}".format(missing_ids))
+        if duplicate_ids:
+            details.append("duplicate={}".format(duplicate_ids))
+        if unknown_ids:
+            details.append("unknown={}".format(unknown_ids))
+        if malformed_count:
+            details.append("malformed_entries={}".format(malformed_count))
+        raise DecisionValidationError(
+            "decisions must cover every ambiguous region exactly once; " + "; ".join(details)
+        )
     log_path = decision_log_path(state)
     attempt_counts: Dict[str, int] = {}
     if log_path.exists():
@@ -1385,7 +1704,17 @@ def record_decisions(state_path: Path, decisions_path: Path) -> Dict[str, int]:
     append_jsonl(log_path, records)
     if rejected:
         raise DecisionValidationError("{} ambiguity decision(s) rejected; details were logged".format(rejected))
-    return {"passed": passed, "rejected": rejected}
+    extra_translation_ids = {
+        "{}:{}".format(decision["region_id"], index): ""
+        for decision in decisions
+        if decision["decision"] == "translate"
+        for index, _span in enumerate(decision["selected_spans"])
+    }
+    return {
+        "passed": passed,
+        "rejected": rejected,
+        "extra_translations_skeleton": {"translations": extra_translation_ids},
+    }
 
 
 def load_translation_map(path: Path) -> Dict[str, str]:
@@ -1526,9 +1855,9 @@ def parse_block_surface(
             raise TranslationValidationError("{} has an empty translation".format(unit_id))
         if SEGMENT_ANY_RE.search(translated):
             raise TranslationValidationError("{} contains a misplaced segment marker".format(unit_id))
-        if "\n\n" in translated or translated.startswith("\n") or translated.endswith("\n"):
+        if any(not line.strip() for line in translated.split("\n")):
             raise TranslationValidationError(
-                "{} must not change paragraph boundaries (no blank lines)".format(unit_id)
+                "{} must not change paragraph boundaries (no blank or whitespace-only lines)".format(unit_id)
             )
         validate_translated_template(units_by_id[unit_id], translated)
         translations[unit_id] = translated
@@ -1640,17 +1969,54 @@ def merge_blocks(
     if set(translations) != expected_units:
         missing = sorted(expected_units - set(translations))
         raise TranslationValidationError("merged blocks are missing units: {}".format(missing[:10]))
-    if extra_translations_path:
-        extras = load_translation_map(Path(extra_translations_path))
-        overlap = sorted(set(extras) & set(translations))
-        if overlap:
-            raise TranslationValidationError("extra translations duplicate unit ids: {}".format(overlap[:10]))
-        translations.update(extras)
+
+    decisions = accepted_decisions(state)
+    expected_extras: Dict[str, str] = {}
+    for region in state["ambiguous_regions"]:
+        decision = decisions.get(region["id"])
+        if not decision:
+            raise TranslationValidationError("missing accepted decision for {}".format(region["id"]))
+        if decision["decision"] == "translate":
+            for index, span in enumerate(decision["selected_spans"]):
+                expected_extras["{}:{}".format(region["id"], index)] = span["text"]
+
+    if expected_extras and not extra_translations_path:
+        raise TranslationValidationError(
+            "accepted translate decisions require --extra-translations for ids: {}".format(
+                sorted(expected_extras)[:10]
+            )
+        )
+    extras = load_translation_map(Path(extra_translations_path)) if extra_translations_path else {}
+    if set(extras) != set(expected_extras):
+        missing = sorted(set(expected_extras) - set(extras))
+        unexpected = sorted(set(extras) - set(expected_extras))
+        raise TranslationValidationError(
+            "extra translations must exactly match accepted translate spans; missing={}, unexpected={}".format(
+                missing[:10], unexpected[:10]
+            )
+        )
+    for translation_id, value in extras.items():
+        if not value.strip():
+            raise TranslationValidationError("{} has an empty translation".format(translation_id))
+        if "\r" in value or "\n" in value or TOKEN_RE.search(value):
+            raise TranslationValidationError("{} contains forbidden structure".format(translation_id))
+        validate_no_introduced_syntax(expected_extras[translation_id], value, translation_id)
+    translations.update(extras)
     write_json_atomic(Path(translations_path), {"translations": translations})
+    completion = record_completion_stage(
+        Path(state_path),
+        state,
+        "merge",
+        {
+            "manifest": manifest_path,
+            "translations": Path(translations_path),
+        },
+    )
     return {
         "translations": str(Path(translations_path)),
         "translation_count": len(translations),
         "block_count": len(manifest["blocks"]),
+        "completion": str(completion),
     }
 
 
@@ -1674,18 +2040,38 @@ def cleanup_run(manifest_path: Path) -> Dict[str, Any]:
     unfinished = [block["id"] for block in manifest.get("blocks", []) if block["status"] != "accepted"]
     if unfinished:
         raise PipelineError("refusing to clean an unfinished block run: {}".format(unfinished[:10]))
-    # 归档而不是删除（web2md 风格，便于排查）：移入 .md2zh_tools/_archive/
+    source_path = Path(state["source"]["path"]).resolve(strict=True)
+    if sha256_bytes(source_path.read_bytes()) != state["source"]["sha256"]:
+        raise PipelineError("refusing to archive after the source changed")
+    validate_completion_for_cleanup(state_path, state, manifest_path)
+
+    glossary_path = glossary_path_from_state(state, state_path)
+    ensure_glossary(glossary_path)
+    archived_glossary = task_dir / "glossary.json"
+    if glossary_path != archived_glossary.resolve():
+        glossary_bytes = glossary_path.read_bytes()
+        if archived_glossary.exists() and archived_glossary.read_bytes() != glossary_bytes:
+            raise PipelineError("task glossary snapshot conflicts with the shared glossary")
+        write_bytes_atomic(archived_glossary, glossary_bytes)
+
+    # 归档而不是删除：同名目标存在时创建唯一后缀，绝不覆盖既有归档。
     archive_root = intermediate_root.parent / "_archive"
     archive_root.mkdir(parents=True, exist_ok=True)
     target = archive_root / task_dir.name
+    collision_renamed = target.exists()
     if target.exists():
-        shutil.rmtree(str(target))
+        suffix = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        target = archive_root / "{}.{}".format(task_dir.name, suffix)
+        counter = 2
+        while target.exists():
+            target = archive_root / "{}.{}.{}".format(task_dir.name, suffix, counter)
+            counter += 1
     shutil.move(str(task_dir), str(target))
-    # 只保留最近 20 个归档条目，超出删最旧
-    entries = sorted(archive_root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True)
-    for old in entries[ARCHIVE_MAX_ENTRIES:]:
-        shutil.rmtree(str(old))
-    return {"archived": str(target), "exists_after": task_dir.exists()}
+    return {
+        "archived": str(target),
+        "exists_after": task_dir.exists(),
+        "collision_renamed": collision_renamed,
+    }
 
 
 def accepted_decisions(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -1743,13 +2129,12 @@ def validate_no_introduced_syntax(original: str, translated: str, label: str, ki
     for marker in ("{{", "}}", "~~"):
         if translated.count(marker) > original.count(marker):
             raise TranslationValidationError("{} introduced Markdown syntax outside protected markers".format(label))
-    block_pattern = re.compile(r"^(?:#{1,6}[ \t]+|[-+][ \t]+|>[ \t]?|\d+[.)][ \t]+)")
     if kind == "text":
         translated_lines = translated.split("\n")
         original_lines = original.split("\n")
-        if any(block_pattern.match(tline) for tline in translated_lines) and not any(
-            block_pattern.match(oline) for oline in original_lines
-        ):
+        translated_markers = sum(bool(BLOCK_MARKER_RE.match(line)) for line in translated_lines)
+        original_markers = sum(bool(BLOCK_MARKER_RE.match(line)) for line in original_lines)
+        if translated_markers > original_markers:
             raise TranslationValidationError("{} introduced a block-level Markdown marker".format(label))
 
 
@@ -1839,15 +2224,26 @@ def render_file(
     translations = load_translation_map(Path(translations_path))
     rendered = deterministic_render(state, translations)
     write_bytes_atomic(output_path, rendered)
+    completion = record_completion_stage(
+        Path(state_path),
+        state,
+        "render",
+        {
+            "translations": Path(translations_path),
+            "output": output_path,
+        },
+    )
     return {
         "output": str(output_path),
         "sha256": sha256_bytes(rendered),
         "bytes": len(rendered),
+        "completion": str(completion),
     }
 
 
 def verify_file(state_path: Path, translations_path: Path, output_path: Path) -> Dict[str, Any]:
     errors: List[str] = []
+    state: Optional[Dict[str, Any]] = None
     try:
         state = load_json(Path(state_path))
         ensure_state_runtime(state)
@@ -1858,8 +2254,23 @@ def verify_file(state_path: Path, translations_path: Path, output_path: Path) ->
             errors.append("candidate does not match deterministic render")
         if TOKEN_RE.search(actual.decode("utf-8-sig")):
             errors.append("candidate contains a protection marker")
+        if not errors:
+            record_completion_stage(
+                Path(state_path),
+                state,
+                "verify",
+                {
+                    "translations": Path(translations_path),
+                    "output": Path(output_path),
+                },
+            )
     except (OSError, ValueError, PipelineError) as exc:
         errors.append(str(exc))
+    if errors and isinstance(state, dict):
+        try:
+            invalidate_completion_from(Path(state_path), state, "verify")
+        except (OSError, ValueError, PipelineError):
+            pass
     return {"pass": not errors, "errors": errors, "failure_count": len(errors)}
 
 
@@ -1873,14 +2284,35 @@ def copy_assets(source_path: Path, output_path: Path) -> Dict[str, Any]:
     source_path = Path(source_path).resolve()
     assets_dir = source_path.parent / (source_path.stem + ".assets")
     if not assets_dir.is_dir():
-        return {"source": str(assets_dir), "target": None, "copied": False, "files": 0}
+        return {
+            "source": str(assets_dir),
+            "target": None,
+            "copied": False,
+            "already_in_place": False,
+            "files": 0,
+        }
     target_dir = Path(output_path).resolve().parent / (source_path.stem + ".assets")
-    shutil.copytree(str(assets_dir), str(target_dir), dirs_exist_ok=True)
     file_count = sum(1 for item in assets_dir.rglob("*") if item.is_file())
+    if assets_dir.resolve() == target_dir.resolve():
+        return {
+            "source": str(assets_dir),
+            "target": str(target_dir),
+            "copied": False,
+            "already_in_place": True,
+            "files": file_count,
+        }
+    if target_dir.exists():
+        raise PipelineError(
+            "target assets directory already exists; refusing to merge or overwrite: {}".format(
+                target_dir
+            )
+        )
+    shutil.copytree(str(assets_dir), str(target_dir))
     return {
         "source": str(assets_dir),
         "target": str(target_dir),
         "copied": True,
+        "already_in_place": False,
         "files": file_count,
     }
 
@@ -1889,8 +2321,8 @@ def summarize_document(state_path: Path, summary_path: Path) -> Dict[str, Any]:
     """Write a structure summary md: heading tree, per-section translatable
     char counts, code/math block positions, and the default block plan.
 
-    The summary is the AI planner's input: it confirms the default plan or
-    gives adjustment instructions before `plan-blocks`.
+    The summary is the AI planner's input: it reviews and confirms the
+    pipeline's default plan before `plan-blocks`.
     """
     state = load_json(Path(state_path))
     ensure_state_runtime(state)
@@ -1957,6 +2389,30 @@ def summarize_document(state_path: Path, summary_path: Path) -> Dict[str, Any]:
     for index in range(0, len(positions) - 1, 2):
         math_blocks.append((positions[index], positions[index + 1] + 2))
 
+    def line_number_at(offset: int) -> int:
+        for line in lines:
+            if offset < line["end"] or (
+                line is lines[-1] and offset <= line["content_end"]
+            ):
+                return line["number"]
+        return lines[-1]["number"] if lines else 1
+
+    location_lines: List[str] = []
+    for number, (start, end) in enumerate(fences, 1):
+        location_lines.append(
+            "- 代码块 {}：第 {}–{} 行".format(
+                number, line_number_at(start), line_number_at(max(start, end - 1))
+            )
+        )
+    for number, (start, end) in enumerate(math_blocks, 1):
+        location_lines.append(
+            "- 公式块 {}：第 {}–{} 行".format(
+                number, line_number_at(start), line_number_at(max(start, end - 1))
+            )
+        )
+    if not location_lines:
+        location_lines.append("- 无代码块或公式块")
+
     # 2) 每个 unit 归属最近的标题节点（无标题 → 文件头节点）
     nodes: List[Dict[str, Any]] = [
         {"level": 0, "text": "(无标题头部)", "start": 0}
@@ -1997,7 +2453,7 @@ def summarize_document(state_path: Path, summary_path: Path) -> Dict[str, Any]:
         if level > 3:
             continue
         chars = section_chars.get(index, 0)
-        status = "✅ 整块" if chars <= max_chars else "⚠️ 超限需拆"
+        status = "✅ 目标内" if chars <= max_chars else "⚠️ 超软目标"
         prefix = ""
         if level >= 1:
             numbering[level] += 1
@@ -2020,7 +2476,7 @@ def summarize_document(state_path: Path, summary_path: Path) -> Dict[str, Any]:
         if len(section) > 40:
             section = section[:37] + "..."
         chars = block.get("translatable_chars", 0)
-        status = "✅ ≤ 上限" if chars <= max_chars else "⚠️ 超限"
+        status = "✅ ≤ 目标" if chars <= max_chars else "⚠️ 超软目标"
         plan_lines.append(
             "| {} | {} | {} | {} |".format(block["id"], section, chars, status)
         )
@@ -2037,8 +2493,14 @@ def summarize_document(state_path: Path, summary_path: Path) -> Dict[str, Any]:
             "- 代码块：{} 个（共 {} 字符）｜公式块：{} 个（共 {} 字符）——保护区间，不参与翻译".format(
                 len(fences), fence_chars, len(math_blocks), math_chars
             ),
-            "- 分块上限 max_block_chars：{} 字符".format(max_chars),
+            "- 分块软目标 max_block_chars：{} 字符（不可分 unit 可能超过）".format(max_chars),
             "- 分块数：{} 块".format(len(blocks)),
+            "",
+            "## 代码/公式保护区间位置",
+            "",
+        ]
+        + location_lines
+        + [
             "",
             "## 章节统计",
         ]
@@ -2051,7 +2513,7 @@ def summarize_document(state_path: Path, summary_path: Path) -> Dict[str, Any]:
         + plan_lines
         + [
             "",
-            "> AI 审阅：确认默认方案直接进入 plan-blocks；如需调整（如大章节拆点、紧邻小章节合并），给出调整指令。",
+            "> AI 审阅：确认采用 pipeline 默认方案后进入 plan-blocks。",
         ]
     ) + "\n"
     write_bytes_atomic(Path(summary_path), summary.encode("utf-8"))
@@ -2095,7 +2557,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument(
         "--max-block-chars",
         type=int,
-        help="max translatable characters per block (default: 16000, suggested 10000-24000)",
+        help="soft target for translatable characters per block; indivisible units may exceed it (default: 16000)",
     )
 
     extract = subparsers.add_parser(
@@ -2109,7 +2571,11 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--project-root", required=True)
     extract.add_argument(
         "--tools-root",
-        help="tools/log root directory (default: <skill>/debug); internal override for tests",
+        help="tools/log root directory (default: <skill>/logs); internal override for tests",
+    )
+    extract.add_argument(
+        "--glossary",
+        help="shared glossary.json path; default: beside the state file",
     )
 
     summarize = subparsers.add_parser(
@@ -2140,7 +2606,24 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("translations")
     merge.add_argument("--extra-translations")
 
-    cleanup = subparsers.add_parser("cleanup-run", help="remove one completed translation task safely")
+    glossary = subparsers.add_parser(
+        "update-glossary",
+        help="merge reviewed term mappings into the task or tree glossary",
+    )
+    glossary.add_argument("state")
+    glossary.add_argument("updates")
+    glossary.add_argument("--replace", action="store_true")
+
+    reviewed = subparsers.add_parser(
+        "mark-reviewed",
+        help="persist the completed AI quality-review marker after verify passes",
+    )
+    reviewed.add_argument("state")
+    reviewed.add_argument("translations")
+    reviewed.add_argument("output")
+    reviewed.add_argument("review")
+
+    cleanup = subparsers.add_parser("cleanup-run", help="archive one fully completed translation task safely")
     cleanup.add_argument("manifest")
 
     render = subparsers.add_parser("render", help="losslessly render translated units")
@@ -2189,6 +2672,7 @@ def main() -> int:
                 Path(args.project_root),
                 config_path=Path(args.config) if args.config else None,
                 tools_root=Path(args.tools_root) if args.tools_root else None,
+                glossary_path=Path(args.glossary) if args.glossary else None,
             )
         elif args.command == "summarize":
             result = summarize_document(Path(args.state), Path(args.output))
@@ -2210,6 +2694,19 @@ def main() -> int:
                 Path(args.manifest),
                 Path(args.translations),
                 Path(args.extra_translations) if args.extra_translations else None,
+            )
+        elif args.command == "update-glossary":
+            result = update_glossary(
+                Path(args.state),
+                Path(args.updates),
+                replace=args.replace,
+            )
+        elif args.command == "mark-reviewed":
+            result = mark_reviewed(
+                Path(args.state),
+                Path(args.translations),
+                Path(args.output),
+                Path(args.review),
             )
         elif args.command == "cleanup-run":
             result = cleanup_run(Path(args.manifest))

@@ -20,9 +20,23 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 检查 `scripts/config.py` 是否存在。不存在时启动配置向导。
 
-**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/debug_utils.py`、`scripts/check_config_sync.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
+**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/config_parser.py`、`scripts/debug_utils.py`、`scripts/dependency_check.py`、`scripts/check_config_sync.py`、`scripts/package_check.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
 
-**配置同步门禁（每次执行前）**：`config.py` 存在时，先跑 `scripts/check_config_sync.py`——对比 `config.example.py` 的**全部五分组**（`common_config` / `import_config` / `upgrade_config` / `export_config` / `debug_config`）键集合与值类型，只比结构不比值（token / 路径等占位符 vs 真实值天然不同）。不一致（退出码 1/2）→ **中断任务**，按输出报告补齐/修正后重跑；通过（退出码 0）→ 继续。
+**依赖预检（每次执行前）**：Python 路径确定后、执行任一页面脚本前运行：
+
+```powershell
+& "<python_path>" -X utf8 "<skill-directory>/scripts/dependency_check.py"
+```
+
+预检会实际导入并一次报告完整依赖集 `requests`、`markdown2`、`beautifulsoup4`（导入名 `bs4`）、`markdownify`；包虽然可定位、但因缺少 DLL 或子依赖而无法导入时同样失败。退出码 1 表示存在导入失败项，应中断当前操作并完整报告；安装任何依赖前，AI 助手必须展示拟执行的安装命令并取得用户审批。检查脚本和页面脚本都不会自行安装或修改 Python 环境。
+
+**配置同步门禁（每次执行前）**：`config.py` 存在时运行：
+
+```powershell
+& "<python_path>" -X utf8 "<skill-directory>/scripts/check_config_sync.py"
+```
+
+门禁对比 `config.example.py` 的**全部五分组**（`common_config` / `import_config` / `upgrade_config` / `export_config` / `debug_config`）键集合与值类型，只比结构不比值（token / 路径等占位符 vs 真实值天然不同）。配置由共享的 AST + `ast.literal_eval` 解析器读取；函数调用、导入及其他带副作用的 Python 代码一律拒绝，不执行配置代码。不一致（退出码 1/2）→ **中断任务**，按输出报告补齐/修正后重跑；通过（退出码 0）→ 继续。
 
 ### 向导规则
 
@@ -33,7 +47,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 **2. Python 环境路径：先问用户，用户不给再找**
 
 1. **先直接询问用户**：Python 解释器路径？（用户给出 → 直接用）
-2. 用户不提供（如回复"帮我找"）→ 才允许自动扫描 `where python`、Anaconda 目录、系统 PATH，优先选已安装 `requests`/`markdown2` 的环境
+2. 用户不提供（如回复"帮我找"）→ 才允许自动扫描 `where python`、Anaconda 目录、系统 PATH，优先选已安装 `requests`、`markdown2`、`beautifulsoup4`（导入名 `bs4`）、`markdownify` 的环境
 3. 扫描到候选 → **展示候选给用户确认**（选哪个或拒绝）
 4. 扫描无结果 → 该配置缺失，**中断任务**（没有 Python 无法执行脚本，属必需项）
 
@@ -114,6 +128,15 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 > 3. **升级数学公式** — 升级已有页面的 $...$ / $$...$$ 为原生宏
 > 4. **导出 Markdown** — 从 Confluence 拉取页面为 Typora 兼容 Markdown
 
+### 业务能力矩阵
+
+| 能力 | 输入/范围 | 结果 | 关键安全边界 |
+|---|---|---|---|
+| 单页导入 | `.md`；空间 + 标题，可用 `--parent-id` / `--page-id` 消歧 | 新建或更新一个页面 | 查询严格区分 `FOUND` / `NOT_FOUND` / `ERROR`；只有 `NOT_FOUND` 才新建，歧义与查询失败均不写入 |
+| 文件夹树导入 | `--dir` 或 `--resume tree_plan.json` | 按父子层级新建、更新或移动 | 整批只建一次页面索引；计划固化 page ID/version 且同一 ID 只能分配一次；逐节点写检查点，可断点续传 |
+| 公式升级 | 单页、页面树或整个空间 | 更新 Confluence storage 正文 | 默认要求公式零残留；人工确认前复查源版本与内容哈希；批量失败返回非零 |
+| Markdown 导出 | 单页、页面树或整个空间 | `<page_id>_<标题>/<标题>.md` + 可选 assets | 公共分页器拉全量；空间模式每页只导出一次；附件名和落盘路径受限于页面目录 |
+
 ---
 
 ### 一、导入 Markdown（md_import）
@@ -121,25 +144,34 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 **读取 python_path 后执行：**
 
 ```bash
-"<python_path>" "<SKILL_DIR>/scripts/md_import.py" "<md文件路径>" [--parent-id ID] [--page-name NAME] [--space KEY] [--align left|center]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" "<md文件路径>" [--page-id ID] [--parent-id ID] [--page-name NAME] [--space KEY] [--align left|center] [--force]
 # --parent-id / --page-name 未传时回退到 config.py 的 import_config 对应配置项
 
-"<python_path>" "<SKILL_DIR>/scripts/md_import.py" --dir "<根文件夹>" [--space KEY] [--align left|center] [--fix-hierarchy confirm|auto|off] [--plan-only] [--yes]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --dir "<根文件夹>" [--space KEY] [--align left|center] [--fix-hierarchy confirm|auto|off] [--plan-only] [--yes] [--force]
 # --dir 批量树导入（需 import_config.tree_import 开启）；--space/--align/--fix-hierarchy 未传时默认从 config.py 读取
+
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --resume "<tree_plan.json>" [--yes] [--force]
 ```
 
 **流程：**
 1. 用户指定 md 文件（拖入或粘贴路径）
 2. **直接读取** `scripts/config.py` 的 import_config 执行（`space` / `default_parent_id` / `default_page_name`），**不询问**（与"配置向导：后续调用不再询问"一致）
-3. 仅当用户**主动提及**变更时，用 CLI 参数覆盖：`--space`（目标空间）、`--parent-id`（父页面）、`--page-name`（标题）
-4. 执行脚本 → 输出结果（page_id / 更新版本号）
+3. 仅当用户**主动提及**变更时，用 CLI 参数覆盖：`--space`（目标空间）、`--parent-id`（父页面）、`--page-id`（精确页面）、`--page-name`（标题）
+4. 执行脚本 → 输出结果（page_id / 更新版本号）；任一必要步骤失败时进程返回非零
 
 **取值优先级**：用户显式指定 > `config.py` 配置 > 代码默认值（父级留空不挂、标题取文件名）
 
+**页面匹配与并发保护：**
+- `--page-id` 精确选择页面；否则按空间 + 标题查找，`--parent-id` 同时用于同名页面消歧
+- 查询结果必须是 `FOUND`、`NOT_FOUND`、`ERROR` 之一：仅 `NOT_FOUND` 新建；同名歧义、分页/API 错误均为 `ERROR` 并中断，禁止误建页面
+- 更新使用查询时取得的源版本。遇到 409 默认拒绝覆盖；仅用户明确要求并传 `--force` 时，才拉取最新版本重试一次
+- Markdown 中独占一行的 `[toc]` 转为目录宏；自动目录检测到已有 `[toc]` 时不重复插入
+
 **批量导入文件夹树（--dir）：**
 - 目录结构：每个含 .md 的文件夹 = 一个页面（标题=文件夹名，内容=同名 .md），子文件夹 = 子页面，`.assets/` 仅作图片源；中间文件夹无 .md 时跳级
-- 流程：扫描建树 → 只读生成计划（新建🆕 / 更新🔄 / 移动📦）→ `fix_hierarchy=confirm` 时存在移动会暂停确认 → 深度优先执行（父先子后，子页面挂到父页面下）
+- 流程：扫描建树 → 一次性拉取空间页面索引 → 只读生成计划（新建🆕 / 更新🔄 / 移动📦，固化 page ID/version；同一 page ID 被多个节点命中即整批拒绝）→ `fix_hierarchy=confirm` 时存在移动会暂停确认 → 深度优先执行（父先子后，子页面挂到父页面下）
 - `--plan-only` 仅输出计划不执行；预览确认后加 `--yes` 执行可跳过再次确认
+- 计划写入运行期日志目录下的 `tree_plan.json`；每个成功节点都会更新检查点。中途失败后用 `--resume <tree_plan.json>` 跳过已完成节点并继续，避免重复新建
 - 优先级：用户显式指定 > config.py 配置 > 代码默认值
 
 ---
@@ -147,18 +179,20 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 ### 二、升级数学公式（math_upgrade）
 
 ```bash
-"<python_path>" "<SKILL_DIR>/scripts/math_upgrade.py" --page-id <ID> [--align left|center] [--ai-verify]
-"<python_path>" "<SKILL_DIR>/scripts/math_upgrade.py" --page-id <ID> --recursive [--max-depth N]
-"<python_path>" "<SKILL_DIR>/scripts/math_upgrade.py" --space <KEY>
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/math_upgrade.py" --page-id <ID> [--align left|center] [--ai-verify]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/math_upgrade.py" --page-id <ID> --recursive [--max-depth N]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/math_upgrade.py" --space <KEY>
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/math_upgrade.py" --confirm <debug目录|latest>
 ```
 
 **关键参数：**
-- `--align left`：左对齐（推荐默认，原生 mathblock + alignment=left），`--align center`：居中
-- `--ai-verify` / `--no-ai-verify`：覆盖是否暂停等人工审核
-- `--confirm <debug目录>`：AI 助手验证 debug 文件后确认更新（配合 `ai_verify` 使用；`--confirm latest` 取最近一次 debug 目录）
+- `--align left`：左对齐（推荐默认）：为每个 `mathblock` 插入或替换唯一的 `alignment=left`；`--align center`：删除已有 alignment 参数，使用原生居中默认值
+- `--ai-verify` / `--no-ai-verify`：覆盖是否在机械验证通过后暂停等人工审核；AI 审核不会绕过 XHTML、宏数量或默认零残留门禁
+- `--confirm <debug目录>`：AI 助手验证 debug 文件后确认更新（配合 `ai_verify` 使用；`--confirm latest` 取最近一次 debug 目录）。确认时重新拉取远端页面并核对转换源版本与 SHA256；任一变化都拒绝提交旧 `after.html`，必须重新生成转换结果，不提供绕过参数
 - `--recursive` / `--no-recursive`：覆盖是否递归子页面
 - `--no-auto-update`：仅生成 debug 文件，不更新页面
 - `--stop-on-error`：批量模式遇错即停（默认遇错继续，末尾汇总失败页面）
+- `--allow-math-residuals`：显式容忍验证后仍存在的 `$...$`、`$$...$$` 或 latex 代码围栏；默认任何残留都失败，并报告 `类型@行:列`
 
 ---
 
@@ -168,33 +202,36 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 - 数学公式原生宏还原：`mathblock` → `$$...$$`、`mathinline` → `$...$`（旧 mathjax 宏兼容）
 - 代码宏 → ```` ```语言 ```` 围栏；`toc` 宏 → `[toc]`；note/info/warning 等提示宏 → 引用块
-- 图片附件下载到 `<标题>.assets/`，md 内引用改写为相对路径
+- 图片附件下载到 `<标题>.assets/`，md 内引用改写为相对路径；附件文件名使用附件 ID + basename，且落盘前验证路径仍位于页面目录内
 - 输出结构（页面目录 + 同名 md + 可选 assets）：
 
   ```
   <输出根>/
-  ├── <页面A>/                    # 页面目录（标题）
+  ├── <页面ID>_<页面A>/           # 页面目录（ID + 标题，避免同名覆盖）
   │   ├── <页面A>.md              # 与该文件夹同名的 md
   │   └── <页面A>.assets/         # 该页面的图片（页面无图时不产生）
-  └── <页面B>/
+  └── <页面ID>_<页面B>/
       └── <页面B>.md
   ```
 
-  子页面导出时 `<页面A>` 内嵌套子页面目录（层级保留）。
+  子页面导出时 `<页面ID>_<页面A>` 内嵌套子页面目录（层级保留）。
 
 ```bash
-"<python_path>" "<SKILL_DIR>/scripts/md_export.py" --page-id <ID> [--recursive|--no-recursive] [--output <目录>]
-"<python_path>" "<SKILL_DIR>/scripts/md_export.py" --space <KEY> [--output <目录>]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_export.py" --page-id <ID> [--recursive|--no-recursive] [--output <目录>]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_export.py" --space <KEY> [--output <目录>]
 ```
 
 **关键参数：**
 - `--page-id <ID>`：导出单页；`--recursive`（默认从 config 读）时递归导出子页面，子页面文件夹嵌套在父页面目录下
-- `--space <KEY>`：批量导出整个空间（平铺，每页一个文件夹）
+- `--space <KEY>`：批量导出整个空间（平铺，每页一个文件夹）；空间索引已包含全部页面，不再对每页递归，确保每个 page ID 只导出一次
 - `--output <目录>`：输出根目录（默认 `export_config.output_dir`，相对当前工作目录，也支持绝对路径）
 - 页面无图时不产生 `.assets/` 文件夹；图片下载失败在 md 中保留注释
-- 未知宏降级为 `<!-- 未处理的宏: xxx -->` 注释，结束时汇总提示
+- 页面标题和附件名会移除路径字符、尾随点/空格，并给 Windows 保留设备名（如 `CON`、`NUL`、`COM1`）加安全前缀
+- 代码、公式、目录宏使用占位符跨越 Markdown 空行规范化，恢复后保留代码块内部空行；`[toc]` 独占一行，可被导入流程还原为目录宏
+- 未知宏保留可读正文，并附带 HTML 转义后的原始 Confluence XHTML 注释；注释内的 `--` 转义为 `&#45;&#45;`，可还原且不会生成非法注释。`ri:url`（包括 `ac:image` 外链图片和未知宏正文中的独立 URL）保留为 Markdown 图片、链接或 URL
+- 页面、子页面与附件列表都使用公共分页器拉取全量；分页 HTTP/JSON 错误直接传播并使进程返回非零，不把部分结果当成功
 
-**依赖**：`beautifulsoup4` + `markdownify`（缺失时脚本启动会明确提示安装；配置向导阶段可确认环境已装）。
+**完整依赖**：`requests` + `markdown2` + `beautifulsoup4`（导入名 `bs4`）+ `markdownify`。导出功能使用后两项；配置向导选择 Python 环境时须确认四项均已安装。
 
 ---
 
@@ -203,9 +240,10 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 脚本直接从 `scripts/config.py` 读取配置，无需任何环境变量或 AI 助手依赖：
 
 ```bash
-python scripts/md_import.py my_doc.md --space ES
-python scripts/math_upgrade.py --page-id 12345 --align left
-python scripts/md_export.py --page-id 12345
+python -X utf8 scripts/dependency_check.py
+python -X utf8 scripts/md_import.py my_doc.md --space ES
+python -X utf8 scripts/math_upgrade.py --page-id 12345 --align left
+python -X utf8 scripts/md_export.py --page-id 12345
 ```
 
 首次使用：复制 `config.example.py` → `scripts/config.py`，填入真实值即可。
@@ -215,10 +253,11 @@ python scripts/md_export.py --page-id 12345
 ## 容错与安全
 
 - **429 限流**：所有请求自动重试（指数退避，最多 3 次，尊重 `Retry-After`）。批量升级/大空间导入可能触发 429（Server/DC 官方未提供限流文档，重试为防御性措施）。
-- **遇错继续**：批量升级默认跳过失败页面继续处理，结束时汇总失败列表；`--stop-on-error` 可立即停止。
-- **版本冲突**：md_import 更新页面遇 409 时自动拉取最新版本重试一次（页面被他人并发修改时）。
+- **遇错继续但不误报成功**：批量升级、树导入、空间导出默认汇总全部失败；页面、附件上传、附件下载或附件后二次更新任一失败，最终退出码即非零。`--stop-on-error` 可让批量升级立即停止。
+- **版本冲突**：md_import 更新页面遇 409 默认安全失败；仅用户明确要求并传 `--force` 时才拉取最新版本重试一次。
+- **分页完整性**：空间页面、子页面及附件均通过公共分页器拉取；分页请求或响应结构错误会中断/记为失败，不返回静默截断的部分数据。
 - **凭据**：token 可用环境变量 `CONFLUENCE_TOKEN` 覆盖 config.py，共享机器/CI 上不必落盘。
-- **图片上传失败**：md_import 结束时汇总报告未上传成功的图片，保留原始引用。
+- **图片上传失败**：md_import 汇总未上传成功的图片并保留原始引用，同时把当前页面/树节点标为失败；树计划保留 page ID/version 供 `--resume` 重试。
 - **base64 内嵌图片**：`data:` URI 图片不当作本地文件处理，保留原始引用，结束时提示跳过数量。
 - **脚本文件恢复**：脚本被删除/损坏时，**先向用户确认是否需要恢复，确认后才执行恢复（不替用户操作）**。确认后先 `git status` 判断：
   - 跟踪文件被删 → 显示 `D <file>`，可恢复：`git checkout -- <脚本路径>`
@@ -256,13 +295,18 @@ confluence-tools/
 ├── scripts/
 │   ├── config.py               # 真实配置（不提交，从 example 拷贝）
 │   ├── check_config_sync.py    # 配置同步强制门禁（每次执行前）
+│   ├── config_parser.py        # 配置 AST + literal_eval 安全解析（load/check 同源）
 │   ├── common.py               # 公共：配置加载、HTTP 重试、页面收集
 │   ├── debug_utils.py          # 公共：日志清理
+│   ├── dependency_check.py     # 四项 Python 依赖统一预检（只报告，不安装）
+│   ├── package_check.py        # 待发布目录只读路径/敏感项检查
 │   ├── md_import.py            # Markdown → Confluence
 │   ├── math_upgrade.py         # 数学公式升级
 │   ├── md_export.py            # Confluence → Markdown 导出
-│   └── test/                  # 本地测试（git 追踪）
-│       └── selftest.py         # 离线自测（不依赖服务器，mock 配置运行）
+│   └── test/                    # 本地测试（git 追踪）
+│       ├── selftest.py           # 离线自测（不依赖服务器，mock 配置运行）
+│       ├── test_config_sync.py   # 配置结构门禁的隔离回归测试
+│       └── test_regressions.py   # 工程安全与页面业务回归测试
 └── logs/                        # 调试日志快照（gitignore 排除）
     ├── import/
     ├── upgrade/
@@ -312,11 +356,32 @@ confluence-tools/
 **修改 `scripts/*.py` 后，必须运行 `scripts/test/selftest.py` 且全部用例通过**，才能算修改完成：
 
 ```bash
-"<python_path>" "<SKILL_DIR>/scripts/test/selftest.py"
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/test/selftest.py"
 ```
 
 - 全绿 = 转换逻辑未破坏，改动可固化
 - 有红 = 修改引入回归，先修复再继续
+
+#### 测试能力矩阵
+
+| 能力 | 离线验收 | 主要覆盖位置 |
+|---|---|---|
+| 配置 | 只接受无副作用字面量；五分组键和类型漂移返回 1/2 | `scripts/test/test_config_sync.py`、`TestSafeConfigAndPackaging` |
+| 退出码 | 页面、树节点、批量与附件失败均汇总为失败，入口最终返回非零 | `TestImportLookupAndConflict`、`TestTreePlanAndResume`、`TestMathSafety`、`TestExportSafety` |
+| 日志隔离 | 测试把 `SKILL_ROOT` / debug 目录定向到临时目录，不读写真实 `logs/` | `scripts/test/selftest.py` 各工具 `setUp`、`ImporterCase` / `UpdaterCase` / `ExporterCase` |
+| CLI | 三个页面入口用 `python -X utf8 ... --help` 均为退出码 0 | `TestCliSurface` |
+| 依赖缺失 | 实际导入四个模块；缺包、坏安装或缺 DLL 均一次报告完整失败集 | `TestSafeConfigAndPackaging` |
+| Windows 编码 | GBK 控制台环境下用 `python -X utf8` 执行验证，中文输出可按 UTF-8 解码 | `ConfigSyncTests.test_utf8_mode_overrides_gbk_console_for_validation_output` |
+
+### 发布前只读检查（必过）
+
+先把待发布文件复制到**隔离的候选目录**，不带真实 `scripts/config.py`、`logs/`、缓存或版本控制目录；不要直接把含本机配置的工作目录当发布包。然后运行：
+
+```bash
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/package_check.py" --root "<待发布目录>"
+```
+
+检查按两阶段执行：先只看路径和名称，发现 `config.py`、`.env`、`logs/`、`__pycache__/`、常见工具缓存/虚拟环境、`node_modules/`、`.git/`、`.claude/`、`.reasonix/`、`.vscode/`、字节码、符号链接、junction/reparse point 或解析后越界路径时立即失败，且不读取任何文本；路径门禁通过后，才扫描允许的文本文件是否含疑似真实 `token` / `confluence_token` / `api_token` / `auth_token` / `access_token` / Bearer 值（含单行字典赋值）。退出码：0 通过，1 发现禁项，2 用法、目录列举或允许文本读取错误。
 
 ### 真实环境验证的清理（必过）
 

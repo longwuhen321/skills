@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import tempfile
@@ -6,10 +7,24 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 CHECKER = SCRIPT_DIR / 'check_config_sync.py'
-EXAMPLE = SCRIPT_DIR.parent / 'config.example.py'
-REAL_CONFIG = SCRIPT_DIR / 'config.py'
 
 GROUPS = 'common_config,import_config,upgrade_config,export_config,debug_config'
+
+EXAMPLE_TEXT = (
+    "common_config = {'python_path': 'x', 'confluence_token': 'placeholder'}\n"
+    "import_config = {'space': 'ALG', 'toc_enabled': True}\n"
+    "upgrade_config = {'recursive': True}\n"
+    "export_config = {'output_dir': 'out'}\n"
+    "debug_config = {'max_size_mb': 50}\n"
+)
+
+CONFIG_TEXT = (
+    "common_config = {'python_path': 'D:/py/python.exe', 'confluence_token': 'test-token'}\n"
+    "import_config = {'space': 'ES', 'toc_enabled': False}\n"
+    "upgrade_config = {'recursive': False}\n"
+    "export_config = {'output_dir': 'D:/out'}\n"
+    "debug_config = {'max_size_mb': 20}\n"
+)
 
 
 def run_checker(args):
@@ -22,23 +37,24 @@ def run_checker(args):
 
 
 class ConfigSyncTests(unittest.TestCase):
-    def test_real_config_synced_passes(self):
-        """现状：真实 config.py 五分组键与 example 一致，检查必须通过（退出码 0）。"""
-        result = run_checker([f'--example-file={EXAMPLE}', f'--config-file={REAL_CONFIG}'])
-        self.assertEqual(result.returncode, 0, result.stdout)
-
     def test_tmp_pair_synced_passes(self):
-        """临时 example/config 键集一致 → 退出码 0（值不同不误报）。"""
+        """临时五分组 example/config 键集一致 → 退出码 0（值不同不误报）。"""
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'
             config = Path(tmp) / 'config.py'
-            example.write_text(
-                "common_config = {'python_path': 'x', 'confluence_token': 'placeholder'}\n"
-                "import_config = {'space': 'ALG', 'toc_enabled': True}\n", encoding='utf-8')
-            config.write_text(
-                "common_config = {'python_path': 'D:/py/python.exe', 'confluence_token': 'real-token'}\n"
-                "import_config = {'space': 'ES', 'toc_enabled': False}\n", encoding='utf-8')
+            example.write_text(EXAMPLE_TEXT, encoding='utf-8')
+            config.write_text(CONFIG_TEXT, encoding='utf-8')
             result = run_checker([f'--example-file={example}', f'--config-file={config}', f'--groups={GROUPS}'])
+            self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_tmp_pair_default_five_groups_passes(self):
+        """不传 --groups 时也必须完整检查默认五分组。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            example = Path(tmp) / 'example.py'
+            config = Path(tmp) / 'config.py'
+            example.write_text(EXAMPLE_TEXT, encoding='utf-8')
+            config.write_text(CONFIG_TEXT, encoding='utf-8')
+            result = run_checker([f'--example-file={example}', f'--config-file={config}'])
             self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_tmp_pair_missing_group_fails(self):
@@ -53,6 +69,40 @@ class ConfigSyncTests(unittest.TestCase):
             result = run_checker([f'--example-file={example}', f'--config-file={config}', '--groups=common_config,import_config'])
             self.assertEqual(result.returncode, 1)
             self.assertIn('import_config', result.stdout)
+
+    def test_tmp_pair_both_missing_requested_group_fails(self):
+        """请求的分组在 example/config 双方都不存在，也必须显式失败。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            example = Path(tmp) / 'example.py'
+            config = Path(tmp) / 'config.py'
+            text = "common_config = {'python_path': 'x'}\n"
+            example.write_text(text, encoding='utf-8')
+            config.write_text(text, encoding='utf-8')
+            result = run_checker([
+                f'--example-file={example}',
+                f'--config-file={config}',
+                '--groups=common_config,import_config',
+            ])
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('import_config', result.stdout)
+
+    def test_tmp_pair_both_missing_default_group_fails(self):
+        """默认五分组中的任一组在双方都缺失，也必须显式失败。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            example = Path(tmp) / 'example.py'
+            config = Path(tmp) / 'config.py'
+            missing_debug_example = EXAMPLE_TEXT.replace(
+                "debug_config = {'max_size_mb': 50}\n", '')
+            missing_debug_config = CONFIG_TEXT.replace(
+                "debug_config = {'max_size_mb': 20}\n", '')
+            example.write_text(missing_debug_example, encoding='utf-8')
+            config.write_text(missing_debug_config, encoding='utf-8')
+            result = run_checker([
+                f'--example-file={example}',
+                f'--config-file={config}',
+            ])
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('debug_config', result.stdout)
 
     def test_tmp_pair_missing_key_fails(self):
         """config.py 分组内缺键 → 退出码 1，报 missing。"""
@@ -107,8 +157,40 @@ class ConfigSyncTests(unittest.TestCase):
             result = run_checker([f'--example-file={example}', f'--config-file={config}'])
             self.assertEqual(result.returncode, 2)
 
+    def test_tmp_pair_side_effect_is_rejected_without_execution(self):
+        """配置含函数调用 → 退出码 2，且检查过程不执行副作用。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            example = Path(tmp) / 'example.py'
+            config = Path(tmp) / 'config.py'
+            marker = Path(tmp) / 'must-not-exist.txt'
+            example.write_text(EXAMPLE_TEXT, encoding='utf-8')
+            config.write_text(
+                CONFIG_TEXT
+                + f"__import__('pathlib').Path({str(marker)!r}).write_text('owned')\n",
+                encoding='utf-8')
+            result = run_checker([
+                f'--example-file={example}',
+                f'--config-file={config}',
+            ])
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse(marker.exists())
+
+    def test_tmp_pair_non_utf8_config_is_unverifiable(self):
+        """配置不是 UTF-8 → 退出码 2，不泄漏未捕获 traceback。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            example = Path(tmp) / 'example.py'
+            config = Path(tmp) / 'config.py'
+            example.write_text(EXAMPLE_TEXT, encoding='utf-8')
+            config.write_bytes(b'\xff')
+            result = run_checker([
+                f'--example-file={example}',
+                f'--config-file={config}',
+            ])
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn('Traceback', result.stderr)
+
     def test_config_text_stdin(self):
-        """--config-text 从 stdin 读取真实配置：缺键判失败、补齐判通过。"""
+        """--config-text 从 stdin 读取配置文本：缺键判失败、补齐判通过。"""
         example_text = "common_config = {'python_path': 'x', 'confluence_url': 'http://x'}\n"
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'
@@ -126,6 +208,21 @@ class ConfigSyncTests(unittest.TestCase):
                 capture_output=True, text=True, encoding='utf-8',
             )
             self.assertEqual(ok.returncode, 0, ok.stdout)
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows console encoding only')
+    def test_utf8_mode_overrides_gbk_console_for_validation_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / '不存在-example.py'
+            env = os.environ.copy()
+            env['PYTHONIOENCODING'] = 'cp936'
+            env['PYTHONDONTWRITEBYTECODE'] = '1'
+            result = subprocess.run(
+                [sys.executable, '-X', 'utf8', str(CHECKER),
+                 f'--example-file={missing}'],
+                capture_output=True, text=True, encoding='utf-8', env=env)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('example 配置文件缺失', result.stdout)
+            self.assertNotIn('Traceback', result.stderr)
 
 
 if __name__ == '__main__':

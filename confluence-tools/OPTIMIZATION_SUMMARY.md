@@ -33,6 +33,27 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-09：合并 codex 分支优化（工程安全 + 页面业务可靠性）
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | 新增 `config_parser.py`（AST + literal_eval 安全配置解析，load/check 同源，消除 exec）、`dependency_check.py`（四项依赖统一预检：requests/markdown2/bs4/markdownify，只报告不安装）、`package_check.py`（发布前两阶段只读检查：路径门禁 + Token 值扫描） |
+| 脚本改动 | `common.py` 改用 config_parser 并修复 Token 顺序（env_token 优先计算再校验）；`check_config_sync.py` 改用 config_parser 并修复五分组假绿（先验证分组存在） |
+| 脚本改动 | `md_import.py`：三态查找（FOUND/NOT_FOUND/ERROR，仅 NOT_FOUND 新建，歧义/查询失败不写入）、`--page-id` 消歧、409 默认安全失败 + `--force` 重试、树计划固化 page ID/version + 同一 ID 只分配一次 + `--resume` 断点续传、失败传播到退出码、`[toc]` 独占行还原 |
+| 脚本改动 | `math_upgrade.py`：`--confirm` 重新拉取远端核对源版本与 SHA256（任一变化拒绝提交旧 after.html）、默认零残留 + `--allow-math-residuals` 显式容忍、center 模式删除 alignment 参数 |
+| 脚本改动 | `md_export.py`：页面目录加 page ID（避免同名覆盖）、附件 basename + 落盘路径校验、公共分页器（子页面/附件拉全量，错误传播非零）、未知宏保留可读正文 + XHTML 注释、代码宏空行归一化保护 |
+| 测试 | selftest 107 → 151 全绿；新增 `test_regressions.py`（739 行：三态/409/--force/树计划/分页/依赖缺失/Windows 编码）+ 能力矩阵 |
+| 文档 | SKILL.md 采纳：依赖预检、AST 解析、业务能力矩阵、页面匹配/并发保护、`--resume`、center 对齐语义、`-X utf8` 固化、package_check 两阶段说明 |
+
+**过程要点**：
+- 来源：`.codex/skills`（win_codex 分支 commit `474b305`，08-09 Codex 大规模优化）。移植策略：**借鉴实现不整目录复制**——纯脚本逻辑通用直接移植；SKILL.md 平台措辞（`$confluence-tools`、`request_user_input`、Codex 审批）保留 claude 原样（`/confluence-tools`、AskUserQuestion、免确认白名单）。
+- 测试与真实配置解耦：`test_config_sync.py` 全改临时 fixture，真实配置同步检查保留为执行前门禁。
+- 验证：`python -X utf8 scripts/test/selftest.py` 151 全绿；`check_config_sync.py` 五分组通过；`dependency_check.py` 四项通过。
+
+**遗留事项更新**：
+- （原）历史条目仍写 `scripts/debug/`，属当时事实，保留不改
+- （新增）2026-08-09 条目已把旧"测试命令 `scripts/debug/selftest.py`"修正为 `scripts/test/selftest.py`（原 L346 历史条目，属路径漂移修正，非改写历史）
+
 ### 2026-08-08：测试目录更名（scripts/debug/ → scripts/test/）
 
 | 类别 | 内容 |
@@ -343,4 +364,4 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 - Confluence：9.2.1（Data Center，build 9109），PAT Bearer 认证
 - Python：`<python 解释器路径>`（需安装 requests / markdown2）
-- 测试命令：`"<python>" scripts/debug/selftest.py` → 全部用例通过
+- 测试命令：`"<python>" -X utf8 scripts/test/selftest.py` → 全部用例通过

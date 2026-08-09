@@ -11,9 +11,10 @@
 退出码：0 = 同步；1 = 存在差异；2 = 无法验证（文件缺失/损坏）
 """
 import argparse
-import ast
 import sys
 from pathlib import Path
+
+from config_literal import ConfigLiteralError, parse_literal_dict
 
 if sys.platform == 'win32':
     sys.stdin.reconfigure(encoding='utf-8', errors='replace')
@@ -27,23 +28,22 @@ class ConfigUnverifiable(Exception):
 def parse_config_text(text):
     """解析 Python 配置文件文本，返回 web2md_config dict（键→值类型）。
 
-    与 web2md.py load_config() 同样用 exec 提取，只保留 web2md_config 分组。
-    损坏（语法错误等）抛 ConfigUnverifiable。
+    与 web2md.py load_config() 同源：AST 定位分组后仅用 ast.literal_eval
+    解析字面量；导入、函数调用与副作用语句一律拒绝。
     """
     try:
-        ns = {}
-        exec(text, ns)
-    except Exception as e:
+        cfg = parse_literal_dict(text, 'web2md_config')
+    except ConfigLiteralError as e:
         raise ConfigUnverifiable(f"配置解析失败: {e}")
-    cfg = ns.get('web2md_config')
-    if not isinstance(cfg, dict):
-        raise ConfigUnverifiable("web2md_config 分组缺失或不是 dict")
     return {k: type(v).__name__ for k, v in cfg.items()}
 
 
 def read_config_file(path):
     """读取配置文件文本（显式 utf-8，Windows 无默认编码问题）。"""
-    return Path(path).read_text(encoding='utf-8')
+    try:
+        return Path(path).read_text(encoding='utf-8')
+    except OSError as exc:
+        raise ConfigUnverifiable(f'配置文件读取失败: {exc}') from exc
 
 
 def check_config_sync(example_text, config_text):

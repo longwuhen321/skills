@@ -32,6 +32,26 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 ============================================================================
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
+### 2026-08-09：合并 codex 分支优化（配置安全 + 段落合并/转义/验证器重写 + DOM 降级）
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | 新增 `config_literal.py`（AST + literal_eval 安全配置解析，load/check 同源，消除 exec）、`package_check.py`（发布前只读敏感文件/值检查：路径门禁 + Token 值扫描两阶段） |
+| 脚本改动 | `merge_paragraphs.py` 重写：围栏掩码（`markdown_code.markdown_fenced_code_spans`）+ unescaped `$$` 状态机，公式块/围栏内逐字节保护（含内部空行）；混合 CRLF/LF/CR 行尾保留（读写禁用换行翻译） |
+| 脚本改动 | `fix_escapes.py` 重写：只修数学 span（`$$` 块和 ≤2000 字符 `$...$` 块内 `\_`/`\*`），散文合法转义与代码不动 |
+| 脚本改动 | `final_verify.py` 增强：悬空 `$` 检测、代码内转义不误报、表格/图片检查统一用保留换行的掩码文本、表格后缺空行 |
+| 脚本改动 | `web2md.py`：配置按已知键合并（修 False 失效）、子页面失败累计 + 返回非零（保留成功产物 + 完整失败清单）、渲染后 DOM 降级通道（`--rendered-html`，URL 校验 + 同域/版本前缀/两级限制）、文件名冲突稳定 URL 哈希后缀 + Windows 保留名 |
+| 测试 | selftest 60 → 100 全绿；重建 `test_custom_site.py`（8 用例）+ 新增 `test_remaining_optimizations.py`（32 用例）；test_config_sync 改临时 fixture（不读真实配置） |
+| 文档 | SKILL.md 采纳：AST 解析说明、package_check 发布检查、`--rendered-html` DOM 降级通道、文件名冲突/Windows 保留名、final_verify 新检查项、"AI 清单打勾"改为人工工作流门禁、fix_escapes 只修公式 |
+
+**过程要点**：
+- 来源：`.codex/skills`（win_codex 分支 commit `474b305`，08-09 Codex 大规模优化）。移植策略：**借鉴实现不整目录复制**——纯脚本逻辑通用直接移植；SKILL.md 平台措辞（`$web2md`、`apply_patch`、Codex 网页访问）保留 claude 原样（`/web2md`、Edit、web_fetch）。
+- 跨节点裸 TeX 配对：codex 版扩展为"同一块边界内仅跨中性 span、≤12 节点/2000 字符且配对唯一才自动转换"，其余 REVIEW（SKILL.md/custom-site-rules.md 同步）。
+- 验证：selftest 100 全绿；`check_config_sync.py` 7 键通过。
+
+**遗留事项更新**：
+- （原）跨 DOM 节点裸 TeX 只能报告 REVIEW（2026-08-08 记录）→ 已实现受限自动转换（中性 span 内），跨块/保护子树/歧义仍 REVIEW
+
 ### 2026-08-08：proxy 配置项（config.py + web2md.py + AI 判断通道）
 
 | | |

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
@@ -23,6 +24,7 @@ from web2md import (
     normalize_document_html,
     process_math_formulas,
 )
+import web2md as web2md_module
 
 
 VERIFIER = SCRIPT_DIR / 'final_verify.py'
@@ -240,12 +242,17 @@ class SphinxConversionTests(unittest.TestCase):
         self.assertEqual(mapping, {})
 
     def test_save_debug_snapshot(self):
-        # 失败快照写入 <skill>/logs/_archive/<项目根名>/fetch_时间戳.html
+        # 用临时 skill 根验证路径规则，绝不写入真实 <skill>/logs。
         with tempfile.TemporaryDirectory() as tmp:
-            path = _save_debug_snapshot(tmp, '<html>raw</html>')
+            fake_script = Path(tmp) / 'skill' / 'scripts' / 'web2md.py'
+            fake_script.parent.mkdir(parents=True)
+            output_root = Path(tmp) / 'project'
+            output_root.mkdir()
+            with patch.object(web2md_module, '__file__', str(fake_script)):
+                path = _save_debug_snapshot(output_root, '<html>raw</html>')
             self.assertTrue(path.exists())
-            self.assertIn('logs', str(path))
-            self.assertIn('_archive', str(path))
+            self.assertTrue(path.is_relative_to(Path(tmp)))
+            self.assertEqual(path.parent, Path(tmp) / 'skill' / 'logs' / '_archive' / 'project')
             self.assertTrue(path.name.startswith('fetch_'))
             self.assertEqual(path.read_text(encoding='utf-8'), '<html>raw</html>')
 

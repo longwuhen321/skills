@@ -152,6 +152,13 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 - **修复**：`scripts/web2md.py` 新增 `_save_debug_snapshot()`，`main()` 在转换/写出阶段捕获异常时，把原始 HTML 写入 `{项目根目录}/.web2md_tools/_archive/fetch_YYYYMMDD_HHMMSS.html`（成功路径不落盘）。
 - **排查方法**：失败时看 `{项目根目录}/.web2md_tools/_archive/` 是否有 `fetch_*.html`；把快照喂给 `process_math_formulas` / `normalize_document_html` 可离线复现；selftest 有 `test_save_debug_snapshot` 覆盖。
 
+## [2026-08-09] fix_escapes 不再全局替换散文（codex 优化合并，已修复）
+
+- **现象**：阶段 A 运行后，散文中表示字面量的 `\_` / `\*`（如 `foo\_bar` 想显示为 `foo_bar`）被替换成 `_` / `*`，可能意外变成强调或下划线语法。
+- **根因**：`fix_escapes.py` 旧版在完成公式块修复后，对**代码外全部文本**做全局 `\_`→`_`、`\*`→`*` 兜底——它分不清"公式内的转义"与"散文中刻意写的字面转义"（Markdown 里 `\_` 本来就是字面下划线的写法）。
+- **修复**（2026-08-09 合并 codex 优化）：`fix_escapes.py` 重写为**只修复数学 span**——`$$` 块和长度 ≤2000 字符的 `$...$` 块内替换 `\_`/`\*`；散文中的合法 Markdown 转义、代码内容、未配对 `$` 一律逐字节不动。SKILL.md 阶段 A 说明同步更新。
+- **排查方法**：交付的 .md 中原本显示字面下划线/星号的散文被改成强调语法时，即为此类（旧版行为，已修复）；新版如仍见散文 `\_` 残留属正常（字面转义），在阶段 C 通读复核时留意。
+
 ## [2026-08-01] fix_escapes 全局兜底会替换散文中的合法字面转义
 
 - **现象**：阶段 A 运行后，散文中表示字面量的 `\_` / `\*`（如 `foo\_bar` 想显示为 `foo_bar`）被替换成 `_` / `*`，可能意外变成强调或下划线语法。
