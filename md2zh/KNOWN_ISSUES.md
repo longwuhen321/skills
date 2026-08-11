@@ -25,6 +25,13 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-11] 配置可执行、同名归档覆盖及 cleanup 可绕过完整审阅（已修复）
+
+- **现象**：读取 Python 配置时可能执行导入或函数调用；同名 task-id 再次归档可能覆盖旧结果；任务只要块状态 accepted 就能 cleanup，缺失 merge/render/verify/review 或 review 产物时仍可能归档。
+- **根因**：配置使用执行式解析；归档目标直接复用 task-id；任务状态没有四阶段完成模型与产物哈希绑定，review artifact 曾被当成可选项。
+- **修复**：`scripts/config_literal.py`、`check_config_sync.py` 与 `md2zh_pipeline.py` 统一使用 AST + `ast.literal_eval` 并拒绝所有非普通字面量赋值；归档冲突追加唯一后缀且不覆盖/不裁剪；新增 `completion.json`、`mark-reviewed` 及 merge/render/verify/review 四阶段哈希门禁，review 文件缺失或任一产物变化时 cleanup 必须失败。`scripts/package_check.py` 同步加入发布前敏感路径和值检查。
+- **排查方法**：运行 `scripts/test/selftest.py`，重点确认 AnnAssign/副作用配置、同名归档、缺 review artifact、过期 review 哈希与 packaging 用例；遇 cleanup 拒绝时先检查 `completion.json` 四阶段、对应文件是否存在及哈希是否匹配，不要手工绕过门禁。
+
 ## [2026-08-03] 含弯引号的目录名在 PowerShell 双引号字符串中被误解析（已知行为）
 
 - **现象**：`NSH “Built-In” Applications` 这类含弯引号（`“”`）的目录路径放进 PowerShell 双引号字符串（`"$outRoot\NSH “Built-In” Applications\..."`）时报 `ParserError: UnexpectedToken`，`New-Item`/`Copy-Item` 失败。

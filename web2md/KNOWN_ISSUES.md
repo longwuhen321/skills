@@ -25,6 +25,13 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-11] 配置执行、公式标签合并和输出路径冲突可导致副作用或内容覆盖（已修复）
+
+- **现象**：配置同步与运行期读取会执行 Python 配置文本；`merge_paragraphs` 可能删除公式标签行的 hard break 并与后文合并；不同标题清洗后可能落到同一目录，`CON .txt` 等名称在 Windows 创建失败；渲染导航会把不同 query 页面误判为同页或跨版本收集；跨节点 TeX 可能把 HTML Comment/Doctype 文本吞进公式。
+- **根因**：配置采用 `exec`；段落合并未按原始行尾状态保护公式标签；输出名只做字符清洗、没有稳定身份后缀和 Windows 设备名规则；导航 identity 丢弃 query、版本根推导过宽；跨节点扫描把非正文 `NavigableString` 当普通文本。
+- **修复**：`scripts/config_literal.py` / `check_config_sync.py` / `web2md.py` 改为 AST + `ast.literal_eval` 且仅接受普通目标字典赋值；`merge_paragraphs.py` 按原始 EOL 逐字节保护公式标签；`web2md.py` 增稳定 URL 哈希、Windows/路径预算、query identity 与稳定版本前缀；跨节点公式遇 Comment/Doctype 保持原文并报告 `REVIEW`。`scripts/package_check.py` 同步封堵真实配置、日志、缓存、Token 与链接路径进入发布包。
+- **排查方法**：运行 `scripts/test/selftest.py`，重点确认 `test_remaining_optimizations.py` 的 CRLF/mixed-EOL、`CON .txt`、query/version、Comment/Doctype、AnnAssign 与 packaging 对抗用例；发布前只对不含真实 `config.py`/logs 的允许文件 staging 运行 `scripts/package_check.py --root <目录>`。
+
 ## [2026-08-08] Sphinx RTD 主题当前项 href="#" 被跳过，导航子页面全漏（nuttx.apache.org NSH，已修复）
 
 - **现象**：nuttx.apache.org NSH 页面（Sphinx Read the Docs 主题）抓取时脚本报「该页面无严格导航子页面」，但页面导航下实际有 8 个子页面（Overview/Commands/Configuration Settings/customizing/builtin/installation/login/running_apps）；8-02 曾用同一站点同一套件正常抓取 9 个文件。另：AI 助手 WebFetch 失败（平台侧域名安全预检查，与站点可达性无关）后把「无法核实」当成「确认没有」→ 未走 AI 判断通道、未对照历史产物，直接交付了缺失子页面的结果。

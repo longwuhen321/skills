@@ -25,6 +25,13 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-11] 页面歧义、查询错误和过期内容可能写错页面或覆盖新版本（已修复）
+
+- **现象**：同名页面会直接更新第一个候选，`--parent-id` 未真正消除歧义；查询异常可能被当成页面不存在后继续创建；409 重试和公式 `--confirm` 可能提交旧正文；附件或子页失败仍返回成功；递归只处理前 200 项、空间导出重复子树；未知宏、外链图片、代码宏空行或同名路径可能丢失/被改写。
+- **根因**：页面查找只有“找到/没找到”两态且未按真实父级过滤；更新流程未绑定源版本/哈希；批量路径分别吞掉异常且缺公共分页器；导出在还原代码后继续全局归一化，命名只做字符清洗；未知宏与 `ri:url` 没有可逆降级；配置仍由 `exec` 执行，依赖与发布敏感项也缺统一门禁。
+- **修复**：`md_import.py` 增 `FOUND / NOT_FOUND / ERROR`、父级/`--page-id` 消歧、源版本绑定和仅导入 409 可显式 `--force` 的单次重试；`math_upgrade.py` 确认前复取版本+SHA256且变化必停、零残留默认门禁和 alignment 幂等；`common.py` 提供公共分页器；`md_export.py` 统一非递归空间核心、代码占位空行处理、page ID 目录与附件 containment、`[toc]` 闭环、未知宏正文+原始 XHTML 注释及 `ri:url`/外链图；所有未处理失败令 CLI 非零。配置改 `config_parser.py` 的 AST + `ast.literal_eval`，并新增依赖/发布门禁和树计划 checkpoint `--resume`。
+- **排查方法**：运行 `scripts/test/selftest.py`，重点查看 `test_regressions.py` 的多候选/三态、409、stale confirm、附件失败入口退出码、分页、未知宏/外链图、路径 containment、resume、依赖与 packaging 对抗用例；真实运行先执行 `python -X utf8 scripts/dependency_check.py` 和配置同步门禁，任何查询/附件/批量错误或非零退出码都不得当作成功继续。
+
 ## [2026-08-05] load_config 漏组装 export_config 分组：md_export 配置永远不生效
 
 - **现象**：config.py 补写了 `export_config`（output_dir=绝对路径），但导出仍输出到默认相对目录 `confluence_export`；`python -c "import config"` 能看到配置，`load_config()` 却返回 `export_config=None`。

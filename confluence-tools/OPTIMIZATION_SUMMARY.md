@@ -33,6 +33,28 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-11：安全工程门禁与页面全链路可靠性补强
+
+| 类别 | 内容 |
+|------|------|
+| 安全与工程 | 新增 `scripts/config_parser.py`，运行期与配置同步检查统一使用 AST + `ast.literal_eval` 解析五个 `*_config` 字典，拒绝导入、函数调用和副作用代码；新增 `scripts/package_check.py`，路径优先拒绝真实配置、logs、缓存/虚拟环境、环境文件、链接、凭据文件名和常见 Token；新增 `scripts/dependency_check.py`，一次实际导入并汇总 `requests`、`markdown2`、`beautifulsoup4`、`markdownify`，脚本不自行安装，缺失时先申请用户批准 |
+| 页面定位与并发 | 页面查找改为 `FOUND / NOT_FOUND / ERROR` 三态，查询异常禁止按“不存在”继续创建；同名多候选默认中止，支持按真实父页面过滤或显式 `--page-id`；导入更新记录源版本，409 默认中止，仅显式 `--force` 才拉取最新版本重试一次 |
+| 公式安全 | `math_upgrade --confirm` 在确认前重新拉取页面并校验源版本与 SHA256，任一变化都必须重新生成或中止，不能用 `--force` 绕过；默认要求零公式残留，显式容忍模式输出残留位置；center 删除旧 alignment，left 插入或替换；无效转义 docstring 已修正 |
+| 导入导出完整性 | 附件上传/下载、树节点和批量失败统一累计并令 CLI 非零；公共分页器遍历全部页面并传播请求错误；空间导出统一调用非递归单页核心，避免重复子树；代码宏占位期间整理空行，还原后不再全局归一化 |
+| 格式与路径 | 页面目录加入稳定 page ID；附件使用安全 basename 并校验解析路径位于 assets 内；导入识别独占 `[toc]` 且避免重复目录宏；未知宏保留正文及转义后的原始 XHTML 注释，`ri:url` 与外链图片地址不丢失 |
+| 树形流程 | 每次树导入只构建一次页面索引，计划固化 page ID/version 并拒绝同一 page ID 被多个节点占用；checkpoint 支持 `--resume`，失败节点保留版本信息供续传 |
+| 测试与文档 | 固化 `python -X utf8` 验证入口和测试能力矩阵（配置、退出码、日志隔离、CLI、依赖缺失、Windows 编码）；修正历史测试路径；最终 151/151，通过 17 个允许文件 staging packaging check、三入口 help/`SyntaxWarning`、四依赖实际导入、LF 与 skill 结构验证 |
+
+**过程要点**：
+- `md_import` 的 409 `--force` 只用于用户明确要求后的单次并发重试；`math_upgrade --confirm` 不提供 force 绕过，防止旧 `after.html` 覆盖已变化页面。
+- 发布检查先按路径/元数据拒绝并剪枝，再读取允许文本；Python 文件用 AST 扫真实敏感字面量，其他文本才允许无引号 Token，`X-Atlassian-Token: nocheck` 作为固定 CSRF 哨兵放行但真实值仍拦截。
+- 页面/附件失败采用“部分结果可保留、整体命令非零”的契约，调用方不能把已写入部分页面误报成全量成功。
+
+**遗留事项更新**：
+- （原）树导入无断点续传、每次重复查重 → **已完成**（单次索引 + 固化计划 + checkpoint/`--resume`，2026-08-11）。
+- （原）未知宏统一降级且外链图可能丢失 → **已完成**（正文 + 原始 XHTML 注释 + `ri:url`/外链图片）。
+- （新增）本轮只做离线 mock，Confluence Data Center 的真实权限、API 差异和大空间分页仍需受控实机验证；敏感值扫描为保守启发式，不替代专业密钥扫描器。
+
 ### 2026-08-08：测试目录更名（scripts/debug/ → scripts/test/）
 
 | 类别 | 内容 |
@@ -336,11 +358,12 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 - **P3 未做**（有意不做的）：atlassian-python-api 依赖、批量并发处理
 - **README 未提 CLI 参数细节**（保持现状）
 - **config.py 新键空值**（default_parent_id / default_page_name 等）需使用时手动填入
-- **树导入无断点续传**（重跑重新计划，幂等安全但重复查重）
+- **树导入断点续传**：已实现单次页面索引、固化 page ID/version 的计划和 checkpoint `--resume`（2026-08-11）
 - **toc 阈值无按页面覆盖**（全局配置）
+- **实机验证**：2026-08-11 本轮新增的歧义消除、分页、并发与 resume 仅完成离线 mock，仍需在受控真实空间验证权限/API 差异
 
 ## 六、环境速查
 
 - Confluence：9.2.1（Data Center，build 9109），PAT Bearer 认证
-- Python：`<python 解释器路径>`（需安装 requests / markdown2）
+- Python：`<python 解释器路径>`（需安装 requests / markdown2 / beautifulsoup4 / markdownify；执行前由 `dependency_check.py` 一次实际导入预检）
 - 测试命令：`"<python>" -X utf8 scripts/test/selftest.py` → 全部用例通过

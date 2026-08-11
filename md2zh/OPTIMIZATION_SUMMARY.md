@@ -33,6 +33,26 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-11：安全配置、任务完成门禁与持久化术语表
+
+| 类别 | 内容 |
+|------|------|
+| 安全与工程 | 新增 `scripts/config_literal.py`，运行期与同步检查统一使用 AST + `ast.literal_eval` 读取字面量配置，拒绝导入、函数调用、类型注解赋值和副作用语句；新增 `scripts/package_check.py`，路径优先拒绝真实配置、logs、缓存、环境/凭据文件与常见 Token，拒绝路径不读取内容 |
+| 归档可靠性 | `cleanup-run` 遇同名 task-id 归档时追加唯一后缀，绝不覆盖或删除既有归档；按要求取消自动裁剪，归档保持只增 |
+| 完成门禁 | `completion.json` 对 merge、render、verify、review 四阶段及产物哈希做绑定；新增显式 `mark-reviewed`，cleanup 必须确认四阶段完成、review 产物存在且哈希仍一致，任一缺失或产物变化都拒绝归档 |
+| 术语复用 | 新增持久化 `glossary.json` 与 `update-glossary`：单任务默认存任务根，树形翻译可把同一路径传给各文件以跨块、跨文件复用；冲突更新显式拒绝，归档保留术语表快照 |
+| 测试与验证 | 新增 `scripts/test/test_packaging.py` 并扩展 pipeline/config 回归；最终 76/76，通过完整允许文件 staging packaging check、LF 检查及 skill 结构验证 |
+
+**过程要点**：
+- completion 标记不仅记录“完成”，还记录对应产物哈希；review 不能只存在阶段布尔值，必须有 `review.md` 且在 cleanup 前未变化。
+- 同名归档冲突通过时间戳/稳定唯一后缀解决，不使用覆盖或先删后写；这一安全约束意味着归档磁盘占用会持续增长。
+- packaging check 对 Python 仅识别真实字符串字面量配置，对普通文本再允许无引号 Token，避免把 `TOKEN_RE = re.compile(...)` 和测试夹具误报为凭据。
+
+**遗留事项更新**：
+- （原）术语表只保存在会话上下文 → **已完成**（任务级/树级 `glossary.json`，2026-08-11）。
+- （原）cleanup 只检查块 accepted → **已完成**（merge/render/verify/review + 哈希门禁）。
+- （新增）归档按安全要求不再裁剪，需由用户按磁盘策略人工管理；完成标记只能证明产物和审阅记录完整，不能机器判断审阅语义质量。
+
 ### 2026-08-08：测试目录更名（scripts/debug/ → scripts/test/）
 
 | 类别 | 内容 |
@@ -450,6 +470,8 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 ## 五、遗留事项
 
-- **术语表文件化**：当前按 SKILL.md 约定"任务级术语表跨块保留"（模型内存），未独立落盘（可选后续）
+- **术语表文件化**：已落地 `glossary.json`，支持任务级保存、树级共享及归档快照（2026-08-11）
 - **逐行断句的翻译质感**：分块契约单行 segment 模式限制，未改 pipeline（如需流畅断行需跨行合并，改动大）
 - **pipeline 独立运行**：有意不做（用户明确不需要——翻译核心依赖 AI 助手会话，pipeline 只是编排工具）
+- **归档增长**：同名归档不覆盖且不自动裁剪，磁盘空间需按用户策略人工管理（2026-08-11）
+- **审阅语义**：`completion.json` 能验证 review 产物及哈希完整性，无法机器判断人工审阅质量（2026-08-11）

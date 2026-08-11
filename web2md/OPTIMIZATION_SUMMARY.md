@@ -32,6 +32,28 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 ============================================================================
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
+
+### 2026-08-11：安全配置、发布门禁与自定义站点能力补强
+
+| 类别 | 内容 |
+|------|------|
+| 安全与工程 | 新增 `scripts/config_literal.py`，配置加载与同步检查统一使用 AST 定位 `web2md_config` 并由 `ast.literal_eval` 解析，拒绝导入、函数调用、类型注解赋值及其他可执行语句；新增 `scripts/package_check.py`，以路径优先方式拒绝真实 `config.py`、logs、缓存、环境文件、符号链接/reparse point、凭据文件名及常见 Token，禁止进入或读取已拒路径 |
+| 输出可靠性 | `merge_paragraphs.py` 对缩进且行尾两个空格的公式标签行保持逐字节不变，覆盖 LF、CRLF、混合行尾和纯 CR；标题清洗后的冲突追加稳定 URL 哈希，并处理 Windows 保留名、尾随空格/点及路径长度预算 |
+| 导航扩展 | 静态导航为空时支持 `--rendered-html` / `--rendered-url` 的渲染后 DOM 降级通道；继续限制同域、同版本和两级深度，并把 query 纳入页面身份，防止不同参数页误去重 |
+| 公式扩展 | 裸 TeX 支持受块边界、保护子树和非正文节点约束的跨 DOM 节点配对；可靠结构自动转换，跨 Comment/Doctype 或无法证明安全时保持 DOM 原样并报告 `REVIEW` |
+| 测试与验证 | 新增 `scripts/test/test_remaining_optimizations.py`；源码与隔离发布副本均 100/100，通过完整允许文件 packaging check、配置示例 7 键同步、LF 检查及 skill 结构验证 |
+
+**过程要点**：
+- 渲染后 DOM 只在静态导航为空时采用；URL identity 同时比较规范化路径与 query，版本范围按稳定路径前缀校验，不能证明同版本时拒绝收集。
+- Python 配置只接受普通字典赋值；发布检查对 Python 使用字面量语义，对 Markdown/YAML 等文本允许无引号 Token 检测，避免把正则源码和测试夹具误报为凭据。
+- 文件名冲突后缀来自规范化 URL 的稳定哈希，不依赖抓取顺序；公式跨节点转换遇非正文节点时以 `REVIEW` 降级，不猜测内容。
+
+**遗留事项更新**：
+- （原）纯 JS 导航无降级通道 → **已完成**（支持显式提供渲染后 DOM，2026-08-11）。
+- （原）跨节点裸定界符只能人工修复 → **已完成可靠子集自动转换**；不可靠结构继续 `REVIEW`，属于安全边界。
+- （原）标题清洗后可能覆盖同名目录 → **已完成**（稳定 URL 哈希 + Windows/路径预算保护）。
+- （新增）Skill 不内置浏览器运行时，渲染后 DOM 仍需由受控渲染器提供；未知 Token 格式和非常规版本 URL 继续采用保守检查/`REVIEW`。
+
 ### 2026-08-08：proxy 配置项（config.py + web2md.py + AI 判断通道）
 
 | | |
@@ -333,10 +355,9 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 ## 五、遗留事项
 
 - 导航收集范围限定侧边栏导航树（子+孙，**不递归子页面正文引用**，设计如此）；规则失效/新主题漏识别时由 `--children-from` AI 通道兜底（已实现，2026-08-03）
-- 导航解析已验证 Sphinx li/ul 与 VitePress div/section；纯 JS 渲染导航的站点可能需要扩展
-- 标题文件夹命名由 AI 助手酌情调整（须符合规范），脚本默认 `sanitize_filename`
+- 导航解析已验证 Sphinx li/ul 与 VitePress div/section；纯 JS 导航已支持渲染后 DOM 降级，但 Skill 不内置浏览器运行时（2026-08-11）
+- 标题文件夹默认由 `sanitize_filename` 生成；清洗冲突、Windows 保留名和路径长度已由稳定 URL 哈希与路径预算保护（2026-08-11）
 - `config.py` 的 `collect_children` 默认 false，需用户开启
 - `config.py` 的 `merge_paragraphs` 默认 false，靠切碎检测提示启用（2026-08-07）
-- 跨节点裸定界符配对仍靠 AI 手工修复（脚本只计数提示，2026-08-07）
-
+- 跨节点裸定界符的可靠子集已自动转换；跨非正文节点或边界不可靠时仍只报告 `REVIEW`（安全边界，2026-08-11）
 
