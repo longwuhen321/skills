@@ -7,6 +7,7 @@
   - common:        429 限流重试、分页收集、token 环境变量覆盖
   - md_import:     占位符保护/还原、公式/代码转换、版本号流程、标题内存匹配
   - math_upgrade:  $/$$/```latex``` 转换、旧宏升级、原生 alignment、span 限制删除、verify
+  - toc_upgrade:   toc / Easy Heading 双向转换、冲突保护、参数校验、幂等性
   - md_export:     storage → Markdown（宏还原、图片引用改写、树导出结构）
 
 所有用例 mock 掉配置与网络，不触碰真实 config.py 和服务器。
@@ -14,6 +15,7 @@
 
 import os
 import re
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -31,6 +33,8 @@ from debug_utils import cleanup_debug
 from md_import import MarkdownImporter
 from md_preflight import PreflightRun, review_markdown, validate_storage
 from math_upgrade import ConfluenceMathUpdater
+from toc_upgrade import (ConfluenceTocUpdater, MacroConversionError,
+                         normalize_toc_macros, validate_macro_parameters)
 from md_export import ConfluenceExporter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -46,6 +50,16 @@ MOCK_CFG = {
                       'preflight_review': False},
     'upgrade_config': {'math_align': 'left', 'auto_update': True,
                        'ai_verify': False, 'recursive': True, 'max_depth': 0},
+    'toc_upgrade_config': {
+        'target_macro': 'easy_heading', 'default_page': '', 'space': '',
+        'recursive': False, 'auto_update': True, 'ai_verify': False,
+        'macro_parameters': {
+            'titleExpandClickable': 'true',
+            'hiddenEditedFlag': 'true',
+            'navigationExpandOption': 'expand-all-by-default',
+            'useNavigationHiddenMode': 'true',
+        },
+    },
     'export_config': {'output_dir': 'confluence_export', 'recursive': True,
                       'space': ''},
     'debug_config': {'max_size_mb': 50, 'keep_recent': 20},
@@ -314,9 +328,7 @@ class TestCommon(unittest.TestCase):
                 cfg = load_config()
         self.assertEqual(cfg['common_config']['confluence_token'], 'file-token')
 
-    def test_load_config_returns_export_config(self):
-        # 回归：load_config 曾漏组装 export_config 分组，导致 md_export
-        # 永远拿不到 config.py 中的导出配置（输出目录/递归/空间）
+    def test_load_config_returns_page_tool_config_groups(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = os.path.join(tmp, 'config.py')
             with open(cfg_path, 'w', encoding='utf-8') as f:
@@ -324,10 +336,12 @@ class TestCommon(unittest.TestCase):
                         " 'confluence_token': 't'}\n")
                 f.write("export_config = {'output_dir': 'E:/out',"
                         " 'recursive': False, 'space': 'ES'}\n")
+                f.write("toc_upgrade_config = {'target_macro': 'toc'}\n")
             with patch('common.CONFIG_PATH', cfg_path):
                 cfg = load_config()
         self.assertEqual(cfg['export_config']['output_dir'], 'E:/out')
         self.assertEqual(cfg['export_config']['space'], 'ES')
+        self.assertEqual(cfg['toc_upgrade_config']['target_macro'], 'toc')
 
 
 class TestMdImport(unittest.TestCase):
@@ -897,6 +911,141 @@ class TestMdImport(unittest.TestCase):
         self.assertIn('<strong>真高亮</strong>', result)
         # 不产生畸形结构（base64 截断 + <strong> 混入 src 属性值）
         self.assertNotIn('BBB<strong>', result)
+
+class TestTocUpgrade(unittest.TestCase):
+
+    TOC = '<ac:structured-macro ac:name="toc" ac:schema-version="1"/>'
+    EASY = (
+        '<ac:structured-macro ac:name="easy-heading-free" ac:schema-version="1">'
+        '<ac:parameter ac:name="navigationTitle">现有目录</ac:parameter>'
+        '</ac:structured-macro>')
+    PARAMS = MOCK_CFG['toc_upgrade_config']['macro_parameters']
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patches = [
+            patch('toc_upgrade.SKILL_ROOT', self.tmp.name),
+            patch('toc_upgrade.load_config', return_value=MOCK_CFG),
+            patch('toc_upgrade.cleanup_debug'),
+        ]
+        for item in self.patches:
+            item.start()
+        self.updater = ConfluenceTocUpdater()
+
+    def tearDown(self):
+        self.updater.close()
+        for item in reversed(self.patches):
+            item.stop()
+        self.tmp.cleanup()
+
+    def test_toc_to_easy_uses_reference_defaults_and_preserves_other_bytes(self):
+        before = '<p>before</p>' + self.TOC + '<h2>A</h2>'
+        after, stats = normalize_toc_macros(before, 'easy_heading', self.PARAMS)
+        self.assertTrue(after.startswith('<p>before</p>'))
+        self.assertTrue(after.endswith('<h2>A</h2>'))
+        self.assertNotIn('ac:name="toc"', after)
+        self.assertIn('ac:name="easy-heading-free"', after)
+        for key, value in self.PARAMS.items():
+            self.assertIn(f'ac:name="{key}">{value}<', after)
+        self.assertRegex(after, r'ac:macro-id="[0-9a-f-]{36}"')
+        self.assertEqual(stats['action'], 'toc_to_easy_heading')
+
+    def test_easy_to_toc(self):
+        after, stats = normalize_toc_macros(
+            '<p>x</p>' + self.EASY, 'toc', self.PARAMS)
+        self.assertIn('ac:name="toc"', after)
+        self.assertNotIn('easy-heading-free', after)
+        self.assertEqual(stats['action'], 'easy_heading_to_toc')
+
+    def test_both_keep_existing_easy_without_overwriting_parameters(self):
+        before = self.TOC + '<p>middle</p>' + self.EASY
+        after, stats = normalize_toc_macros(before, 'easy_heading', self.PARAMS)
+        self.assertEqual(after, '<p>middle</p>' + self.EASY)
+        self.assertIn('现有目录', after)
+        self.assertEqual(stats['action'], 'remove_toc_keep_existing_easy')
+
+    def test_both_keep_existing_toc(self):
+        before = self.EASY + '<p>middle</p>' + self.TOC
+        after, stats = normalize_toc_macros(before, 'toc', self.PARAMS)
+        self.assertEqual(after, '<p>middle</p>' + self.TOC)
+        self.assertEqual(stats['action'], 'remove_easy_keep_existing_toc')
+
+    def test_neither_is_skipped_and_target_is_idempotent(self):
+        plain = '<h1>Title</h1>'
+        self.assertEqual(
+            normalize_toc_macros(plain, 'easy_heading', self.PARAMS)[0], plain)
+        self.assertEqual(
+            normalize_toc_macros(self.EASY, 'easy_heading', self.PARAMS)[0],
+            self.EASY)
+
+    def test_macro_text_inside_cdata_or_comment_is_not_counted(self):
+        storage = (
+            '<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA['
+            + self.TOC + ']]></ac:plain-text-body></ac:structured-macro>'
+            '<!-- ' + self.EASY + ' -->')
+        after, stats = normalize_toc_macros(
+            storage, 'easy_heading', self.PARAMS)
+        self.assertEqual(after, storage)
+        self.assertEqual(stats['toc_before'], 0)
+        self.assertEqual(stats['easy_before'], 0)
+
+    def test_duplicate_source_or_target_fails_without_output(self):
+        with self.assertRaisesRegex(MacroConversionError, '数量存在歧义'):
+            normalize_toc_macros(self.TOC + self.TOC, 'easy_heading', self.PARAMS)
+        with self.assertRaisesRegex(MacroConversionError, '数量存在歧义'):
+            normalize_toc_macros(self.EASY + self.EASY, 'toc', self.PARAMS)
+
+    def test_parameter_allowlist_and_values_are_strict(self):
+        with self.assertRaisesRegex(MacroConversionError, '不支持'):
+            validate_macro_parameters({'unknown': 'x'})
+        with self.assertRaisesRegex(MacroConversionError, '字符串'):
+            validate_macro_parameters({'useNavigationHiddenMode': True})
+        with self.assertRaisesRegex(MacroConversionError, 'selector'):
+            validate_macro_parameters({'selector': 'h1,h1'})
+        with self.assertRaisesRegex(MacroConversionError, '内部标记'):
+            validate_macro_parameters({'hiddenEditedFlag': 'false'})
+
+    def test_context_manager_closes_session(self):
+        with patch.object(self.updater.session, 'close') as close:
+            with self.updater as entered:
+                self.assertIs(entered, self.updater)
+            close.assert_called_once_with()
+
+    def test_recursive_collects_all_depths_without_max_depth(self):
+        pages = [('1', 'Root', 0), ('2', 'Child', 1), ('3', 'Deep', 8)]
+        with patch('toc_upgrade.collect_page_tree', return_value=pages) as collect, \
+             patch.object(self.updater, '_run_batch', return_value=True) as batch:
+            self.assertTrue(self.updater.run_recursive('1'))
+        collect.assert_called_once_with(
+            self.updater.session, self.updater.base_url, '1')
+        batch.assert_called_once_with(pages, stop_on_error=False)
+
+    def test_space_processes_flat_page_list_once(self):
+        rows = [('1', 'A', 3), ('2', 'B', 7)]
+        with patch('toc_upgrade.collect_space_pages', return_value=rows), \
+             patch.object(self.updater, '_run_batch', return_value=True) as batch:
+            self.assertTrue(self.updater.run_space('TEST'))
+        batch.assert_called_once_with(
+            [('1', 'A', 0), ('2', 'B', 0)], stop_on_error=False)
+
+    def test_confirm_rejects_stale_source_without_put(self):
+        page = {
+            'page_id': '9', 'title': 'T', 'version': 4,
+            'space_key': 'TEST', 'storage': self.TOC,
+        }
+        folder = Path(self.tmp.name) / 'confirm'
+        folder.mkdir()
+        (folder / 'after.html').write_text(self.EASY, encoding='utf-8')
+        (folder / 'info.txt').write_text(
+            '页面 ID: 9\n版本: 3\n源内容 SHA256: stale\n'
+            '转换后 SHA256: '
+            + hashlib.sha256(self.EASY.encode()).hexdigest()
+            + '\n目标宏: easy_heading\n', encoding='utf-8')
+        with patch.object(self.updater, 'fetch_page', return_value=page), \
+             patch.object(self.updater, 'update_page') as update:
+            self.assertFalse(self.updater.confirm_update(str(folder)))
+        update.assert_not_called()
+
 
 class TestMathUpgrade(unittest.TestCase):
 

@@ -37,6 +37,16 @@ MOCK_CFG = {
         'math_align': 'left', 'auto_update': True, 'ai_verify': False,
         'recursive': True, 'max_depth': 0,
     },
+    'toc_upgrade_config': {
+        'target_macro': 'easy_heading', 'default_page': '', 'space': '',
+        'recursive': False, 'auto_update': True, 'ai_verify': False,
+        'macro_parameters': {
+            'titleExpandClickable': 'true',
+            'hiddenEditedFlag': 'true',
+            'navigationExpandOption': 'expand-all-by-default',
+            'useNavigationHiddenMode': 'true',
+        },
+    },
     'export_config': {
         'output_dir': 'confluence_export', 'recursive': True, 'space': '',
     },
@@ -726,7 +736,8 @@ class TestCliSurface(unittest.TestCase):
         scripts_dir = Path(__file__).resolve().parent.parent
         env = os.environ.copy()
         env['PYTHONDONTWRITEBYTECODE'] = '1'
-        for script_name in ('md_import.py', 'md_export.py', 'math_upgrade.py'):
+        for script_name in ('md_import.py', 'md_export.py', 'math_upgrade.py',
+                            'toc_upgrade.py'):
             result = subprocess.run(
                 [sys.executable, '-X', 'utf8', str(scripts_dir / script_name),
                  '--help'],

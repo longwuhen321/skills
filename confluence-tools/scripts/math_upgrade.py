@@ -34,8 +34,9 @@ if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 from common import (SKILL_ROOT, load_config, request_with_retry,
-                    collect_space_pages, collect_paginated_results,
+                    collect_space_pages, collect_page_tree,
                     build_block_template, fetch_page,
+                    update_page_storage, get_child_pages,
                     normalize_heading_inline_math, get_heading_math_mode,
                     compile_inline_math_pattern, inline_math_content,
                     check_xhtml_balance)
@@ -353,27 +354,11 @@ class ConfluenceMathUpdater:
         return passed, '\n'.join(report)
 
     def update_page(self, page_info, new_storage):
-        url = f"{self.base_url}/rest/api/content/{page_info['page_id']}"
-        new_version = page_info['version'] + 1
-        payload = {
-            "version": {"number": new_version},
-            "title": page_info['title'],
-            "type": "page",
-            "space": {"key": page_info['space_key']},
-            "body": {"storage": {"value": new_storage, "representation": "storage"}}
-        }
-        resp = request_with_retry(self.session, 'PUT', url, json=payload)
-        if not resp.ok:
-            print(f"  PUT 失败 ({resp.status_code}): {resp.text[:500]}")
-        resp.raise_for_status()
-        return new_version
+        return update_page_storage(
+            self.session, self.base_url, page_info, new_storage)
 
     def get_child_pages(self, page_id):
-        url = f"{self.base_url}/rest/api/content/{page_id}/child/page"
-        rows = collect_paginated_results(
-            self.session, url, base_url=self.base_url,
-            params={'limit': 200, 'expand': 'version'})
-        return [(r['id'], r['title']) for r in rows]
+        return get_child_pages(self.session, self.base_url, page_id)
 
     def process_single(self, page_id, depth=0, page_title=''):
         indent = "  " * depth
@@ -475,29 +460,8 @@ class ConfluenceMathUpdater:
         return True
 
     def collect_tree(self, root_id, max_depth=0):
-        result = []
-        queue = [(root_id, '', 0)]
-        r = request_with_retry(
-            self.session, 'GET',
-            f"{self.base_url}/rest/api/content/{root_id}",
-            params={'expand': 'version'}, retry_on=(429, 500, 502, 503, 504))
-        r.raise_for_status()
-        root_title = r.json()['title']
-        queue[0] = (root_id, root_title, 0)
-        seen = set()
-
-        while queue:
-            pid, ptitle, pdepth = queue.pop(0)
-            if max_depth and pdepth > max_depth:
-                continue
-            if pid in seen:
-                continue
-            seen.add(pid)
-            result.append((pid, ptitle, pdepth))
-            children = self.get_child_pages(pid)
-            for cid, ctitle in children:
-                queue.append((cid, ctitle, pdepth + 1))
-        return result
+        return collect_page_tree(
+            self.session, self.base_url, root_id, max_depth=max_depth)
 
     def _run_batch(self, all_pages, stop_on_error=False):
         """批量处理公共逻辑：默认遇错继续，末尾汇总失败列表

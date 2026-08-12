@@ -8,12 +8,14 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 CHECKER = SCRIPT_DIR / 'check_config_sync.py'
 
-GROUPS = 'common_config,import_config,upgrade_config,export_config,debug_config'
+GROUPS = ('common_config,import_config,upgrade_config,toc_upgrade_config,'
+          'export_config,debug_config')
 
 EXAMPLE_TEXT = (
     "common_config = {'python_path': 'x', 'confluence_token': 'placeholder'}\n"
     "import_config = {'space': 'ALG', 'toc_enabled': True}\n"
     "upgrade_config = {'recursive': True}\n"
+    "toc_upgrade_config = {'target_macro': 'easy_heading'}\n"
     "export_config = {'output_dir': 'out'}\n"
     "debug_config = {'max_size_mb': 50}\n"
 )
@@ -22,6 +24,7 @@ CONFIG_TEXT = (
     "common_config = {'python_path': 'D:/py/python.exe', 'confluence_token': 'test-token'}\n"
     "import_config = {'space': 'ES', 'toc_enabled': False}\n"
     "upgrade_config = {'recursive': False}\n"
+    "toc_upgrade_config = {'target_macro': 'toc'}\n"
     "export_config = {'output_dir': 'D:/out'}\n"
     "debug_config = {'max_size_mb': 20}\n"
 )
@@ -38,7 +41,7 @@ def run_checker(args):
 
 class ConfigSyncTests(unittest.TestCase):
     def test_tmp_pair_synced_passes(self):
-        """临时五分组 example/config 键集一致 → 退出码 0（值不同不误报）。"""
+        """临时六分组 example/config 键集一致 → 退出码 0（值不同不误报）。"""
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'
             config = Path(tmp) / 'config.py'
@@ -47,8 +50,8 @@ class ConfigSyncTests(unittest.TestCase):
             result = run_checker([f'--example-file={example}', f'--config-file={config}', f'--groups={GROUPS}'])
             self.assertEqual(result.returncode, 0, result.stdout)
 
-    def test_tmp_pair_default_five_groups_passes(self):
-        """不传 --groups 时也必须完整检查默认五分组。"""
+    def test_tmp_pair_default_six_groups_passes(self):
+        """不传 --groups 时也必须完整检查默认六分组。"""
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'
             config = Path(tmp) / 'config.py'
@@ -87,7 +90,7 @@ class ConfigSyncTests(unittest.TestCase):
             self.assertIn('import_config', result.stdout)
 
     def test_tmp_pair_both_missing_default_group_fails(self):
-        """默认五分组中的任一组在双方都缺失，也必须显式失败。"""
+        """默认六分组中的任一组在双方都缺失，也必须显式失败。"""
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'
             config = Path(tmp) / 'config.py'

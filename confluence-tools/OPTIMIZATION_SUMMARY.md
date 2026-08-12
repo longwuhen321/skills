@@ -33,6 +33,26 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-12：目录宏与 Easy Heading Macro 双向转换
+
+| 类别 | 内容 |
+|------|------|
+| 新功能 | 新增 `scripts/toc_upgrade.py`，支持单页面、根页面及全部后代、整个空间三种范围，在 Confluence 原生 `toc` 与 Easy Heading Macro 3.6.3 的 `easy-heading-free` 之间双向转换；CLI 可覆盖目标宏，脚本可脱离 AI 助手独立运行 |
+| 配置 | 新增第六配置组 `toc_upgrade_config`；默认目标为 `easy_heading`，默认不递归且不预设空间；新建 Easy 宏采用参考页面 68223008 的 `titleExpandClickable=true`、`hiddenEditedFlag=true`、`navigationExpandOption=expand-all-by-default`，并默认启用 `useNavigationHiddenMode=true`；常用可选参数使用严格白名单和枚举校验 |
+| 冲突与安全 | 只有源宏时原位替换；两类宏各一个时保留目标宏并删除非目标宏，已有 Easy 参数不覆盖；无源宏跳过；任一类型超过一个则拒绝修改该页；新宏生成独立 UUID。转换只编辑目标宏的原始 storage 跨度，确认提交前复查源版本、源 SHA256、转换结果 SHA256、XHTML 和目标宏数量 |
+| 公共代码 | `common.py` 抽取版本化 storage 更新、直属子页面分页读取和页面树收集，`math_upgrade.py` 改为复用共享接口；配置解析和同步门禁扩展为六分组 |
+| 文档与测试 | 同步 `config.example.py`、`SKILL.md` 和 `references/script-development-rules.md`；新增双向转换、共存、重复宏拒绝、CDATA/注释保护、参数校验、幂等、完整后代、空间去重及过期确认测试，完整 selftest 192 项通过；依赖、六组配置同步、编译、LF、差异与隔离发布检查均通过 |
+| 实机验证 | 在 `ALG` 新建唯一命名的临时根页 `76054720` 与子页 `76054721`，验证单页范围不影响子页、完整子树 toc → Easy、幂等和 Easy → toc 回转；两页均按精确 ID 从当前页面删除并验证 `status=current` 为 404。当前账号无永久清空空间回收站权限，服务器返回 403，因此页面保留在回收站，未触碰其他页面 |
+
+**过程要点**：
+- Easy Heading 的固定宏名、schema 和 `macro-id` 不开放配置；只把稳定且常用的插件参数作为配置项，未知参数在远端写入前失败。
+- `--recursive` 按需求始终遍历全部后代，不提供最大层级参数；真实空间级写入未在既有空间执行，避免修改非测试页面，空间范围由隔离测试覆盖。
+- 真实测试首次清理时永久 purge 被权限拒绝；后续只按已记录的页面 ID、唯一标题和空间执行删除与复核，没有扩大权限或操作其他内容。
+
+**遗留事项更新**：
+- （新增）`toc_upgrade` 日志目录使用 `YYYYMMDD_HHMMSS_ffffff`，而现有 `debug_utils.py` 只识别 `YYYYMMDD_HHMMSS`；其日志尚未纳入自动清理候选，需单独修复并补回归测试。
+- （新增）若要求测试页从回收站永久消失，需要具备对应空间 purge 权限的管理员按精确 ID 清理；当前普通账号只能移入回收站。
+
 ### 2026-08-12：Markdown/LaTeX 上传前预审与审核副本
 
 | 类别 | 内容 |

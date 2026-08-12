@@ -7,9 +7,10 @@
 #   3. scripts/config.py 不提交到 git（已在 .gitignore 中排除）
 #
 # 配置分组说明：
-#   common_config      — 通用配置（三个脚本共用）
+#   common_config      — 通用配置（四个页面脚本共用）
 #   import_config      — md_import 专属配置
 #   upgrade_config     — math_upgrade 专属配置
+#   toc_upgrade_config — toc_upgrade 专属配置
 #   export_config      — md_export 专属配置
 #   debug_config       — 调试日志配置（共用）
 # ============================================================
@@ -105,6 +106,63 @@ upgrade_config = {
 
     # 递归最大层级，0 = 不限制。可被 --max-depth 参数覆盖。
     "max_depth": 0,
+}
+
+
+# ==================== toc_upgrade 配置 ====================
+toc_upgrade_config = {
+    # 转换后的目标宏：
+    #   "easy_heading" = 将原生“目录”(toc) 宏转换为 Easy Heading Macro
+    #   "toc"          = 将 Easy Heading Macro 转换为原生“目录”(toc) 宏
+    # 可被 --target easy_heading|toc 覆盖。
+    "target_macro": "easy_heading",
+
+    # 默认目标页面 ID。留空时必须通过 --page-id 或 --space 指定范围。
+    "default_page": "",
+
+    # 空间模式的默认空间 Key。留空表示不默认执行空间批量修改。
+    "space": "",
+
+    # 指定页面时，默认是否同时处理该页面的全部子页面（不限制层级）。
+    # 可被 --recursive / --no-recursive 覆盖。
+    "recursive": False,
+
+    # 验证通过后是否自动更新。False = 只生成 debug 文件，不提交。
+    # 可被 --no-auto-update 覆盖。
+    "auto_update": True,
+
+    # 是否生成 debug 后暂停，等待 --confirm 确认提交。
+    # 可被 --ai-verify / --no-ai-verify 覆盖。
+    "ai_verify": False,
+
+    # 仅在“toc → Easy Heading”新建宏时使用；页面中已有 Easy Heading
+    # 宏时保留原参数，不用这里的值覆盖。适配截图中的 Easy Heading Macro 3.6.3；
+    # 前三项取自参考页面 68223008，隐藏侧边目录项按本次需求默认开启。
+    "macro_parameters": {
+        # 点击标题是否展开/折叠对应内容。可选："true" / "false"。
+        "titleExpandClickable": "true",
+
+        # 插件内部编辑标记。参考页面值为 "true"，建议保持不变。
+        "hiddenEditedFlag": "true",
+
+        # 目录树默认展开策略。可选：
+        # "expand-all-by-default"、"collapse-all-by-default"、
+        # "collapse-all-but-headings-1"、"collapse-all-but-headings-1-2"、
+        # "collapse-all-but-headings-1-3"、"collapse-all-but-headings-1-4"、
+        # "disable-expand-collapse"。
+        "navigationExpandOption": "expand-all-by-default",
+
+        # 是否默认隐藏侧边目录，鼠标悬停时显示。可选："true" / "false"。
+        "useNavigationHiddenMode": "true",
+
+        # 常用可选项（按需取消注释）：
+        # 参与目录的标题层级；只能由 h1~h6 组成，以英文逗号分隔。
+        # "selector": "h1,h2,h3",
+        # 目录文字是否自动换行。可选："true" / "false"。
+        # "wrapNavigationText": "false",
+        # 自定义目录标题，不能为空。
+        # "navigationTitle": "目录",
+    },
 }
 
 

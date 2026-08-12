@@ -327,17 +327,73 @@ def fetch_page(session, base_url, page_id, expand='body.storage,version,space'):
     }
 
 
+def update_page_storage(session, base_url, page_info, new_storage):
+    """以源页面版本为基准更新 storage，返回更新后的版本号。"""
+    url = f"{base_url}/rest/api/content/{page_info['page_id']}"
+    new_version = page_info['version'] + 1
+    payload = {
+        'version': {'number': new_version},
+        'title': page_info['title'],
+        'type': 'page',
+        'space': {'key': page_info['space_key']},
+        'body': {
+            'storage': {
+                'value': new_storage,
+                'representation': 'storage',
+            }
+        },
+    }
+    response = request_with_retry(session, 'PUT', url, json=payload)
+    if not response.ok:
+        print(f"  PUT 失败 ({response.status_code}): {response.text[:500]}")
+    response.raise_for_status()
+    return new_version
+
+
+def get_child_pages(session, base_url, page_id):
+    """分页读取直属子页面，返回 ``[(id, title), ...]``。"""
+    url = f"{base_url}/rest/api/content/{page_id}/child/page"
+    rows = collect_paginated_results(
+        session, url, base_url=base_url,
+        params={'limit': 200, 'expand': 'version'})
+    return [(str(row['id']), row['title']) for row in rows]
+
+
+def collect_page_tree(session, base_url, root_id, max_depth=0):
+    """广度优先收集根页面及其子页面；``max_depth=0`` 表示不限层级。"""
+    response = request_with_retry(
+        session, 'GET', f"{base_url}/rest/api/content/{root_id}",
+        params={'expand': 'version'}, retry_on=(429, 500, 502, 503, 504))
+    response.raise_for_status()
+    queue = [(str(root_id), response.json()['title'], 0)]
+    result = []
+    seen = set()
+    while queue:
+        page_id, title, depth = queue.pop(0)
+        if max_depth and depth > max_depth:
+            continue
+        if page_id in seen:
+            continue
+        seen.add(page_id)
+        result.append((page_id, title, depth))
+        for child_id, child_title in get_child_pages(
+                session, base_url, page_id):
+            queue.append((child_id, child_title, depth + 1))
+    return result
+
+
 def load_config():
     """从 scripts/config.py 读取配置，返回 dict
 
-    配置文件定义了五个分组字典：
+    配置文件定义了六个分组字典：
         common_config   — 通用（url、token、python_path 等）
         import_config   — md_import 专属（space）
         upgrade_config  — math_upgrade 专属（对齐、递归、页面等）
+        toc_upgrade_config — toc_upgrade 专属（目标宏、范围、Easy 参数）
         export_config   — md_export 专属（输出目录、递归、空间）
         debug_config    — 调试日志（阈值、保留数）
 
-    返回值即为这五个 dict 组成的 dict，脚本按需取用。
+    返回值即为这六个 dict 组成的 dict，脚本按需取用。
     缺失文件时报错退出并引导用户首次配置。
     """
     if not os.path.exists(CONFIG_PATH):
@@ -371,6 +427,7 @@ def load_config():
         'common_config': common,
         'import_config': ns.get('import_config', {}),
         'upgrade_config': ns.get('upgrade_config', {}),
+        'toc_upgrade_config': ns.get('toc_upgrade_config', {}),
         'export_config': ns.get('export_config', {}),
         'debug_config': ns.get('debug_config', {}),
     }

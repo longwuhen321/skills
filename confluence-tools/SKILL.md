@@ -20,7 +20,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 检查 `scripts/config.py` 是否存在。不存在时启动配置向导。
 
-**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/md_preflight.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/config_parser.py`、`scripts/debug_utils.py`、`scripts/dependency_check.py`、`scripts/check_config_sync.py`、`scripts/package_check.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
+**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/md_preflight.py`、`scripts/math_upgrade.py`、`scripts/toc_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/config_parser.py`、`scripts/debug_utils.py`、`scripts/dependency_check.py`、`scripts/check_config_sync.py`、`scripts/package_check.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
 
 **依赖预检（每次执行前）**：Python 路径确定后、执行任一页面脚本前运行：
 
@@ -36,7 +36,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/check_config_sync.py"
 ```
 
-门禁对比 `config.example.py` 的**全部五分组**（`common_config` / `import_config` / `upgrade_config` / `export_config` / `debug_config`）键集合与值类型，只比结构不比值（token / 路径等占位符 vs 真实值天然不同）。配置由共享的 AST + `ast.literal_eval` 解析器读取；函数调用、导入及其他带副作用的 Python 代码一律拒绝，不执行配置代码。不一致（退出码 1/2）→ **中断任务**，按输出报告补齐/修正后重跑；通过（退出码 0）→ 继续。
+门禁对比 `config.example.py` 的**全部六分组**（`common_config` / `import_config` / `upgrade_config` / `toc_upgrade_config` / `export_config` / `debug_config`）键集合与值类型，只比结构不比值（token / 路径等占位符 vs 真实值天然不同）。配置由共享的 AST + `ast.literal_eval` 解析器读取；函数调用、导入及其他带副作用的 Python 代码一律拒绝，不执行配置代码。不一致（退出码 1/2）→ **中断任务**，按输出报告补齐/修正后重跑；通过（退出码 0）→ 继续。
 
 ### 向导规则
 
@@ -101,22 +101,31 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 19. **默认递归** → `upgrade_config.recursive`（默认 `true`，有 page_id 时自动递归子页面）
 20. **递归最大层级** → `upgrade_config.max_depth`（默认 `0` 不限）
 
+**── toc_upgrade ──**
+
+21. **目标宏** → `toc_upgrade_config.target_macro`（`"easy_heading"` / `"toc"`，默认 `"easy_heading"`）
+22. **默认目标页面 ID** → `toc_upgrade_config.default_page`（选填）
+23. **空间模式默认空间** → `toc_upgrade_config.space`（选填；默认留空，避免误触空间批量）
+24. **默认递归** → `toc_upgrade_config.recursive`（默认 `false`；启用时处理全部后代，不设置层级上限）
+25. **自动更新 / AI 验证** → `toc_upgrade_config.auto_update`（默认 `true`）+ `toc_upgrade_config.ai_verify`（默认 `false`）
+26. **新建 Easy Heading 参数** → `toc_upgrade_config.macro_parameters`。适配 Easy Heading Macro 3.6.3；默认参考页面 68223008：`titleExpandClickable="true"`、`hiddenEditedFlag="true"`、`navigationExpandOption="expand-all-by-default"`，并按用户要求默认启用 `useNavigationHiddenMode="true"`；常用可选项为 `selector`、`wrapNavigationText`、`navigationTitle`。只用于 toc 转换成新 Easy 宏，已有 Easy 宏参数不覆盖；未知键或非法枚举在写入前拒绝。
+
 **── md_export ──**
 
-21. **默认输出目录** → `export_config.output_dir`（选填，默认 `confluence_export`，相对当前工作目录，也支持绝对路径如 `D:/out`；可被 `--output` 覆盖）
-22. **默认递归导出** → `export_config.recursive`（默认 `true`，有 page_id 时自动递归子页面；可被 `--recursive` / `--no-recursive` 覆盖）
-23. **空间模式默认空间** → `export_config.space`（选填，跑 `--space` 模式时需要）
+27. **默认输出目录** → `export_config.output_dir`（选填，默认 `confluence_export`，相对当前工作目录，也支持绝对路径如 `D:/out`；可被 `--output` 覆盖）
+28. **默认递归导出** → `export_config.recursive`（默认 `true`，有 page_id 时自动递归子页面；可被 `--recursive` / `--no-recursive` 覆盖）
+29. **空间模式默认空间** → `export_config.space`（选填，跑 `--space` 模式时需要）
 
 **── Debug ──**
 
-24. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
-25. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
+30. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
+31. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
 
 配置确认后，如执行该 Python 路径需要超出当前沙箱权限，必须先通过 AI 助手 的权限审批；如需免除后续重复确认，通过 AI 助手 的审批界面设置对应规则（避免后续执行每次确认）。
 
 后续调用直接从 `scripts/config.py` 读取，不再询问。配置失效（401/403/连接超时）时提示用户重新走配置向导。
 
-**运行期配置补齐**：运行期发现 config.py 缺 `export_config` 配置项时，咨询用户该参数的配置值，然后补齐到 config.py 中。
+**运行期配置补齐**：运行期发现 config.py 缺 `toc_upgrade_config` 或 `export_config` 配置项时，咨询用户该参数的配置值，然后补齐到 config.py 中。
 
 ---
 
@@ -128,7 +137,8 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 > 1. **导入 Markdown** — 将 .md 文件上传为 Confluence 页面
 > 2. **批量导入文件夹树** — `--dir` 模式，保留文件夹层级（需开启 tree_import）
 > 3. **升级数学公式** — 升级已有页面的 $...$ / $$...$$ 为原生宏
-> 4. **导出 Markdown** — 从 Confluence 拉取页面为 Typora 兼容 Markdown
+> 4. **转换目录宏** — 在原生“目录”宏与 Easy Heading Macro 之间双向转换
+> 5. **导出 Markdown** — 从 Confluence 拉取页面为 Typora 兼容 Markdown
 
 ### 业务能力矩阵
 
@@ -137,6 +147,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 | 单页导入 | `.md`；空间 + 标题，可用 `--parent-id` / `--page-id` 消歧 | 新建或更新一个页面 | 查询严格区分 `FOUND` / `NOT_FOUND` / `ERROR`；只有 `NOT_FOUND` 才新建，歧义与查询失败均不写入 |
 | 文件夹树导入 | `--dir` 或 `--resume tree_plan.json` | 按父子层级新建、更新或移动 | 整批只建一次页面索引；计划固化 page ID/version 且同一 ID 只能分配一次；逐节点写检查点，可断点续传 |
 | 公式升级 | 单页、页面树或整个空间 | 更新 Confluence storage 正文 | 默认要求公式零残留；人工确认前复查源版本与内容哈希；批量失败返回非零 |
+| 目录宏转换 | 单页、完整页面树或整个空间 | 归一为 `toc` 或 `easy-heading-free` | 无源宏不注入；两类宏共存时只删除非目标宏；同类宏超过一个则整页拒绝；已有目标宏及其参数保持原样 |
 | Markdown 导出 | 单页、页面树或整个空间 | `<page_id>_<标题>/<标题>.md` + 可选 assets | 公共分页器拉全量；空间模式每页只导出一次；附件名和落盘路径受限于页面目录 |
 
 ---
@@ -203,7 +214,26 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 ---
 
-### 三、导出 Markdown（md_export）
+### 三、转换目录宏（toc_upgrade）
+
+```bash
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/toc_upgrade.py" --page-id <ID> --no-recursive [--target easy_heading|toc]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/toc_upgrade.py" --page-id <ID> --recursive [--target easy_heading|toc]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/toc_upgrade.py" --space <KEY> [--target easy_heading|toc]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/toc_upgrade.py" --confirm <debug目录|latest>
+```
+
+**转换规则：**
+- 只有源宏时，在原位置替换；没有 `toc` 或 `easy-heading-free` 时跳过，不自动插入。
+- 两种宏各一个且目标为 Easy Heading：删除 `toc`，原有 Easy 宏和参数保持原样；目标为 `toc` 时反向处理。
+- 任一类型在同一页面超过一个时存在位置歧义，整页拒绝写入；批量默认继续处理其他页面并最终返回失败。
+- `--recursive` 始终收集根页面及全部后代，不提供最大层级参数；`--space` 每个页面只处理一次。
+- `--target` 覆盖配置目标；`--no-auto-update`、`--ai-verify`、`--confirm`、`--stop-on-error` 的安全语义与 `math_upgrade` 一致。确认时重新核对源版本和 SHA256。
+- 新建宏生成新的 UUID，不复制参考页面 `macro-id`；宏名 `easy-heading-free` 与 schema 版本固定，不开放为配置项。
+
+---
+
+### 四、导出 Markdown（md_export）
 
 把 Confluence 页面（storage format）导出为 **Typora 兼容 Markdown**：
 
@@ -250,6 +280,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 python -X utf8 scripts/dependency_check.py
 python -X utf8 scripts/md_import.py my_doc.md --space ES
 python -X utf8 scripts/math_upgrade.py --page-id 12345 --align left
+python -X utf8 scripts/toc_upgrade.py --page-id 12345 --target easy_heading
 python -X utf8 scripts/md_export.py --page-id 12345
 ```
 
@@ -283,6 +314,8 @@ python -X utf8 scripts/md_export.py --page-id 12345
 │   └── YYYYMMDD_HHMMSS/before_upload.html
 ├── upgrade/             # math_upgrade
 │   └── YYYYMMDD_HHMMSS/{before,after}.html + info.txt
+├── toc_upgrade/         # toc_upgrade
+│   └── YYYYMMDD_HHMMSS_ffffff/{before,after}.html + info.txt
 └── export/              # md_export
     └── YYYYMMDD_HHMMSS/{page_id}_<标题>.html（原始 storage 快照）
 ```
@@ -313,6 +346,7 @@ confluence-tools/
 │   ├── md_preflight.py          # Markdown 上传前预审、审核副本和报告
 │   ├── md_import.py            # Markdown → Confluence
 │   ├── math_upgrade.py         # 数学公式升级
+│   ├── toc_upgrade.py          # 目录宏 / Easy Heading 双向转换
 │   ├── md_export.py            # Confluence → Markdown 导出
 │   └── test/                    # 本地测试（git 追踪）
 │       ├── selftest.py           # 离线自测（不依赖服务器，mock 配置运行）
@@ -323,6 +357,7 @@ confluence-tools/
     ├── _archive/                # 已完成预审任务归档
     ├── import/
     ├── upgrade/
+    ├── toc_upgrade/
     └── export/
 
 忽略规则（.gitignore）位于仓库根目录（见根目录 `.gitignore`）
@@ -380,10 +415,11 @@ confluence-tools/
 
 | 能力 | 离线验收 | 主要覆盖位置 |
 |---|---|---|
-| 配置 | 只接受无副作用字面量；五分组键和类型漂移返回 1/2 | `scripts/test/test_config_sync.py`、`TestSafeConfigAndPackaging` |
+| 配置 | 只接受无副作用字面量；六分组键和类型漂移返回 1/2 | `scripts/test/test_config_sync.py`、`TestSafeConfigAndPackaging` |
 | 退出码 | 页面、树节点、批量与附件失败均汇总为失败，入口最终返回非零 | `TestImportLookupAndConflict`、`TestTreePlanAndResume`、`TestMathSafety`、`TestExportSafety` |
 | 日志隔离 | 测试把 `SKILL_ROOT` / debug 目录定向到临时目录，不读写真实 `logs/` | `scripts/test/selftest.py` 各工具 `setUp`、`ImporterCase` / `UpdaterCase` / `ExporterCase` |
-| CLI | 三个页面入口用 `python -X utf8 ... --help` 均为退出码 0 | `TestCliSurface` |
+| CLI | 四个页面入口用 `python -X utf8 ... --help` 均为退出码 0 | `TestCliSurface` |
+| 目录宏转换 | 双向替换、共存保留目标、重复宏拒绝、无源跳过、参数白名单及幂等 | `TestTocUpgrade` |
 | 依赖缺失 | 实际导入四个模块；缺包、坏安装或缺 DLL 均一次报告完整失败集 | `TestSafeConfigAndPackaging` |
 | Windows 编码 | GBK 控制台环境下用 `python -X utf8` 执行验证，中文输出可按 UTF-8 解码 | `ConfigSyncTests.test_utf8_mode_overrides_gbk_console_for_validation_output` |
 | 目录标题公式 | `literal` / `mathinline` 双模式、非法值拒绝、正文语义不变；升级可修复旧标题宏且幂等，导出可往返 | `TestMdImport.test_toc_heading_math_stays_literal_while_body_uses_macro`、`TestMdImport.test_heading_mathinline_mode_converts_heading_and_body`、`TestMathUpgrade.test_heading_mathinline_mode_converts_literal_and_legacy_macro`、`TestMdExport.test_literal_heading_math_survives_export` |

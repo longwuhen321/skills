@@ -8,7 +8,7 @@
 
 用法：python check_config_sync.py --groups common_config,import_config,...
      （可选 --example-file / --config-file 指定对比文件；--config-text 从 stdin 读取真实配置；
-       --groups 指定要检查的分组名（逗号分隔），默认固定检查全部五分组）
+       --groups 指定要检查的分组名（逗号分隔），默认固定检查全部六分组）
 
 退出码：0 = 同步；1 = 存在差异；2 = 无法验证（文件缺失/损坏）
 """
@@ -31,6 +31,7 @@ DEFAULT_GROUPS = (
     'common_config',
     'import_config',
     'upgrade_config',
+    'toc_upgrade_config',
     'export_config',
     'debug_config',
 )
@@ -101,7 +102,7 @@ def main(argv=None):
     parser.add_argument('--config-text', action='store_true',
                         help='从 stdin 读取真实配置文本（供配置向导写入后复核）')
     parser.add_argument('--groups', default=None,
-                        help='要检查的分组名（逗号分隔，如 common_config,import_config；默认固定检查全部五分组）')
+                        help='要检查的分组名（逗号分隔，如 common_config,import_config；默认固定检查全部六分组）')
     args = parser.parse_args(argv)
 
     script_dir = Path(__file__).resolve().parent

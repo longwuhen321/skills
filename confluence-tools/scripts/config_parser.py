@@ -1,4 +1,4 @@
-"""Safe parser for the five literal ``*_config`` dictionaries."""
+"""Safe parser for literal ``*_config`` dictionaries."""
 
 import ast
 
