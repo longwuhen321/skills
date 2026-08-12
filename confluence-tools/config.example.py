@@ -71,6 +71,10 @@ import_config = {
     # 插入 Confluence 目录宏（toc）。toc_enabled=False 关闭此功能。
     "toc_enabled": True,
     "toc_min_headings": 4,
+
+    # 上传前 Markdown 预审（默认开启）：生成审核副本并完成 LaTeX、附件路径、
+    # storage XHTML 与公式宏数量验证；只上传验证通过的副本，不修改源文件。
+    "preflight_review": True,
 }
 
 

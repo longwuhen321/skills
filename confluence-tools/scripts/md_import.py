@@ -34,8 +34,10 @@ import markdown2
 
 from common import (SKILL_ROOT, load_config, request_with_retry,
                     collect_space_page_records, build_block_template,
-                    normalize_heading_inline_math, get_heading_math_mode)
+                    normalize_heading_inline_math, get_heading_math_mode,
+                    compile_inline_math_pattern, inline_math_content)
 from debug_utils import cleanup_debug
+from md_preflight import PreflightRun, validate_storage
 
 
 LOOKUP_FOUND = 'FOUND'
@@ -48,7 +50,7 @@ class MarkdownImporter:
     """Markdown 导入 Confluence 的主类"""
 
     def __init__(self, space_key=None, math_align=None, fix_hierarchy=None,
-                 force=False):
+                 force=False, preflight_review=None, cleanup_logs=True):
         cfg = load_config()
         common = cfg['common_config']
         import_cfg = cfg['import_config']
@@ -68,6 +70,9 @@ class MarkdownImporter:
         # 自动目录宏：子标题（H2~H6）数量达到 toc_min_headings 时，在正文最前插入 toc 宏
         self.toc_enabled = bool(import_cfg.get('toc_enabled', True))
         self.toc_min_headings = int(import_cfg.get('toc_min_headings', 4))
+        configured_preflight = bool(import_cfg.get('preflight_review', True))
+        self.preflight_review = (configured_preflight if preflight_review is None
+                                 else bool(preflight_review))
         if self.fix_hierarchy not in ('confirm', 'auto', 'off'):
             self.fix_hierarchy = 'confirm'
         # 树导入时记录"标题 → 页面 id"映射，供子节点挂载/移动解析
@@ -89,12 +94,68 @@ class MarkdownImporter:
         self.failed_images = []
         # 跳过不处理的 base64 内嵌图片（data: URI）计数
         self.data_images_skipped = 0
+        self._preflight_run = None
+        self._prepared_storage = {}
         # 调试目录统一放在 skill 目录下
         self.debug_dir = os.path.join(SKILL_ROOT, 'logs', 'import')
         os.makedirs(self.debug_dir, exist_ok=True)
-        cleanup_debug(os.path.join(SKILL_ROOT, 'logs'),
-                      int(debug_cfg.get('max_size_mb', 50)),
-                      int(debug_cfg.get('keep_recent', 20)))
+        if cleanup_logs:
+            cleanup_debug(os.path.join(SKILL_ROOT, 'logs'),
+                          int(debug_cfg.get('max_size_mb', 50)),
+                          int(debug_cfg.get('keep_recent', 20)))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self):
+        self.session.close()
+
+    def _ensure_preflight_run(self):
+        if self._preflight_run is None:
+            self._preflight_run = PreflightRun(Path(SKILL_ROOT) / 'logs')
+        return self._preflight_run
+
+    def _finish_preflight(self, success):
+        if self._preflight_run is None:
+            return None
+        destination = self._preflight_run.finish(success)
+        label = '已归档' if success else '已保留供排查'
+        print(f"预审产物{label}: {destination}")
+        self._preflight_run = None
+        return destination
+
+    def _prepare_markdown(self, md_file_path):
+        source_path = str(Path(md_file_path).resolve())
+        if not self.preflight_review:
+            print('⚠️ 上传前 Markdown 预审已关闭，直接使用源文件。')
+            with open(source_path, 'r', encoding='utf-8') as stream:
+                html_content = self._convert_md_to_storage(stream.read())
+            self._prepared_storage[source_path] = html_content
+            return html_content
+
+        result = self._ensure_preflight_run().review(source_path)
+        if not result['passed']:
+            print(f"❌ Markdown 预审失败: {result['review_path']}")
+            for issue in result['report']['issues']:
+                if issue['severity'] == 'error':
+                    print(f"  - {issue['rule_id']}@{issue['line']}:{issue['column']} "
+                          f"{issue['message']}")
+            return None
+        html_content = self._convert_md_to_storage(result['candidate_text'])
+        passed, errors = validate_storage(
+            result, html_content, self.heading_math_mode)
+        self._preflight_run.refresh(result)
+        if not passed:
+            print(f"❌ 审核副本转 storage 验证失败: {result['review_path']}")
+            for error in errors:
+                print(f"  - {error}")
+            return None
+        print(f"✓ Markdown 预审通过，上传副本: {result['candidate_path']}")
+        self._prepared_storage[source_path] = html_content
+        return html_content
 
     def _save_debug_file(self, content, name):
         """保存调试文件到时间戳子目录"""
@@ -234,9 +295,8 @@ class MarkdownImporter:
         patterns = [
             (r'```latex.*?```', replace_latex_block, re.DOTALL),
             (r'\$\$.*?\$\$', replace_math_block, re.DOTALL),
-            # 行内公式规则：开头 $ 后禁空白、闭合 $ 前禁空白（防 $PWD / $OLDPWD 误配）、
-            # 内容禁嵌套 $ 与换行；允许 < >（LaTeX 不等式，如 $0<x<\pi$）
-            (r'(?<!\$)\$(?![\s$])[^$\n]+?(?<![$\s])\$(?!\$)', replace_inline_math, 0)
+            (compile_inline_math_pattern(allow_raw_angle_brackets=True),
+             replace_inline_math, 0)
         ]
 
         protected_content = md_content
@@ -280,32 +340,45 @@ class MarkdownImporter:
         )
 
         def convert_math_in_text(text):
+            generated_blocks = []
+
+            def protect_generated_block(content):
+                placeholder = f'<!-- GENERATED_MATH_BLOCK_{len(generated_blocks) + 1}_{self._token} -->'
+                generated_blocks.append((placeholder, content))
+                return placeholder
+
             # $$...$$ 块级公式 → mathblock 宏（对齐方式由 block_template 决定）
             block_pattern = re.compile(r'\$\$(.*?)\$\$', re.DOTALL)
             text = block_pattern.sub(
-                lambda m: self.block_template.format(content=_clean_latex(m.group(1).strip())),
+                lambda m: protect_generated_block(self.block_template.format(
+                    content=_clean_latex(m.group(1).strip()))),
                 text
             )
 
             # ```latex``` 代码块 → mathblock 宏（对齐方式由 block_template 决定）
             latex_pattern = re.compile(r'```latex(.*?)```', re.DOTALL)
             text = latex_pattern.sub(
-                lambda m: self.block_template.format(content=_clean_latex(m.group(1).strip())),
+                lambda m: protect_generated_block(self.block_template.format(
+                    content=_clean_latex(m.group(1).strip()))),
                 text
             )
 
             # $...$ 行内公式 → mathinline 宏
             # 开头 $ 后禁空白、闭合 $ 前禁空白（防 $PWD / $OLDPWD 误配）、
             # 内容禁嵌套 $ 与换行；允许 < >（LaTeX 不等式）
-            inline_pattern = re.compile(r'(?<!\$)\$(?![\s$])([^$\n]+?)(?<![$\s])\$(?!\$)')
+            inline_pattern = compile_inline_math_pattern(
+                allow_raw_angle_brackets=True)
             text = inline_pattern.sub(
                 lambda m: (
                     '<ac:structured-macro ac:name="mathinline" ac:schema-version="1">'
-                    f'<ac:parameter ac:name="body">{_escape_minimal_for_latex(m.group(1).strip())}</ac:parameter>'
+                    f'<ac:parameter ac:name="body">{_escape_minimal_for_latex(inline_math_content(m))}</ac:parameter>'
                     '</ac:structured-macro>'
                 ),
                 text
             )
+
+            for placeholder, block_macro in generated_blocks:
+                text = text.replace(placeholder, block_macro)
 
             return text
 
@@ -642,6 +715,12 @@ class MarkdownImporter:
         html_content, _ = normalize_heading_inline_math(
             html_content, self.heading_math_mode)
 
+        # Confluence storage XHTML requires void elements to be self-closing.
+        html_content = re.sub(
+            r'<(br|hr)(\s[^<>]*?)?\s*(?<!/)>',
+            lambda match: '<' + match.group(1) + (match.group(2) or '') + '/>',
+            html_content, flags=re.IGNORECASE)
+
         # 5.6 子标题数达到阈值时，在正文最前插入 Confluence 目录宏（toc）
         html_content = self._maybe_add_toc(html_content)
         return html_content
@@ -670,20 +749,22 @@ class MarkdownImporter:
         """Markdown 导入主函数"""
         self.failed_images = []
         self.data_images_skipped = 0
-        with open(md_file_path, 'r', encoding='utf-8') as f:
-            md_content = f.read()
         # 优先级：CLI --page-name > 配置 default_page_name > md 文件名（不含扩展名）
         title = page_name or self.default_page_name or Path(md_file_path).stem
         # 优先级：CLI --parent-id > 配置 default_parent_id（仅新建页面时生效）
         parent_id = parent_id or self.default_parent_id
 
-        html_content = self._convert_md_to_storage(md_content)
+        html_content = self._prepare_markdown(md_file_path)
+        if html_content is None:
+            self._finish_preflight(False)
+            return False
 
         # 6. 创建或更新页面
         parent_scope = parent_id if parent_id is not None else _ANY_PARENT
         lookup, existing_id, existing_version = self._find_page_by_title(
             title, parent_id=parent_scope, page_id=page_id)
         if lookup == LOOKUP_ERROR:
+            self._finish_preflight(False)
             return False
         if lookup == LOOKUP_FOUND:
             print(f"页面已存在 (ID: {existing_id}, v{existing_version})，执行更新...")
@@ -692,6 +773,7 @@ class MarkdownImporter:
         else:
             page_id, current_version = self._create_page(title, html_content, parent_id)
         if not page_id:
+            self._finish_preflight(False)
             return False
 
         # 7. 处理图片链接（需 page_id 上传附件），在最新版本号上再 +1
@@ -700,6 +782,7 @@ class MarkdownImporter:
             updated_id, current_version = self._update_page(
                 page_id, title, final_content, current_version)
             if not updated_id:
+                self._finish_preflight(False)
                 return False
 
         self._remember_page(page_id, title, current_version, parent_id)
@@ -714,8 +797,10 @@ class MarkdownImporter:
 
         if self.failed_images:
             print("❌ 导入存在附件失败，任务未完整完成。")
+            self._finish_preflight(False)
             return False
 
+        self._finish_preflight(True)
         print(f"✅ 导入完成: {md_file_path} → {title} (ID: {page_id})")
         return page_id
 
@@ -898,6 +983,18 @@ class MarkdownImporter:
             return True
         return any(self._result_has_failure(c) for c in result['children'])
 
+    def _preflight_plan(self, plan):
+        """在任何树节点写入前预审全部未完成 Markdown。"""
+        passed = True
+        if (plan['status'] not in ('skip', 'error')
+                and not plan.get('completed')):
+            if self._prepare_markdown(plan['md_path']) is None:
+                passed = False
+        for child in plan['children']:
+            if not self._preflight_plan(child):
+                passed = False
+        return passed
+
     def _execute_plan(self, plan, parent_id=None, checkpoint=None):
         """Execute a frozen plan and checkpoint each completed node for resume."""
         if plan['status'] == 'skip':
@@ -919,9 +1016,14 @@ class MarkdownImporter:
                     'page_id': page_id, 'children': children}
 
         title = plan['title']
-        with open(plan['md_path'], 'r', encoding='utf-8') as f:
-            md_content = f.read()
-        html_content = self._convert_md_to_storage(md_content)
+        source_path = str(Path(plan['md_path']).resolve())
+        html_content = self._prepared_storage.get(source_path)
+        if html_content is None and not self.preflight_review:
+            html_content = self._prepare_markdown(source_path)
+        if html_content is None:
+            print(f"❌ 失败: {title}（缺少已验证的上传副本）")
+            return {'title': title, 'status': 'failed',
+                    'page_id': plan.get('page_id'), 'children': []}
 
         status = plan['status']
         result_status = status
@@ -1075,10 +1177,16 @@ class MarkdownImporter:
             print("\n（仅计划，未执行任何操作）")
             return True
 
+        if not self._preflight_plan(plan):
+            print("❌ 树导入预审失败，未执行任何远端写操作。")
+            self._finish_preflight(False)
+            return False
+
         if self._plan_has_move(plan) and self.fix_hierarchy == 'confirm' and not yes:
             ans = input("⚠️ 检测到需移动层级的页面，确认执行？[y/N] ").strip().lower()
             if ans != 'y':
                 print("已取消，未执行任何操作。")
+                self._finish_preflight(False)
                 return False
 
         print("\n🚀 开始导入...")
@@ -1088,7 +1196,9 @@ class MarkdownImporter:
         self._print_results(results)
         if self._result_has_failure(results):
             print(f"❌ 树导入存在失败；可用 --resume {checkpoint_path} 继续。")
+            self._finish_preflight(False)
             return False
+        self._finish_preflight(True)
         print("✅ 树导入完成。")
         return True
 
@@ -1118,6 +1228,14 @@ if __name__ == "__main__":
                         help='公式对齐方式：left 左对齐 / center 居中（默认从 config.py 读取）')
     parser.add_argument('--force', action='store_true',
                         help='409 版本冲突时确认用最新远端版本重试覆盖；默认安全失败')
+    preflight_group = parser.add_mutually_exclusive_group()
+    preflight_group.add_argument(
+        '--preflight-review', dest='preflight_review', action='store_true',
+        help='启用上传前 Markdown 预审（默认从 config.py 读取）')
+    preflight_group.add_argument(
+        '--no-preflight-review', dest='preflight_review', action='store_false',
+        help='本次关闭上传前 Markdown 预审')
+    parser.set_defaults(preflight_review=None)
     args = parser.parse_args()
 
     print("=" * 60)
@@ -1125,22 +1243,26 @@ if __name__ == "__main__":
     print("=" * 60)
 
     if args.dir or args.resume:
-        importer = MarkdownImporter(space_key=args.space, math_align=args.align,
-                                    fix_hierarchy=args.fix_hierarchy,
-                                    force=args.force)
-        ok = importer.import_tree(args.dir, plan_only=args.plan_only,
-                                  yes=args.yes, resume_file=args.resume)
+        with MarkdownImporter(
+                space_key=args.space, math_align=args.align,
+                fix_hierarchy=args.fix_hierarchy, force=args.force,
+                preflight_review=args.preflight_review,
+                cleanup_logs=not bool(args.resume)) as importer:
+            ok = importer.import_tree(args.dir, plan_only=args.plan_only,
+                                      yes=args.yes, resume_file=args.resume)
         sys.exit(0 if ok else 1)
     else:
         if not args.md_file:
             parser.error("必须指定 md 文件路径，或使用 --dir 批量导入文件夹树")
-        importer = MarkdownImporter(space_key=args.space, math_align=args.align,
-                                    force=args.force)
-        result = importer.import_markdown(
-            args.md_file,
-            parent_id=args.parent_id,
-            page_name=args.page_name,
-            page_id=args.page_id,
-        )
+        with MarkdownImporter(
+                space_key=args.space, math_align=args.align,
+                force=args.force,
+                preflight_review=args.preflight_review) as importer:
+            result = importer.import_markdown(
+                args.md_file,
+                parent_id=args.parent_id,
+                page_name=args.page_name,
+                page_id=args.page_id,
+            )
         print("🎉 导入成功!" if result else "❌ 导入失败，请检查调试文件。")
         sys.exit(0 if result else 1)

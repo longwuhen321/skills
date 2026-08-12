@@ -36,7 +36,9 @@ if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
 from common import (SKILL_ROOT, load_config, request_with_retry,
                     collect_space_pages, collect_paginated_results,
                     build_block_template, fetch_page,
-                    normalize_heading_inline_math, get_heading_math_mode)
+                    normalize_heading_inline_math, get_heading_math_mode,
+                    compile_inline_math_pattern, inline_math_content,
+                    check_xhtml_balance)
 from debug_utils import cleanup_debug
 
 
@@ -78,6 +80,15 @@ class ConfluenceMathUpdater:
         cleanup_debug(os.path.join(SKILL_ROOT, 'logs'),
                       int(debug_cfg.get('max_size_mb', 50)),
                       int(debug_cfg.get('keep_recent', 20)))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self):
+        self.session.close()
 
     # ── 1. 拉取页面 ──
     def fetch_page(self, page_id):
@@ -182,7 +193,7 @@ class ConfluenceMathUpdater:
             r'<ac:structured-macro\b(?:[^>]*/>|.*?</ac:structured-macro>)|'
             r'<code[^>]*>.*?</code>|'
             r'<pre[^>]*>.*?</pre>|'
-            r'</?(?:td|tr|th|table|thead|tbody|p|div|h[1-6]|li|ul|ol|br|hr|img|a|strong|em|blockquote)[^>]*/?>)',
+            r'</?(?:td|tr|th|table|thead|tbody|p|div|h[1-6]|li|ul|ol|br|hr|img|a|strong|blockquote)[^>]*/?>)',
             storage_html, flags=re.DOTALL)
 
         def convert(text):
@@ -204,8 +215,10 @@ class ConfluenceMathUpdater:
 
             def replace_inline(m):
                 nonlocal inline_count, upgraded_count
-                content = _sanitize_latex(m.group(1).strip())
-                is_complex = ('=' in content and len(content) > 20)
+                content = _sanitize_latex(inline_math_content(
+                    m, repair_markdown_emphasis=True))
+                is_complex = (m.group('spaced') is None
+                              and '=' in content and len(content) > 20)
                 if is_complex:
                     upgraded_count += 1
                     return self.block_template.format(content=content)
@@ -216,13 +229,8 @@ class ConfluenceMathUpdater:
                         f'<ac:parameter ac:name="body">{escape_latex(content)}</ac:parameter>'
                         '</ac:structured-macro>')
 
-            text = re.sub(
-                # 行内公式规则：
-                #   - 开头 $ 后禁空白（排除 $ PWD 等）
-                #   - 闭合 $ 前禁空白（排除 $PWD / $OLDPWD 的跨变量配对）
-                #   - 内容禁 < > $ 换行（防跨 HTML 标签吞 span；storage 中 < 已转义为 &lt;，实体形式可正常匹配）
-                r'(?<![$])[$](?![\s$])([^$<>\n]+?)(?<![$\s])[$](?![$])',
-                replace_inline, text)
+            text = compile_inline_math_pattern(
+                allow_markdown_emphasis=True).sub(replace_inline, text)
 
             return text, {
                 'inline': inline_count,
@@ -280,30 +288,7 @@ class ConfluenceMathUpdater:
 
     @staticmethod
     def _check_xhtml_balance(html):
-        """栈式标签配对检查（支持 ac:/ri: 前缀与 HTML 空元素），返回 (ok, 描述)
-
-        防 PUT 400 "Error parsing xhtml"：转换后的标签不配对在提交前拦截。
-        注意：先剔除 CDATA 与注释——其中可能含 `<mmc::Irlock>` 这类
-        代码文本，会被误当成标签（历史误报根因）。
-        """
-        protected = re.sub(r'<!\[CDATA\[.*?\]\]>', '', html, flags=re.DOTALL)
-        protected = re.sub(r'<!--.*?-->', '', protected, flags=re.DOTALL)
-        stack = []
-        void_tags = {'br', 'hr', 'img', 'meta', 'input', 'link', 'area',
-                     'base', 'col', 'embed', 'source', 'track', 'wbr'}
-        for m in re.finditer(r'</?([a-zA-Z][a-zA-Z0-9:_-]*)(?:\s[^>]*?)?/?>', protected):
-            tag, raw = m.group(1), m.group(0)
-            if raw.startswith('</'):
-                if not stack or stack[-1] != tag:
-                    return False, f"多余闭合 </{tag}>（位置 {m.start()}）"
-                stack.pop()
-            elif raw.endswith('/>') or tag in void_tags:
-                continue
-            else:
-                stack.append(tag)
-        if stack:
-            return False, f"未闭合标签: {stack[-5:]}"
-        return True, "标签配对 OK"
+        return check_xhtml_balance(html)
 
     def verify(self, before, after, stats):
         report = []
@@ -339,8 +324,7 @@ class ConfluenceMathUpdater:
 
         unprotected_after = protected_pattern.sub(mask, after)
         residual_patterns = {
-            'inline': re.compile(
-                r'(?<![$])[$](?![\s$])([^$<>\n]+?)(?<![$\s])[$](?![$])'),
+            'inline': compile_inline_math_pattern(allow_markdown_emphasis=True),
             'block': re.compile(r'[$][$]([^$<>]+?)[$][$]', re.DOTALL),
             'latex': re.compile(r'```latex(.*?)```', re.DOTALL),
         }
@@ -590,43 +574,41 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.confirm:
-        updater = ConfluenceMathUpdater()
-        ok = updater.confirm_update(
-            args.confirm if args.confirm != 'latest' else None)
+        with ConfluenceMathUpdater() as updater:
+            ok = updater.confirm_update(
+                args.confirm if args.confirm != 'latest' else None)
         sys.exit(0 if ok else 1)
 
-    updater = ConfluenceMathUpdater(
-        space_key=args.space,
-        math_align=args.align,
-        auto_update=False if args.no_auto_update else None,
-        ai_verify=args.ai_verify,
-        allow_math_residuals=args.allow_math_residuals,
-    )
+    with ConfluenceMathUpdater(
+            space_key=args.space,
+            math_align=args.align,
+            auto_update=False if args.no_auto_update else None,
+            ai_verify=args.ai_verify,
+            allow_math_residuals=args.allow_math_residuals) as updater:
+        page_id = args.page_id or updater.default_page
+        recursive = args.recursive if args.recursive is not None else updater.recursive
+        max_depth = args.max_depth if args.max_depth >= 0 else updater.max_depth
 
-    page_id = args.page_id or updater.default_page
-    recursive = args.recursive if args.recursive is not None else updater.recursive
-    max_depth = args.max_depth if args.max_depth >= 0 else updater.max_depth
+        if not page_id and not updater.space_key:
+            parser.error("必须指定 --page-id 或 --space，或在 config.py 的 upgrade_config 中设置 default_page 或 space")
 
-    if not page_id and not updater.space_key:
-        parser.error("必须指定 --page-id 或 --space，或在 config.py 的 upgrade_config 中设置 default_page 或 space")
+        print("=" * 60)
+        print("🔍 Confluence 数学公式升级工具")
+        align_label = '左对齐 (mathblock + alignment=left)' if updater.math_align == 'left' else '居中 (mathblock)'
+        print(f"  对齐: {align_label}")
+        print("=" * 60)
 
-    print("=" * 60)
-    print("🔍 Confluence 数学公式升级工具")
-    align_label = '左对齐 (mathblock + alignment=left)' if updater.math_align == 'left' else '居中 (mathblock)'
-    print(f"  对齐: {align_label}")
-    print("=" * 60)
-
-    try:
-        if page_id and recursive:
-            ok = updater.run_recursive(
-                page_id, max_depth=max_depth,
-                stop_on_error=args.stop_on_error)
-        elif page_id:
-            ok = updater.run_single(page_id)
-        else:
-            ok = updater.run_space(
-                updater.space_key, stop_on_error=args.stop_on_error)
-    except Exception as exc:
-        print(f"❌ 执行失败: {exc}")
-        ok = False
+        try:
+            if page_id and recursive:
+                ok = updater.run_recursive(
+                    page_id, max_depth=max_depth,
+                    stop_on_error=args.stop_on_error)
+            elif page_id:
+                ok = updater.run_single(page_id)
+            else:
+                ok = updater.run_space(
+                    updater.space_key, stop_on_error=args.stop_on_error)
+        except Exception as exc:
+            print(f"❌ 执行失败: {exc}")
+            ok = False
     sys.exit(0 if ok else 1)

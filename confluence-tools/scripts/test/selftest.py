@@ -29,6 +29,7 @@ from common import (load_config, request_with_retry, collect_space_pages,
                     build_block_template)
 from debug_utils import cleanup_debug
 from md_import import MarkdownImporter
+from md_preflight import PreflightRun, review_markdown, validate_storage
 from math_upgrade import ConfluenceMathUpdater
 from md_export import ConfluenceExporter
 
@@ -41,7 +42,8 @@ MOCK_CFG = {
         'confluence_url': 'http://test:8090',
         'confluence_token': 'test-token',
     },
-    'import_config': {'space': 'TEST', 'math_align': 'left'},
+    'import_config': {'space': 'TEST', 'math_align': 'left',
+                      'preflight_review': False},
     'upgrade_config': {'math_align': 'left', 'auto_update': True,
                        'ai_verify': False, 'recursive': True, 'max_depth': 0},
     'export_config': {'output_dir': 'confluence_export', 'recursive': True,
@@ -71,6 +73,129 @@ class FakeResponse:
 
     def __exit__(self, *args):
         return False
+
+
+class TestMdPreflight(unittest.TestCase):
+
+    def test_spaced_formula_candidate_is_canonical_and_source_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            original = '| 公式 |\n| --- |\n| $ \\mu_{x} $ |\n'
+            source.write_text(original, encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            self.assertTrue(result['passed'], result['report'])
+            self.assertEqual(source.read_text(encoding='utf-8'), original)
+            self.assertIn('$\\mu_{x}$', result['candidate_text'])
+            self.assertEqual(result['report']['formula_counts']['inline'], 1)
+
+    def test_unmatched_dollar_blocks_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text('broken $ x + y\n', encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            self.assertFalse(result['passed'])
+            self.assertIn('MATH_INLINE_DELIMITER_UNMATCHED',
+                          {i['rule_id'] for i in result['report']['issues']})
+
+    def test_latex_brace_and_environment_errors_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text(
+                '$x_{n$\n\n$$\\begin{matrix}x$$\n', encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            self.assertFalse(result['passed'])
+            rules = {i['rule_id'] for i in result['report']['issues']}
+            self.assertIn('LATEX_BRACE_UNCLOSED', rules)
+            self.assertIn('LATEX_ENVIRONMENT_UNCLOSED', rules)
+
+    def test_code_shell_currency_and_escaped_dollar_are_not_formulas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text(
+                '`$x$`\n\n$PWD / $OLDPWD and $5 plus \\$ literal\n',
+                encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            self.assertTrue(result['passed'], result['report'])
+            self.assertEqual(result['report']['formula_counts']['inline'], 0)
+
+    def test_high_confidence_asymmetric_spacing_is_repaired_in_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            original = ('| $ \\boldsymbol{w}_{n}$ |\n'
+                        '时刻 $ n - 1$ 状态\n')
+            source.write_text(original, encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            self.assertTrue(result['passed'], result['report'])
+            self.assertEqual(source.read_text(encoding='utf-8'), original)
+            self.assertIn('$\\boldsymbol{w}_{n}$', result['candidate_text'])
+            self.assertIn('$n - 1$', result['candidate_text'])
+            self.assertEqual(result['report']['formula_counts']['inline'], 2)
+            self.assertEqual(
+                sum(fix['count'] for fix in result['report']['fixes']
+                    if fix['rule_id'] ==
+                    'MATH_ASYMMETRIC_SPACING_REPAIRED'),
+                2)
+
+    def test_ambiguous_asymmetric_spacing_still_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text('$ x$ / $y $\n', encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            self.assertFalse(result['passed'])
+            self.assertIn('MATH_INLINE_DELIMITER_UNMATCHED',
+                          {i['rule_id'] for i in result['report']['issues']})
+
+    def test_missing_attachment_blocks_before_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text('![x](missing.png)\n', encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            self.assertFalse(result['passed'])
+            self.assertIn('ATTACHMENT_NOT_FOUND',
+                          {i['rule_id'] for i in result['report']['issues']})
+
+    def test_storage_validation_checks_counts_and_xhtml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text('$ x $\n', encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            storage = ('<p><ac:structured-macro ac:name="mathinline">'
+                       '<ac:parameter ac:name="body">x</ac:parameter>'
+                       '</ac:structured-macro></p>')
+            passed, errors = validate_storage(result, storage, 'literal')
+            self.assertTrue(passed, errors)
+            passed, errors = validate_storage(result, '<p>$x$</p>', 'literal')
+            self.assertFalse(passed)
+
+    def test_storage_validation_rejects_bare_confluence_void_element(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text('plain\n', encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            passed, errors = validate_storage(
+                result, '<p>first<br>second</p>', 'literal')
+            self.assertFalse(passed)
+            self.assertTrue(any('br/hr' in error for error in errors))
+
+    def test_successful_run_archives_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text('$x$\n', encoding='utf-8')
+            run = PreflightRun(root / 'logs')
+            result = run.review(source)
+            destination = run.finish(True)
+            self.assertTrue((destination / 'manifest.json').is_file())
+            self.assertTrue((destination / 'pages' / '0001' / 'candidate.md').is_file())
 
 
 class TestCommon(unittest.TestCase):
@@ -245,6 +370,19 @@ class TestMdImport(unittest.TestCase):
         self.assertIn('LATEX_BLOCK_', protected)
         restored = self.importer._restore_math_blocks(protected, blocks)
         self.assertEqual(restored, md)
+
+    def test_symmetric_spaced_inline_math_is_protected(self):
+        md = 'table $ \\boldsymbol{x}_{n} $ and tight $y$'
+        protected, blocks = self.importer._protect_math_blocks(md)
+        self.assertEqual(len(blocks), 2)
+        self.assertNotIn('$ \\boldsymbol{x}_{n} $', protected)
+        self.assertEqual(self.importer._restore_math_blocks(protected, blocks), md)
+
+    def test_asymmetric_space_shell_and_currency_are_not_math(self):
+        md = '$ x$ / $y $ / $PWD / $OLDPWD / $5 and $10'
+        protected, blocks = self.importer._protect_math_blocks(md)
+        self.assertEqual(blocks, [])
+        self.assertEqual(protected, md)
 
     def test_placeholder_no_collision(self):
         # 原文恰好包含旧格式占位符注释文本，不应被误处理
@@ -663,6 +801,27 @@ class TestMdImport(unittest.TestCase):
         self.assertIn('0&lt;x&lt;\\pi', heading)
         self.assertEqual(html.count('ac:name="mathinline"'), 2)
 
+    def test_table_symmetric_spaced_math_uses_macro(self):
+        md = ('| 方程 | 注释 |\n| --- | --- |\n'
+              '| $ \\boldsymbol{P}_{n,n} $ | 协方差 |\n')
+        html = self.importer._convert_md_to_storage(md)
+        cell = re.search(r'<td>(.*?)</td>', html, re.DOTALL).group(1)
+        self.assertIn('ac:name="mathinline"', cell)
+        self.assertIn('\\boldsymbol{P}_{n,n}', cell)
+        self.assertNotIn('$ ', cell)
+
+    def test_nested_dollars_inside_block_are_not_converted_to_inline_macro(self):
+        md = '$$\\colorbox{yellow}{$22.25$}$$\n'
+        html = self.importer._convert_md_to_storage(md)
+        self.assertEqual(html.count('ac:name="mathblock"'), 1)
+        self.assertEqual(html.count('ac:name="mathinline"'), 0)
+        self.assertIn(r'\colorbox{yellow}{$22.25$}', html)
+
+    def test_markdown_line_break_is_confluence_xhtml_self_closing(self):
+        html = self.importer._convert_md_to_storage('first<br>second\n')
+        self.assertIn('<br/>', html)
+        self.assertNotRegex(html, r'<br\s*>')
+
     def test_invalid_heading_math_mode_is_rejected_by_importer(self):
         cfg = dict(MOCK_CFG)
         cfg['common_config'] = dict(MOCK_CFG['common_config'],
@@ -670,6 +829,20 @@ class TestMdImport(unittest.TestCase):
         with patch('md_import.load_config', return_value=cfg):
             with self.assertRaisesRegex(ValueError, 'heading_math_mode'):
                 MarkdownImporter(space_key='TEST')
+
+    def test_context_manager_closes_session(self):
+        with patch.object(self.importer.session, 'close') as close:
+            with self.importer as entered:
+                self.assertIs(entered, self.importer)
+            close.assert_called_once_with()
+
+    def test_resume_mode_can_preserve_checkpoint_from_startup_cleanup(self):
+        with patch('md_import.cleanup_debug') as cleanup:
+            importer = MarkdownImporter(space_key='TEST', cleanup_logs=False)
+        try:
+            cleanup.assert_not_called()
+        finally:
+            importer.close()
 
     def test_toc_not_added_below_threshold(self):
         cfg = dict(MOCK_CFG)
@@ -809,6 +982,21 @@ class TestMathUpgrade(unittest.TestCase):
         self.assertEqual(stats['inline'], 0)
         self.assertNotIn('mathinline', after)
 
+    def test_symmetric_spaced_inline_math_converts(self):
+        html = '<table><tr><td>$ \\boldsymbol{P}_{n,n} $</td></tr></table>'
+        after, stats = self.updater.convert_math(html)
+        self.assertEqual(stats['inline'], 1)
+        self.assertIn('ac:name="mathinline"', after)
+        self.assertNotIn('$ \\boldsymbol{P}_{n,n} $', after)
+
+    def test_spaced_formula_repairs_markdown_emphasis_damage(self):
+        html = ('<table><tr><td>$ \\boldsymbol{P}<em>{n,n} = '
+                'E(\\boldsymbol{e}</em>{n}) $</td></tr></table>')
+        after, stats = self.updater.convert_math(html)
+        self.assertEqual(stats['inline'], 1)
+        self.assertIn(r'\boldsymbol{P}_{n,n} = E(\boldsymbol{e}_{n})', after)
+        self.assertNotIn('<em>', after)
+
     def test_inline_math_inequality_converts(self):
         # storage 格式中 < 已转义为 &lt;：$0&lt;x&lt;\pi$ 应转换为 mathinline 宏。
         # body 中 & 再转义为 &amp;（XML 解析后还原为 &lt;，渲染为 <）
@@ -868,6 +1056,12 @@ class TestMathUpgrade(unittest.TestCase):
         with patch('math_upgrade.load_config', return_value=cfg):
             with self.assertRaisesRegex(ValueError, 'heading_math_mode'):
                 ConfluenceMathUpdater(math_align='left')
+
+    def test_context_manager_closes_session(self):
+        with patch.object(self.updater.session, 'close') as close:
+            with self.updater as entered:
+                self.assertIs(entered, self.updater)
+            close.assert_called_once_with()
 
     def test_verify_ignores_intentional_heading_literal_math(self):
         after = '<h2>Step $x$</h2><p>plain</p>'
@@ -1051,6 +1245,12 @@ class TestMdExport(unittest.TestCase):
                 '</ac:structured-macro>')
         md = self._convert(html)
         self.assertIn('$x^2$', md)
+
+    def test_context_manager_closes_session(self):
+        with patch.object(self.exporter.session, 'close') as close:
+            with self.exporter as entered:
+                self.assertIs(entered, self.exporter)
+            close.assert_called_once_with()
 
     def test_code_macro_to_fence(self):
         html = ('<ac:structured-macro ac:name="code" ac:schema-version="1">'

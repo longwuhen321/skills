@@ -53,6 +53,66 @@ def build_block_template(align: str) -> str:
     )
 
 
+def compile_inline_math_pattern(allow_raw_angle_brackets=False,
+                                allow_markdown_emphasis=False):
+    """编译统一行内公式规则：接受 ``$x$`` 或 ``$ x $``。
+
+    空格必须两侧对称，因而不会把 ``$PWD / $OLDPWD`` 的两个变量跨配成
+    公式。storage HTML 场景默认禁止裸 ``< >``，Markdown 保护阶段可显式
+    放开，以便 ``$ 0<x<\\pi $`` 在 markdown2 转义前得到保护。
+    """
+    if allow_raw_angle_brackets:
+        content_char = r'[^$\n]'
+        edge_char = r'[^$\s]'
+    elif allow_markdown_emphasis:
+        content_char = r'(?:[^$<>\n]|<em>|</em>)'
+        edge_char = r'(?:[^$<>\s]|<em>|</em>)'
+    else:
+        content_char = r'[^$<>\n]'
+        edge_char = r'[^$<>\s]'
+    spaced_left_boundary = r'(?<![A-Za-z0-9_\\}])'
+    spaced_right_boundary = r'(?![A-Za-z0-9_\\{])'
+    return re.compile(
+        r'(?<![\\$])(?:'
+        rf'\$(?P<tight>(?![\s$]){content_char}+?(?<![$\s]))(?<!\\)\$|'
+        + spaced_left_boundary
+        + rf'\$[ \t]+(?P<spaced>{edge_char}(?:{content_char}*?{edge_char})?)[ \t]+(?<!\\)\$'
+        + spaced_right_boundary
+        + r')(?!\$)')
+
+
+def inline_math_content(match, repair_markdown_emphasis=False) -> str:
+    """从统一行内公式匹配中取出规范化公式正文。"""
+    content = (match.group('tight') or match.group('spaced')).strip()
+    if repair_markdown_emphasis:
+        content = re.sub(r'</?em>', '_', content, flags=re.IGNORECASE)
+    return content
+
+
+def check_xhtml_balance(storage_html: str):
+    """检查 storage XHTML 标签配对，返回 ``(ok, 描述)``。"""
+    protected = re.sub(r'<!\[CDATA\[.*?\]\]>', '', storage_html,
+                       flags=re.DOTALL)
+    protected = re.sub(r'<!--.*?-->', '', protected, flags=re.DOTALL)
+    stack = []
+    void_tags = {'br', 'hr', 'img', 'meta', 'input', 'link', 'area',
+                 'base', 'col', 'embed', 'source', 'track', 'wbr'}
+    for match in re.finditer(
+            r'</?([a-zA-Z][a-zA-Z0-9:_-]*)(?:\s[^>]*?)?/?>', protected):
+        tag, raw = match.group(1), match.group(0)
+        if raw.startswith('</'):
+            if not stack or stack[-1] != tag:
+                return False, f"多余闭合 </{tag}>（位置 {match.start()}）"
+            stack.pop()
+        elif raw.endswith('/>') or tag in void_tags:
+            continue
+        else:
+            stack.append(tag)
+    if stack:
+        return False, f"未闭合标签: {stack[-5:]}"
+    return True, "标签配对 OK"
+
+
 def normalize_heading_inline_math(storage_html: str, mode='literal'):
     """按配置统一标题内行内公式，返回 ``(新内容, 变更数量)``。
 
@@ -81,8 +141,7 @@ def normalize_heading_inline_math(storage_html: str, mode='literal'):
             f'<ac:parameter ac:name="body">{escaped}</ac:parameter>'
             '</ac:structured-macro>')
 
-    inline_pattern = re.compile(
-        r'(?<!\$)\$(?![\s$])([^$\n]+?)(?<![$\s])\$(?!\$)')
+    inline_pattern = compile_inline_math_pattern(allow_markdown_emphasis=True)
 
     def replace_heading(match):
         nonlocal restored
@@ -104,29 +163,38 @@ def normalize_heading_inline_math(storage_html: str, mode='literal'):
 
         opening, body, closing = match.groups()
         body = macro_pattern.sub(replace_macro, body)
-        if mode == 'mathinline':
-            parts = []
-            last = 0
-            for macro in macro_pattern.finditer(body):
-                text = body[last:macro.start()]
+        parts = []
+        last = 0
+        for macro in macro_pattern.finditer(body):
+            text = body[last:macro.start()]
 
-                def replace_literal(literal_match):
-                    nonlocal restored
-                    restored += 1
-                    return mathinline_macro(literal_match.group(1).strip())
-
-                parts.append(inline_pattern.sub(replace_literal, text))
-                parts.append(macro.group(0))
-                last = macro.end()
-            tail = body[last:]
-
-            def replace_literal_tail(literal_match):
+            def replace_literal(literal_match):
                 nonlocal restored
-                restored += 1
-                return mathinline_macro(literal_match.group(1).strip())
+                content = inline_math_content(
+                    literal_match, repair_markdown_emphasis=True)
+                replacement = (mathinline_macro(content) if mode == 'mathinline'
+                               else f'${content}$')
+                if replacement != literal_match.group(0):
+                    restored += 1
+                return replacement
 
-            parts.append(inline_pattern.sub(replace_literal_tail, tail))
-            body = ''.join(parts)
+            parts.append(inline_pattern.sub(replace_literal, text))
+            parts.append(macro.group(0))
+            last = macro.end()
+        tail = body[last:]
+
+        def replace_literal_tail(literal_match):
+            nonlocal restored
+            content = inline_math_content(
+                literal_match, repair_markdown_emphasis=True)
+            replacement = (mathinline_macro(content) if mode == 'mathinline'
+                           else f'${content}$')
+            if replacement != literal_match.group(0):
+                restored += 1
+            return replacement
+
+        parts.append(inline_pattern.sub(replace_literal_tail, tail))
+        body = ''.join(parts)
         return opening + body + closing
 
     heading_pattern = re.compile(

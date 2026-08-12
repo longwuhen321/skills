@@ -86,6 +86,15 @@ class ConfluenceExporter:
                       'skipped_macros': set()}
         self.failed_pages = []
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self):
+        self.session.close()
+
     # ── 1. 数据获取 ──
 
     def fetch_page(self, page_id):
@@ -574,19 +583,19 @@ if __name__ == "__main__":
     print("📤 Confluence → Markdown 导出工具")
     print("=" * 60)
 
-    exporter = ConfluenceExporter(space_key=args.space, recursive=args.recursive,
-                                  output_dir=args.output)
-    ok = True
-    try:
-        if args.page_id:
-            exporter.export_page(args.page_id)
-            ok = (not exporter.failed_pages
-                  and exporter.stats['failed_images'] == 0)
-        else:
-            ok = exporter.export_space(args.space)
-    except Exception as exc:
-        print(f"❌ 导出失败: {exc}")
-        ok = False
-    finally:
-        exporter._print_summary()
+    with ConfluenceExporter(space_key=args.space, recursive=args.recursive,
+                            output_dir=args.output) as exporter:
+        ok = True
+        try:
+            if args.page_id:
+                exporter.export_page(args.page_id)
+                ok = (not exporter.failed_pages
+                      and exporter.stats['failed_images'] == 0)
+            else:
+                ok = exporter.export_space(args.space)
+        except Exception as exc:
+            print(f"❌ 导出失败: {exc}")
+            ok = False
+        finally:
+            exporter._print_summary()
     sys.exit(0 if ok else 1)

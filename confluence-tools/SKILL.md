@@ -20,7 +20,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 
 检查 `scripts/config.py` 是否存在。不存在时启动配置向导。
 
-**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/config_parser.py`、`scripts/debug_utils.py`、`scripts/dependency_check.py`、`scripts/check_config_sync.py`、`scripts/package_check.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
+**脚本完整性检查（每次执行前）**：确认关键脚本存在（`scripts/md_import.py`、`scripts/md_preflight.py`、`scripts/math_upgrade.py`、`scripts/md_export.py`、`scripts/common.py`、`scripts/config_parser.py`、`scripts/debug_utils.py`、`scripts/dependency_check.py`、`scripts/check_config_sync.py`、`scripts/package_check.py`）。脚本缺失/损坏时**不要直接重写**——先按「容错与安全 → 脚本文件恢复」用 git 恢复（注意恢复的是最近提交版本），再继续。
 
 **依赖预检（每次执行前）**：Python 路径确定后、执行任一页面脚本前运行：
 
@@ -89,27 +89,28 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 10. **树导入开关** → `import_config.tree_import`（默认 `false`，`true` 启用 `--dir` 批量文件夹树导入；首次运行配置向导时明确询问）
 11. **树导入层级策略** → `import_config.fix_hierarchy`（`"confirm"` 默认，存在移动时预览确认 / `"auto"` 直接移动 / `"off"` 不移动）
 12. **自动目录宏** → `import_config.toc_enabled`（默认 `true`，`false` 关闭）+ `import_config.toc_min_headings`（默认 `4`：子标题 H2~H6 达到该数量时自动在正文顶部插入 Confluence 目录宏）
+13. **上传前 Markdown 预审** → `import_config.preflight_review`（默认 `true`；开启时生成并验证审核副本，只上传副本且不修改源文件）
 
 **── math_upgrade ──**
 
-13. **默认目标页面 ID** → `upgrade_config.default_page`（选填，设了之后不传 --page-id 也能跑）
-14. **空间模式默认空间** → `upgrade_config.space`（选填，跑空间模式时需要）
-15. **公式对齐方式** → `upgrade_config.math_align`（`"left"` 左对齐 / `"center"` 居中，默认 `"left"`）
-16. **自动更新** → `upgrade_config.auto_update`（默认 `true`，`false` 则仅生成 debug）
-17. **AI 验证** → `upgrade_config.ai_verify`（默认 `false`，`true` 则暂停等人工审核）
-18. **默认递归** → `upgrade_config.recursive`（默认 `true`，有 page_id 时自动递归子页面）
-19. **递归最大层级** → `upgrade_config.max_depth`（默认 `0` 不限）
+14. **默认目标页面 ID** → `upgrade_config.default_page`（选填，设了之后不传 --page-id 也能跑）
+15. **空间模式默认空间** → `upgrade_config.space`（选填，跑空间模式时需要）
+16. **公式对齐方式** → `upgrade_config.math_align`（`"left"` 左对齐 / `"center"` 居中，默认 `"left"`）
+17. **自动更新** → `upgrade_config.auto_update`（默认 `true`，`false` 则仅生成 debug）
+18. **AI 验证** → `upgrade_config.ai_verify`（默认 `false`，`true` 则暂停等人工审核）
+19. **默认递归** → `upgrade_config.recursive`（默认 `true`，有 page_id 时自动递归子页面）
+20. **递归最大层级** → `upgrade_config.max_depth`（默认 `0` 不限）
 
 **── md_export ──**
 
-20. **默认输出目录** → `export_config.output_dir`（选填，默认 `confluence_export`，相对当前工作目录，也支持绝对路径如 `D:/out`；可被 `--output` 覆盖）
-21. **默认递归导出** → `export_config.recursive`（默认 `true`，有 page_id 时自动递归子页面；可被 `--recursive` / `--no-recursive` 覆盖）
-22. **空间模式默认空间** → `export_config.space`（选填，跑 `--space` 模式时需要）
+21. **默认输出目录** → `export_config.output_dir`（选填，默认 `confluence_export`，相对当前工作目录，也支持绝对路径如 `D:/out`；可被 `--output` 覆盖）
+22. **默认递归导出** → `export_config.recursive`（默认 `true`，有 page_id 时自动递归子页面；可被 `--recursive` / `--no-recursive` 覆盖）
+23. **空间模式默认空间** → `export_config.space`（选填，跑 `--space` 模式时需要）
 
 **── Debug ──**
 
-23. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
-24. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
+24. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
+25. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
 
 配置确认后，如执行该 Python 路径需要超出当前沙箱权限，必须先通过 AI 助手 的权限审批；如需免除后续重复确认，通过 AI 助手 的审批界面设置对应规则（避免后续执行每次确认）。
 
@@ -145,10 +146,10 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 **读取 python_path 后执行：**
 
 ```bash
-"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" "<md文件路径>" [--page-id ID] [--parent-id ID] [--page-name NAME] [--space KEY] [--align left|center] [--force]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" "<md文件路径>" [--page-id ID] [--parent-id ID] [--page-name NAME] [--space KEY] [--align left|center] [--force] [--preflight-review|--no-preflight-review]
 # --parent-id / --page-name 未传时回退到 config.py 的 import_config 对应配置项
 
-"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --dir "<根文件夹>" [--space KEY] [--align left|center] [--fix-hierarchy confirm|auto|off] [--plan-only] [--yes] [--force]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --dir "<根文件夹>" [--space KEY] [--align left|center] [--fix-hierarchy confirm|auto|off] [--plan-only] [--yes] [--force] [--preflight-review|--no-preflight-review]
 # --dir 批量树导入（需 import_config.tree_import 开启）；--space/--align/--fix-hierarchy 未传时默认从 config.py 读取
 
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --resume "<tree_plan.json>" [--yes] [--force]
@@ -160,6 +161,8 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 3. 仅当用户**主动提及**变更时，用 CLI 参数覆盖：`--space`（目标空间）、`--parent-id`（父页面）、`--page-id`（精确页面）、`--page-name`（标题）
 4. 执行脚本 → 输出结果（page_id / 更新版本号）；任一必要步骤失败时进程返回非零
 
+**上传前预审路由**：先计算 CLI 覆盖后的最终 `preflight_review` 值。值为 `true` 时，完整读取 [Markdown 导入预审规则](references/md-import-preflight-rules.md)，先生成并验证审核副本，再只上传副本；树导入每次任务只读一次规则，但必须在任何写入前预审全部待写页面。值为 `false` 时不要读取该规则文件，不生成副本，直接导入源 Markdown 并输出风险提示。
+
 **取值优先级**：用户显式指定 > `config.py` 配置 > 代码默认值（父级留空不挂、标题取文件名）
 
 **页面匹配与并发保护：**
@@ -167,6 +170,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 - 查询结果必须是 `FOUND`、`NOT_FOUND`、`ERROR` 之一：仅 `NOT_FOUND` 新建；同名歧义、分页/API 错误均为 `ERROR` 并中断，禁止误建页面
 - 更新使用查询时取得的源版本。遇到 409 默认拒绝覆盖；仅用户明确要求并传 `--force` 时，才拉取最新版本重试一次
 - Markdown 中独占一行的 `[toc]` 转为目录宏；自动目录检测到已有 `[toc]` 时不重复插入
+- 预审副本位于 `logs/intermediate/`，成功后归档到 `logs/_archive/`；附件相对路径始终按源 Markdown 所在目录解析
 - 标题 H1~H6 按 `common_config.heading_math_mode` 处理：`literal` 保留 `$...$` 供 Confluence 9.2.1 目录宏正确渲染，`mathinline` 转为原生宏；正文 `$...$` 始终转换为 `mathinline`
 
 **批量导入文件夹树（--dir）：**
@@ -296,7 +300,8 @@ confluence-tools/
 ├── OPTIMIZATION_SUMMARY.md     # 大优化交接总结（skill 自我优化前读取、优化后追加：改动范围、bug 序列、协作风格、遗留事项）
 ├── config.example.py           # 配置模板（提交 git，含占位符和注释）
 ├── references/
-│   └── script-development-rules.md # 脚本转换安全、测试与收尾规则
+│   ├── md-import-preflight-rules.md # 仅在预审开启时读取的导入审核规则
+│   └── script-development-rules.md  # 脚本转换安全、测试与收尾规则
 ├── scripts/
 │   ├── config.py               # 真实配置（不提交，从 example 拷贝）
 │   ├── check_config_sync.py    # 配置同步强制门禁（每次执行前）
@@ -305,6 +310,7 @@ confluence-tools/
 │   ├── debug_utils.py          # 公共：日志清理
 │   ├── dependency_check.py     # 四项 Python 依赖统一预检（只报告，不安装）
 │   ├── package_check.py        # 待发布目录只读路径/敏感项检查
+│   ├── md_preflight.py          # Markdown 上传前预审、审核副本和报告
 │   ├── md_import.py            # Markdown → Confluence
 │   ├── math_upgrade.py         # 数学公式升级
 │   ├── md_export.py            # Confluence → Markdown 导出
@@ -313,6 +319,8 @@ confluence-tools/
 │       ├── test_config_sync.py   # 配置结构门禁的隔离回归测试
 │       └── test_regressions.py   # 工程安全与页面业务回归测试
 └── logs/                        # 调试日志快照（gitignore 排除）
+    ├── intermediate/            # 未完成或失败的上传前预审任务
+    ├── _archive/                # 已完成预审任务归档
     ├── import/
     ├── upgrade/
     └── export/

@@ -31,7 +31,7 @@ MOCK_CFG = {
     'import_config': {
         'space': 'TEST', 'math_align': 'left', 'tree_import': True,
         'fix_hierarchy': 'confirm', 'toc_enabled': True,
-        'toc_min_headings': 4,
+        'toc_min_headings': 4, 'preflight_review': False,
     },
     'upgrade_config': {
         'math_align': 'left', 'auto_update': True, 'ai_verify': False,

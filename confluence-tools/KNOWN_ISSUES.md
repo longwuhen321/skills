@@ -25,6 +25,20 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-12] 空格公式在 Markdown 表格中泄露为文本或被 emphasis 拆坏（已修复）
+
+- **现象**：`$ \boldsymbol{x}_{n} $` 等公式在 Confluence 表格中显示原始美元符和 LaTeX；下划线可能先被 Markdown 转成 `<em>`，导致公式结构破坏。块公式中的嵌套 `$...$` 还可能被重复转换为 `mathinline`。
+- **根因**：旧行内公式规则只接受紧凑 `$x$`，对称空格未在 Markdown 转换前保护；块宏生成后又进入行内公式扫描；上传前没有源文件、storage 和宏数量的统一门禁。
+- **修复**：`common.py` 提供共享行内公式识别与内容修复；`md_import.py`、`math_upgrade.py` 支持对称空格并修复公式内 emphasis，生成的块宏先占位保护；新增 `md_preflight.py`，默认生成审核副本并在远端写入前完成公式、附件、XHTML、宏数量和残留校验。高置信度单边空格只改副本，模糊写法继续阻断。
+- **排查方法**：检查 `review.json` 的公式计数、修复项和 `storage_validation`；运行 `TestMdPreflight`、表格空格公式、块公式嵌套美元符回归，并将实际远端 `mathinline` / `mathblock` 数量与审核副本逐页对账。
+
+## [2026-08-12] 树续传 checkpoint 被日志清理删除，裸 br 被 Confluence 拒绝（已修复）
+
+- **现象**：旧 checkpoint 执行 `--resume` 时可能在读取前消失；包含表格换行的页面上传返回 400：`Unexpected close tag </td>; expected </br>`。
+- **根因**：importer 初始化无条件清理整个 `logs`，可能删除传入的旧计划目录；通用 XHTML 平衡器按 HTML void 元素容忍 `<br>`，但 Confluence storage 要求 `<br/>`。
+- **修复**：`md_import.py` 的 resume 入口在初始化阶段关闭日志清理；Markdown 转 storage 时把 `br/hr` 规范为自闭合形式；`md_preflight.py` 增加 Confluence void 元素专用门禁。
+- **排查方法**：运行 checkpoint 保留测试与 `test_markdown_line_break_is_confluence_xhtml_self_closing`；遇到 storage 400 时检查 `before_upload.html` 是否有裸 `<br>` / `<hr>`。
+
 ## [2026-08-12] 目录中的标题行内公式被拆散或错位（已修复）
 
 - **现象**：正文标题显示正常，但 Confluence 9.2.1 的目录宏遇到标题内 `mathinline` 后会把公式字符拆成相距很远的片段；同一标题改成字面 `$...$` 后目录可正常渲染。数学升级脚本还会把人工修复的标题 `$...$` 再转回宏。
