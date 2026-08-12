@@ -78,37 +78,38 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 2. **Confluence 地址** → `common_config.confluence_url`（必需）
 3. **用户名** → `common_config.confluence_user`（选填，仅记录，不参与认证）
 4. **PAT Token** → `common_config.confluence_token`（必需）
+5. **标题公式模式** → `common_config.heading_math_mode`（`"literal"` 保留标题 `$...$`，适配 Confluence 9.2.1 目录宏并作为默认值；`"mathinline"` 使用原生行内宏；导入和升级共用）
 
 **── md_import ──**
 
-5. **导入默认空间** → `import_config.space`（必需）
-6. **公式对齐方式** → `import_config.math_align`（`"left"` 左对齐 / `"center"` 居中，默认 `"left"`）
-7. **默认父页面 ID** → `import_config.default_parent_id`（选填，留空不挂父级；仅新建页面生效，已存在页面按标题更新、位置不变）
-8. **默认页面标题** → `import_config.default_page_name`（选填，留空取 md 文件名）
-9. **树导入开关** → `import_config.tree_import`（默认 `false`，`true` 启用 `--dir` 批量文件夹树导入；首次运行配置向导时明确询问）
-10. **树导入层级策略** → `import_config.fix_hierarchy`（`"confirm"` 默认，存在移动时预览确认 / `"auto"` 直接移动 / `"off"` 不移动）
-11. **自动目录宏** → `import_config.toc_enabled`（默认 `true`，`false` 关闭）+ `import_config.toc_min_headings`（默认 `4`：子标题 H2~H6 达到该数量时自动在正文顶部插入 Confluence 目录宏）
+6. **导入默认空间** → `import_config.space`（必需）
+7. **公式对齐方式** → `import_config.math_align`（`"left"` 左对齐 / `"center"` 居中，默认 `"left"`）
+8. **默认父页面 ID** → `import_config.default_parent_id`（选填，留空不挂父级；仅新建页面生效，已存在页面按标题更新、位置不变）
+9. **默认页面标题** → `import_config.default_page_name`（选填，留空取 md 文件名）
+10. **树导入开关** → `import_config.tree_import`（默认 `false`，`true` 启用 `--dir` 批量文件夹树导入；首次运行配置向导时明确询问）
+11. **树导入层级策略** → `import_config.fix_hierarchy`（`"confirm"` 默认，存在移动时预览确认 / `"auto"` 直接移动 / `"off"` 不移动）
+12. **自动目录宏** → `import_config.toc_enabled`（默认 `true`，`false` 关闭）+ `import_config.toc_min_headings`（默认 `4`：子标题 H2~H6 达到该数量时自动在正文顶部插入 Confluence 目录宏）
 
 **── math_upgrade ──**
 
-12. **默认目标页面 ID** → `upgrade_config.default_page`（选填，设了之后不传 --page-id 也能跑）
-13. **空间模式默认空间** → `upgrade_config.space`（选填，跑空间模式时需要）
-14. **公式对齐方式** → `upgrade_config.math_align`（`"left"` 左对齐 / `"center"` 居中，默认 `"left"`）
-15. **自动更新** → `upgrade_config.auto_update`（默认 `true`，`false` 则仅生成 debug）
-16. **AI 验证** → `upgrade_config.ai_verify`（默认 `false`，`true` 则暂停等人工审核）
-17. **默认递归** → `upgrade_config.recursive`（默认 `true`，有 page_id 时自动递归子页面）
-18. **递归最大层级** → `upgrade_config.max_depth`（默认 `0` 不限）
+13. **默认目标页面 ID** → `upgrade_config.default_page`（选填，设了之后不传 --page-id 也能跑）
+14. **空间模式默认空间** → `upgrade_config.space`（选填，跑空间模式时需要）
+15. **公式对齐方式** → `upgrade_config.math_align`（`"left"` 左对齐 / `"center"` 居中，默认 `"left"`）
+16. **自动更新** → `upgrade_config.auto_update`（默认 `true`，`false` 则仅生成 debug）
+17. **AI 验证** → `upgrade_config.ai_verify`（默认 `false`，`true` 则暂停等人工审核）
+18. **默认递归** → `upgrade_config.recursive`（默认 `true`，有 page_id 时自动递归子页面）
+19. **递归最大层级** → `upgrade_config.max_depth`（默认 `0` 不限）
 
 **── md_export ──**
 
-19. **默认输出目录** → `export_config.output_dir`（选填，默认 `confluence_export`，相对当前工作目录，也支持绝对路径如 `D:/out`；可被 `--output` 覆盖）
-20. **默认递归导出** → `export_config.recursive`（默认 `true`，有 page_id 时自动递归子页面；可被 `--recursive` / `--no-recursive` 覆盖）
-21. **空间模式默认空间** → `export_config.space`（选填，跑 `--space` 模式时需要）
+20. **默认输出目录** → `export_config.output_dir`（选填，默认 `confluence_export`，相对当前工作目录，也支持绝对路径如 `D:/out`；可被 `--output` 覆盖）
+21. **默认递归导出** → `export_config.recursive`（默认 `true`，有 page_id 时自动递归子页面；可被 `--recursive` / `--no-recursive` 覆盖）
+22. **空间模式默认空间** → `export_config.space`（选填，跑 `--space` 模式时需要）
 
 **── Debug ──**
 
-22. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
-23. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
+23. **Debug 阈值** → `debug_config.max_size_mb`（默认 50）
+24. **Debug 保留数** → `debug_config.keep_recent`（默认 20）
 
 配置确认后，如执行该 Python 路径需要超出当前沙箱权限，必须先通过 AI 助手 的权限审批；如需免除后续重复确认，通过 AI 助手 的审批界面设置对应规则（避免后续执行每次确认）。
 
@@ -166,7 +167,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 - 查询结果必须是 `FOUND`、`NOT_FOUND`、`ERROR` 之一：仅 `NOT_FOUND` 新建；同名歧义、分页/API 错误均为 `ERROR` 并中断，禁止误建页面
 - 更新使用查询时取得的源版本。遇到 409 默认拒绝覆盖；仅用户明确要求并传 `--force` 时，才拉取最新版本重试一次
 - Markdown 中独占一行的 `[toc]` 转为目录宏；自动目录检测到已有 `[toc]` 时不重复插入
-- 标题 H1~H6 内的 `$...$` 保留为字面 LaTeX，供 Confluence 9.2.1 的目录宏正确渲染；正文 `$...$` 仍转换为 `mathinline`
+- 标题 H1~H6 按 `common_config.heading_math_mode` 处理：`literal` 保留 `$...$` 供 Confluence 9.2.1 目录宏正确渲染，`mathinline` 转为原生宏；正文 `$...$` 始终转换为 `mathinline`
 
 **批量导入文件夹树（--dir）：**
 - 目录结构：每个含 .md 的文件夹 = 一个页面（标题=文件夹名，内容=同名 .md），子文件夹 = 子页面，`.assets/` 仅作图片源；中间文件夹无 .md 时跳级
@@ -194,7 +195,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 - `--no-auto-update`：仅生成 debug 文件，不更新页面
 - `--stop-on-error`：批量模式遇错即停（默认遇错继续，末尾汇总失败页面）
 - `--allow-math-residuals`：显式容忍验证后仍存在的 `$...$`、`$$...$$` 或 latex 代码围栏；默认任何残留都失败，并报告 `类型@行:列`
-- 升级时会把标题内已有的 `mathinline` / 旧 `mathjax-inline-macro` 还原为字面 `$...$`，并在残留校验中只豁免完整标题区域；正文残留仍按默认零残留门禁处理
+- 升级与导入共用 `heading_math_mode`：`literal` 把标题行内宏还原为 `$...$` 并只在残留校验中豁免完整标题；`mathinline` 把标题 `$...$` / 旧行内宏统一为原生宏。正文残留始终受默认零残留门禁约束
 
 ---
 
@@ -377,7 +378,7 @@ confluence-tools/
 | CLI | 三个页面入口用 `python -X utf8 ... --help` 均为退出码 0 | `TestCliSurface` |
 | 依赖缺失 | 实际导入四个模块；缺包、坏安装或缺 DLL 均一次报告完整失败集 | `TestSafeConfigAndPackaging` |
 | Windows 编码 | GBK 控制台环境下用 `python -X utf8` 执行验证，中文输出可按 UTF-8 解码 | `ConfigSyncTests.test_utf8_mode_overrides_gbk_console_for_validation_output` |
-| 目录标题公式 | 标题 `$...$` 保持字面形式、正文仍使用宏；升级可修复旧标题宏且幂等，导出可往返 | `TestMdImport.test_toc_heading_math_stays_literal_while_body_uses_macro`、`TestMathUpgrade.test_heading_inline_math_is_literal_and_upgrade_is_idempotent`、`TestMdExport.test_literal_heading_math_survives_export` |
+| 目录标题公式 | `literal` / `mathinline` 双模式、非法值拒绝、正文语义不变；升级可修复旧标题宏且幂等，导出可往返 | `TestMdImport.test_toc_heading_math_stays_literal_while_body_uses_macro`、`TestMdImport.test_heading_mathinline_mode_converts_heading_and_body`、`TestMathUpgrade.test_heading_mathinline_mode_converts_literal_and_legacy_macro`、`TestMdExport.test_literal_heading_math_survives_export` |
 
 ### 发布前只读检查（必过）
 

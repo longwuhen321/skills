@@ -19,6 +19,17 @@ CONFIG_PATH = os.path.join(SKILL_ROOT, 'scripts', 'config.py')
 
 # 所有 HTTP 请求的默认超时（秒），防网络挂起卡死脚本
 DEFAULT_TIMEOUT = 30
+HEADING_MATH_MODES = ('literal', 'mathinline')
+
+
+def get_heading_math_mode(common_config: dict) -> str:
+    """读取并严格校验标题公式存储模式。"""
+    mode = common_config.get('heading_math_mode', 'literal')
+    if mode not in HEADING_MATH_MODES:
+        allowed = ', '.join(HEADING_MATH_MODES)
+        raise ValueError(
+            f"common_config.heading_math_mode 无效: {mode!r}；可选值: {allowed}")
+    return mode
 
 
 def build_block_template(align: str) -> str:
@@ -42,13 +53,16 @@ def build_block_template(align: str) -> str:
     )
 
 
-def normalize_heading_inline_math(storage_html: str):
-    """将标题中的行内数学宏还原为字面 ``$...$``。
+def normalize_heading_inline_math(storage_html: str, mode='literal'):
+    """按配置统一标题内行内公式，返回 ``(新内容, 变更数量)``。
 
-    Confluence 9.2.1 的目录宏无法正确排版标题内嵌的数学宏，但能渲染
-    标题文本中的 LaTeX 定界符。这里只处理 h1-h6，正文公式宏保持不变。
-    返回 ``(新内容, 还原数量)``。
+    ``literal`` 将 mathinline/旧 mathjax 行内宏还原为 ``$...$``；
+    ``mathinline`` 将标题中的 ``$...$`` 和旧宏统一为原生 mathinline。
+    这里只处理 h1-h6，正文公式保持不变。
     """
+    if mode not in HEADING_MATH_MODES:
+        allowed = ', '.join(HEADING_MATH_MODES)
+        raise ValueError(f"heading_math_mode 无效: {mode!r}；可选值: {allowed}")
     macro_pattern = re.compile(
         r'<ac:structured-macro\b'
         r'(?=[^>]*\bac:name=["\'](?:mathinline|mathjax-inline-macro)["\'])'
@@ -59,6 +73,17 @@ def normalize_heading_inline_math(storage_html: str):
         r'[^>]*>(.*?)</ac:parameter>', re.DOTALL)
     restored = 0
 
+    def mathinline_macro(content):
+        clean = content.replace(r'\*', '*')
+        escaped = clean.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        return (
+            '<ac:structured-macro ac:name="mathinline" ac:schema-version="1">'
+            f'<ac:parameter ac:name="body">{escaped}</ac:parameter>'
+            '</ac:structured-macro>')
+
+    inline_pattern = re.compile(
+        r'(?<!\$)\$(?![\s$])([^$\n]+?)(?<![$\s])\$(?!\$)')
+
     def replace_heading(match):
         nonlocal restored
 
@@ -67,12 +92,42 @@ def normalize_heading_inline_math(storage_html: str):
             parameter = parameter_pattern.search(macro_match.group(0))
             if not parameter:
                 return macro_match.group(0)
+            name = re.search(
+                r'\bac:name=["\']([^"\']+)["\']', macro_match.group(0)).group(1)
+            if mode == 'mathinline' and name == 'mathinline':
+                return macro_match.group(0)
             body = re.sub(r'&amp;(lt|gt|amp);', r'&\1;', parameter.group(1))
             restored += 1
-            return f'${body}$'
+            if mode == 'literal':
+                return f'${body}$'
+            return mathinline_macro(body)
 
         opening, body, closing = match.groups()
-        return opening + macro_pattern.sub(replace_macro, body) + closing
+        body = macro_pattern.sub(replace_macro, body)
+        if mode == 'mathinline':
+            parts = []
+            last = 0
+            for macro in macro_pattern.finditer(body):
+                text = body[last:macro.start()]
+
+                def replace_literal(literal_match):
+                    nonlocal restored
+                    restored += 1
+                    return mathinline_macro(literal_match.group(1).strip())
+
+                parts.append(inline_pattern.sub(replace_literal, text))
+                parts.append(macro.group(0))
+                last = macro.end()
+            tail = body[last:]
+
+            def replace_literal_tail(literal_match):
+                nonlocal restored
+                restored += 1
+                return mathinline_macro(literal_match.group(1).strip())
+
+            parts.append(inline_pattern.sub(replace_literal_tail, tail))
+            body = ''.join(parts)
+        return opening + body + closing
 
     heading_pattern = re.compile(
         r'(<h[1-6]\b[^>]*>)(.*?)(</h[1-6]>)', re.DOTALL | re.IGNORECASE)

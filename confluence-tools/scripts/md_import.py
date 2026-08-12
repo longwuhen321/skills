@@ -34,7 +34,7 @@ import markdown2
 
 from common import (SKILL_ROOT, load_config, request_with_retry,
                     collect_space_page_records, build_block_template,
-                    normalize_heading_inline_math)
+                    normalize_heading_inline_math, get_heading_math_mode)
 from debug_utils import cleanup_debug
 
 
@@ -55,6 +55,7 @@ class MarkdownImporter:
         debug_cfg = cfg['debug_config']
 
         self.base_url = common['confluence_url'].rstrip('/')
+        self.heading_math_mode = get_heading_math_mode(common)
         self.space_key = space_key or import_cfg.get('space', '')
         self.math_align = math_align if math_align is not None else import_cfg.get('math_align', 'left')
         # 默认父页面 ID / 默认页面标题：配置预设，CLI 参数（--parent-id/--page-name）覆盖
@@ -638,7 +639,8 @@ class MarkdownImporter:
 
         # Confluence 9.2.1 的 toc 宏不能正确排版标题内嵌数学宏；标题使用
         # 字面 $...$，正文仍保留 mathinline 宏。
-        html_content, _ = normalize_heading_inline_math(html_content)
+        html_content, _ = normalize_heading_inline_math(
+            html_content, self.heading_math_mode)
 
         # 5.6 子标题数达到阈值时，在正文最前插入 Confluence 目录宏（toc）
         html_content = self._maybe_add_toc(html_content)

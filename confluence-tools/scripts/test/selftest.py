@@ -650,6 +650,27 @@ class TestMdImport(unittest.TestCase):
         self.assertIn('ac:name="mathinline"', body)
         self.assertEqual(html.count('ac:name="toc"'), 1)
 
+    def test_heading_mathinline_mode_converts_heading_and_body(self):
+        cfg = dict(MOCK_CFG)
+        cfg['common_config'] = dict(MOCK_CFG['common_config'],
+                                    heading_math_mode='mathinline')
+        with patch('md_import.load_config', return_value=cfg):
+            importer = MarkdownImporter(space_key='TEST')
+        html = importer._convert_md_to_storage(
+            '# Title\n\n## Step $0<x<\\pi$\n\nBody $y$.\n')
+        heading = re.search(r'<h2>.*?</h2>', html).group(0)
+        self.assertIn('ac:name="mathinline"', heading)
+        self.assertIn('0&lt;x&lt;\\pi', heading)
+        self.assertEqual(html.count('ac:name="mathinline"'), 2)
+
+    def test_invalid_heading_math_mode_is_rejected_by_importer(self):
+        cfg = dict(MOCK_CFG)
+        cfg['common_config'] = dict(MOCK_CFG['common_config'],
+                                    heading_math_mode='unknown')
+        with patch('md_import.load_config', return_value=cfg):
+            with self.assertRaisesRegex(ValueError, 'heading_math_mode'):
+                MarkdownImporter(space_key='TEST')
+
     def test_toc_not_added_below_threshold(self):
         cfg = dict(MOCK_CFG)
         cfg['import_config'] = dict(MOCK_CFG['import_config'],
@@ -815,6 +836,38 @@ class TestMathUpgrade(unittest.TestCase):
         second, second_stats = self.updater.convert_math(after)
         self.assertEqual(second, after)
         self.assertEqual(sum(second_stats.values()), 0)
+
+    def test_heading_mathinline_mode_converts_literal_and_legacy_macro(self):
+        cfg = dict(MOCK_CFG)
+        cfg['common_config'] = dict(MOCK_CFG['common_config'],
+                                    heading_math_mode='mathinline')
+        with patch('math_upgrade.load_config', return_value=cfg):
+            updater = ConfluenceMathUpdater(math_align='left')
+        legacy = (
+            '<ac:structured-macro ac:name="mathjax-inline-macro">'
+            '<ac:parameter ac:name="equation">z^2</ac:parameter>'
+            '</ac:structured-macro>')
+        before = f'<h2>Step $0&lt;x&lt;\\pi$ and {legacy}</h2><p>$y$</p>'
+        after, stats = updater.convert_math(before)
+        heading = re.search(r'<h2>.*?</h2>', after).group(0)
+        self.assertEqual(heading.count('ac:name="mathinline"'), 2)
+        self.assertNotIn('mathjax-inline-macro', heading)
+        self.assertNotIn('mathblock', heading)
+        self.assertNotIn('$0&lt;x&lt;\\pi$', heading)
+        passed, report = updater.verify(before, after, stats)
+        self.assertTrue(passed, report)
+
+        second, second_stats = updater.convert_math(after)
+        self.assertEqual(second, after)
+        self.assertEqual(sum(second_stats.values()), 0)
+
+    def test_invalid_heading_math_mode_is_rejected_by_updater(self):
+        cfg = dict(MOCK_CFG)
+        cfg['common_config'] = dict(MOCK_CFG['common_config'],
+                                    heading_math_mode='unknown')
+        with patch('math_upgrade.load_config', return_value=cfg):
+            with self.assertRaisesRegex(ValueError, 'heading_math_mode'):
+                ConfluenceMathUpdater(math_align='left')
 
     def test_verify_ignores_intentional_heading_literal_math(self):
         after = '<h2>Step $x$</h2><p>plain</p>'

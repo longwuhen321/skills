@@ -17,6 +17,11 @@
 
 # ==================== 通用配置 ====================
 common_config = {
+    # 标题内行内公式的存储方式：
+    #   "literal"    = 保留 $...$（Confluence 9.2.1 目录宏推荐，默认）
+    #   "mathinline" = 转为原生 mathinline 宏（供其他版本/插件环境使用）
+    "heading_math_mode": "literal",
+
     # Python 解释器的完整路径。AI 助手使用此路径执行所有 skill 脚本。
     # 可以是系统 Python、conda 环境或 venv 中的 python.exe。
     "python_path": "/path/to/your/python",
