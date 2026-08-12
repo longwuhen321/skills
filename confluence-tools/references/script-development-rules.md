@@ -1,7 +1,10 @@
 # Confluence 工具脚本开发规则
 
-修改 `scripts/*.py` 时遵守以下约束；上位规则以相邻目录的
-`SKILL_MODIFICATION_STANDARD.md` 和本 skill 的 `SKILL.md` 为准。
+## 强制读取条件
+
+修改 `scripts/*.py` 时，必须在任何编辑前完整读取本文件；上位规则以相邻目录的
+`SKILL_MODIFICATION_STANDARD.md` 和本 skill 的 `SKILL.md` 为准。读取后在公开回执的
+“已完整读取”中列出本文件，并声明将执行基线与修改后门禁。
 
 ## 修改前
 

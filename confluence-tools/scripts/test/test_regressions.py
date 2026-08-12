@@ -746,5 +746,58 @@ class TestCliSurface(unittest.TestCase):
             self.assertIn('usage:', result.stdout.lower())
 
 
+class TestSkillDocumentationRoutes(unittest.TestCase):
+    SKILL_ROOT = Path(__file__).resolve().parents[2]
+
+    def test_skill_entry_is_compact_and_keeps_mandatory_route_gate(self):
+        text = (self.SKILL_ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        line_count = len(text.splitlines())
+        self.assertGreaterEqual(line_count, 180)
+        self.assertLessEqual(line_count, 240)
+        self.assertIn('在调用页面脚本、修改文件或连接服务器之前', text)
+        self.assertIn('完整读取路由表列出的全部文件', text)
+        self.assertIn('读取后先向用户公开回执', text)
+
+    def test_every_direct_route_exists_and_requires_complete_read(self):
+        expected = (
+            'configuration-guide.md',
+            'md-import-workflow.md',
+            'md-import-preflight-rules.md',
+            'math-upgrade-workflow.md',
+            'toc-upgrade-workflow.md',
+            'md-export-workflow.md',
+            'maintenance-rules.md',
+            'script-development-rules.md',
+        )
+        skill_text = (self.SKILL_ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        for name in expected:
+            with self.subTest(name=name):
+                reference = self.SKILL_ROOT / 'references' / name
+                self.assertTrue(reference.is_file(), f'缺少路由文件: {name}')
+                self.assertIn(name, skill_text, f'SKILL.md 未直接路由: {name}')
+        for name in expected:
+            with self.subTest(mandatory=name):
+                text = (self.SKILL_ROOT / 'references' / name).read_text(
+                    encoding='utf-8')
+                self.assertIn('强制读取条件', text)
+                self.assertIn('必须', text)
+                self.assertIn('完整读取', text)
+
+    def test_core_safety_redlines_remain_in_skill_entry(self):
+        text = (self.SKILL_ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        for redline in (
+                '范围不猜测', '写入前验证', '批量不误报', '并发不覆盖',
+                '凭据不泄漏', 'XHTML 不破坏', '真实测试最小化',
+                '权限不扩大', '临时产物清理'):
+            with self.subTest(redline=redline):
+                self.assertIn(redline, text)
+
+    def test_parent_modification_standard_route_exists(self):
+        standard = self.SKILL_ROOT.parent / 'SKILL_MODIFICATION_STANDARD.md'
+        self.assertTrue(standard.is_file())
+        skill_text = (self.SKILL_ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        self.assertIn('../SKILL_MODIFICATION_STANDARD.md', skill_text)
+
+
 if __name__ == '__main__':
     unittest.main()
