@@ -35,7 +35,8 @@ if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
 
 from common import (SKILL_ROOT, load_config, request_with_retry,
                     collect_space_pages, collect_paginated_results,
-                    build_block_template, fetch_page)
+                    build_block_template, fetch_page,
+                    normalize_heading_inline_math)
 from debug_utils import cleanup_debug
 
 
@@ -167,10 +168,12 @@ class ConfluenceMathUpdater:
         #   - 剥壳保留内容 → 公式文本不丢，后续 convert 正常转换
         storage_html, span_removed = self._strip_math_spans(storage_html)
 
+        storage_html, heading_restored = normalize_heading_inline_math(storage_html)
         storage_html, old_upgraded = self._upgrade_old_macros(storage_html)
 
         protected_parts = re.split(
-            r'(<ac:structured-macro\b(?:[^>]*/>|.*?</ac:structured-macro>)|'
+            r'(<h[1-6]\b[^>]*>.*?</h[1-6]>|'
+            r'<ac:structured-macro\b(?:[^>]*/>|.*?</ac:structured-macro>)|'
             r'<code[^>]*>.*?</code>|'
             r'<pre[^>]*>.*?</pre>|'
             r'</?(?:td|tr|th|table|thead|tbody|p|div|h[1-6]|li|ul|ol|br|hr|img|a|strong|em|blockquote)[^>]*/?>)',
@@ -224,7 +227,8 @@ class ConfluenceMathUpdater:
 
         result_parts = []
         stats = {'inline': 0, 'block': 0, 'latex': 0, 'upgraded': 0,
-                 'old_macro_upgraded': old_upgraded, 'span_removed': span_removed}
+                 'old_macro_upgraded': old_upgraded, 'span_removed': span_removed,
+                 'heading_inline_restored': heading_restored}
 
         for i, part in enumerate(protected_parts):
             if i % 2 == 1:
@@ -258,6 +262,7 @@ class ConfluenceMathUpdater:
             f.write(f"块级公式 ($$...$$ → mathblock): {stats['block']} 处\n")
             f.write(f"latex 块 (```latex → mathblock): {stats['latex']} 处\n")
             f.write(f"其中 $...$ 升级为 mathblock: {stats.get('upgraded', 0)} 处\n")
+            f.write(f"标题行内宏还原为 $...$: {stats.get('heading_inline_restored', 0)} 处\n")
             f.write(f"mathblock 对齐调整 (→ left): {stats.get('realigned', 0)} 处\n")
             f.write(f"剥离 mathjax span 壳: {stats.get('span_removed', 0)} 处\n")
         print(f"调试文件已保存: {folder}")
@@ -299,7 +304,8 @@ class ConfluenceMathUpdater:
             passed = False
         before_macros = len(re.findall(r'<ac:structured-macro\b', before))
         after_macros = len(re.findall(r'<ac:structured-macro\b', after))
-        expected = before_macros + stats['inline'] + stats['block'] + stats['latex']
+        expected = (before_macros + stats['inline'] + stats['block']
+                    + stats['latex'] - stats.get('heading_inline_restored', 0))
         report.append(f"已有宏: {before_macros} → 转换后宏: {after_macros} (预期 {expected})")
         if after_macros != expected:
             report.append(f"  ⚠️ 宏数量不匹配，差 {after_macros - expected}")
@@ -308,6 +314,7 @@ class ConfluenceMathUpdater:
             report.append("  ✅ 宏数量正确")
 
         protected_pattern = re.compile(
+            r'<h[1-6]\b[^>]*>.*?</h[1-6]>|'
             r'<ac:structured-macro\b[^>]*/>|'
             r'<ac:structured-macro\b.*?</ac:structured-macro>|'
             r'<code[^>]*>.*?</code>|<pre[^>]*>.*?</pre>', re.DOTALL)
@@ -388,7 +395,8 @@ class ConfluenceMathUpdater:
 
         total = stats['inline'] + stats['block'] + stats['latex']
         old_up = stats.get('old_macro_upgraded', 0)
-        total_changes = total + old_up + realigned
+        heading_restored = stats.get('heading_inline_restored', 0)
+        total_changes = total + old_up + realigned + heading_restored
 
         if total_changes == 0:
             return True, f"{indent}  {page_info['title']} (v{page_info['version']}) — 无需转换"
@@ -413,7 +421,7 @@ class ConfluenceMathUpdater:
                 return False, f"{indent}❌ {page_info['title']}: PUT 失败 — {err_msg}"
             return True, (f"{indent}  {page_info['title']} (v{new_version}) "
                           f"— inline:{stats['inline']} block:{stats['block']} "
-                          f"old:{old_up} realigned:{realigned}")
+                          f"heading:{heading_restored} old:{old_up} realigned:{realigned}")
 
         return True, f"{indent}  {page_info['title']} — 转换 {total_changes} 处 (未自动更新)"
 

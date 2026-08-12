@@ -7,6 +7,7 @@
 """
 
 import os
+import re
 import sys
 import time
 from urllib.parse import urljoin
@@ -39,6 +40,43 @@ def build_block_template(align: str) -> str:
         '<ac:plain-text-body><![CDATA[{content}]]></ac:plain-text-body>'
         '</ac:structured-macro>'
     )
+
+
+def normalize_heading_inline_math(storage_html: str):
+    """将标题中的行内数学宏还原为字面 ``$...$``。
+
+    Confluence 9.2.1 的目录宏无法正确排版标题内嵌的数学宏，但能渲染
+    标题文本中的 LaTeX 定界符。这里只处理 h1-h6，正文公式宏保持不变。
+    返回 ``(新内容, 还原数量)``。
+    """
+    macro_pattern = re.compile(
+        r'<ac:structured-macro\b'
+        r'(?=[^>]*\bac:name=["\'](?:mathinline|mathjax-inline-macro)["\'])'
+        r'[^>]*>.*?</ac:structured-macro>', re.DOTALL)
+    parameter_pattern = re.compile(
+        r'<ac:parameter\b'
+        r'(?=[^>]*\bac:name=["\'](?:body|equation)["\'])'
+        r'[^>]*>(.*?)</ac:parameter>', re.DOTALL)
+    restored = 0
+
+    def replace_heading(match):
+        nonlocal restored
+
+        def replace_macro(macro_match):
+            nonlocal restored
+            parameter = parameter_pattern.search(macro_match.group(0))
+            if not parameter:
+                return macro_match.group(0)
+            body = re.sub(r'&amp;(lt|gt|amp);', r'&\1;', parameter.group(1))
+            restored += 1
+            return f'${body}$'
+
+        opening, body, closing = match.groups()
+        return opening + macro_pattern.sub(replace_macro, body) + closing
+
+    heading_pattern = re.compile(
+        r'(<h[1-6]\b[^>]*>)(.*?)(</h[1-6]>)', re.DOTALL | re.IGNORECASE)
+    return heading_pattern.sub(replace_heading, storage_html), restored
 
 
 def request_with_retry(session, method, url, max_retries=3, timeout=DEFAULT_TIMEOUT,

@@ -13,6 +13,7 @@
 """
 
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -633,6 +634,22 @@ class TestMdImport(unittest.TestCase):
         self.assertIn('<ac:structured-macro ac:name="toc"', html)
         self.assertTrue(html.startswith('<ac:structured-macro'))
 
+    def test_toc_heading_math_stays_literal_while_body_uses_macro(self):
+        cfg = dict(MOCK_CFG)
+        cfg['import_config'] = dict(MOCK_CFG['import_config'],
+                                    toc_enabled=True, toc_min_headings=4)
+        with patch('md_import.load_config', return_value=cfg):
+            importer = MarkdownImporter(space_key='TEST')
+        md = ('# Title\n\n## Step $0<x<\\pi$\n\n## B\n\n## C\n\n'
+              '## D\n\nBody $0<x<\\pi$.\n')
+        html = importer._convert_md_to_storage(md)
+        heading = re.search(r'<h2>Step (.*?)</h2>', html).group(1)
+        body = re.search(r'<p>Body (.*?)\.</p>', html).group(1)
+        self.assertEqual(heading, '$0&lt;x&lt;\\pi$')
+        self.assertNotIn('mathinline', heading)
+        self.assertIn('ac:name="mathinline"', body)
+        self.assertEqual(html.count('ac:name="toc"'), 1)
+
     def test_toc_not_added_below_threshold(self):
         cfg = dict(MOCK_CFG)
         cfg['import_config'] = dict(MOCK_CFG['import_config'],
@@ -780,6 +797,31 @@ class TestMathUpgrade(unittest.TestCase):
         self.assertIn('mathinline', after)
         self.assertIn('0&amp;lt;x&amp;lt;\\pi', after)
         self.assertNotIn('$0&lt;x&lt;\\pi$', after)
+
+    def test_heading_inline_math_is_literal_and_upgrade_is_idempotent(self):
+        heading_macro = (
+            '<ac:structured-macro ac:name="mathinline" ac:schema-version="1">'
+            '<ac:parameter ac:name="body">0&amp;lt;x&amp;lt;\\pi</ac:parameter>'
+            '</ac:structured-macro>')
+        before = f'<h2>Step {heading_macro}</h2><p>Body $y$.</p>'
+        after, stats = self.updater.convert_math(before)
+        self.assertIn('<h2>Step $0&lt;x&lt;\\pi$</h2>', after)
+        self.assertNotIn('mathinline', re.search(r'<h2>.*?</h2>', after).group(0))
+        self.assertIn('ac:name="mathinline"', re.search(r'<p>.*?</p>', after).group(0))
+        self.assertEqual(stats['heading_inline_restored'], 1)
+        passed, report = self.updater.verify(before, after, stats)
+        self.assertTrue(passed, report)
+
+        second, second_stats = self.updater.convert_math(after)
+        self.assertEqual(second, after)
+        self.assertEqual(sum(second_stats.values()), 0)
+
+    def test_verify_ignores_intentional_heading_literal_math(self):
+        after = '<h2>Step $x$</h2><p>plain</p>'
+        stats = {'inline': 0, 'block': 0, 'latex': 0,
+                 'heading_inline_restored': 0}
+        passed, report = self.updater.verify(after, after, stats)
+        self.assertTrue(passed, report)
 
 
     def test_undefined_control_seq_star_sanitized(self):
@@ -945,6 +987,10 @@ class TestMdExport(unittest.TestCase):
                 '</ac:structured-macro>')
         md = self._convert(html)
         self.assertIn('$a < b$', md)
+
+    def test_literal_heading_math_survives_export(self):
+        md = self._convert('<h2>Step $0&lt;x&lt;\\pi$</h2>')
+        self.assertIn('## Step $0<x<\\pi$', md)
 
     def test_old_mathjax_macros_compat(self):
         html = ('<ac:structured-macro ac:name="mathjax-inline-macro" ac:schema-version="1">'

@@ -166,6 +166,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 - 查询结果必须是 `FOUND`、`NOT_FOUND`、`ERROR` 之一：仅 `NOT_FOUND` 新建；同名歧义、分页/API 错误均为 `ERROR` 并中断，禁止误建页面
 - 更新使用查询时取得的源版本。遇到 409 默认拒绝覆盖；仅用户明确要求并传 `--force` 时，才拉取最新版本重试一次
 - Markdown 中独占一行的 `[toc]` 转为目录宏；自动目录检测到已有 `[toc]` 时不重复插入
+- 标题 H1~H6 内的 `$...$` 保留为字面 LaTeX，供 Confluence 9.2.1 的目录宏正确渲染；正文 `$...$` 仍转换为 `mathinline`
 
 **批量导入文件夹树（--dir）：**
 - 目录结构：每个含 .md 的文件夹 = 一个页面（标题=文件夹名，内容=同名 .md），子文件夹 = 子页面，`.assets/` 仅作图片源；中间文件夹无 .md 时跳级
@@ -193,6 +194,7 @@ description: Confluence 工具集：Markdown 导入页面、数学公式升级�
 - `--no-auto-update`：仅生成 debug 文件，不更新页面
 - `--stop-on-error`：批量模式遇错即停（默认遇错继续，末尾汇总失败页面）
 - `--allow-math-residuals`：显式容忍验证后仍存在的 `$...$`、`$$...$$` 或 latex 代码围栏；默认任何残留都失败，并报告 `类型@行:列`
+- 升级时会把标题内已有的 `mathinline` / 旧 `mathjax-inline-macro` 还原为字面 `$...$`，并在残留校验中只豁免完整标题区域；正文残留仍按默认零残留门禁处理
 
 ---
 
@@ -292,6 +294,8 @@ confluence-tools/
 ├── KNOWN_ISSUES.md             # 已知问题与修复记录（排查改脚本时读取，按需追加）
 ├── OPTIMIZATION_SUMMARY.md     # 大优化交接总结（skill 自我优化前读取、优化后追加：改动范围、bug 序列、协作风格、遗留事项）
 ├── config.example.py           # 配置模板（提交 git，含占位符和注释）
+├── references/
+│   └── script-development-rules.md # 脚本转换安全、测试与收尾规则
 ├── scripts/
 │   ├── config.py               # 真实配置（不提交，从 example 拷贝）
 │   ├── check_config_sync.py    # 配置同步强制门禁（每次执行前）
@@ -322,6 +326,7 @@ confluence-tools/
 **修改本 skill 任何文件（`SKILL.md` / `references/*.md` / `scripts/*.py` / `config.example.py`）之前，先读 `<skill-directory>/../SKILL_MODIFICATION_STANDARD.md`**（skill 修改执行标准：书写规范、修改前流程、验证与收尾自查）。仅正常使用本 skill（不涉及修改）时不读。
 
 排查需修改 `scripts/*.py` 的问题时，**先读取 `KNOWN_ISSUES.md`** 查是否已知问题及修复方案。
+同时读取 `references/script-development-rules.md`，保证导入/升级/导出语义、XHTML 转义和幂等约束保持一致。
 
 **skill 自我优化（非 bug 修复：重构/扩展/新增能力）时：**
 
@@ -372,6 +377,7 @@ confluence-tools/
 | CLI | 三个页面入口用 `python -X utf8 ... --help` 均为退出码 0 | `TestCliSurface` |
 | 依赖缺失 | 实际导入四个模块；缺包、坏安装或缺 DLL 均一次报告完整失败集 | `TestSafeConfigAndPackaging` |
 | Windows 编码 | GBK 控制台环境下用 `python -X utf8` 执行验证，中文输出可按 UTF-8 解码 | `ConfigSyncTests.test_utf8_mode_overrides_gbk_console_for_validation_output` |
+| 目录标题公式 | 标题 `$...$` 保持字面形式、正文仍使用宏；升级可修复旧标题宏且幂等，导出可往返 | `TestMdImport.test_toc_heading_math_stays_literal_while_body_uses_macro`、`TestMathUpgrade.test_heading_inline_math_is_literal_and_upgrade_is_idempotent`、`TestMdExport.test_literal_heading_math_survives_export` |
 
 ### 发布前只读检查（必过）
 

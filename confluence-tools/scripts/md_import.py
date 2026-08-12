@@ -33,7 +33,8 @@ from urllib.parse import unquote
 import markdown2
 
 from common import (SKILL_ROOT, load_config, request_with_retry,
-                    collect_space_page_records, build_block_template)
+                    collect_space_page_records, build_block_template,
+                    normalize_heading_inline_math)
 from debug_utils import cleanup_debug
 
 
@@ -634,6 +635,10 @@ class MarkdownImporter:
             r'<p>\s*(<(?:div|pre|ac:structured-macro)[^>]*>(?:(?!<p).)*?</(?:div|pre|ac:structured-macro)>)\s*</p>',
             r'\1', html_content, flags=re.DOTALL
         )
+
+        # Confluence 9.2.1 的 toc 宏不能正确排版标题内嵌数学宏；标题使用
+        # 字面 $...$，正文仍保留 mathinline 宏。
+        html_content, _ = normalize_heading_inline_math(html_content)
 
         # 5.6 子标题数达到阈值时，在正文最前插入 Confluence 目录宏（toc）
         html_content = self._maybe_add_toc(html_content)
