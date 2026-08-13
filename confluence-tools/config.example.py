@@ -174,6 +174,10 @@ toc_upgrade_config = {
 
 # ==================== md_export 配置 ====================
 export_config = {
+    # 默认目标页面 ID。留空时使用 --page-id、--space 或下方 space 指定范围。
+    # 可被 --page-id 覆盖；与 space 不能同时设置。
+    "default_page": "",
+
     # 默认导出输出根目录（相对当前工作目录；也支持绝对路径，如 "D:/out"；
     # 可被 --output 参数覆盖）。
     "output_dir": "confluence_export",

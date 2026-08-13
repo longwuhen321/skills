@@ -50,7 +50,8 @@ MOCK_CFG = {
         },
     },
     'export_config': {
-        'output_dir': 'confluence_export', 'recursive': True, 'space': '',
+        'default_page': '', 'output_dir': 'confluence_export',
+        'recursive': True, 'space': '',
     },
     'debug_config': {'max_size_mb': 50, 'keep_recent': 20},
 }
@@ -667,14 +668,14 @@ class TestExportSafety(ExporterCase):
             storage, Path(self.tmp.name) / 'page', '1')
         self.assertIn('first\n\n\nsecond', text)
 
-    def test_export_directory_contains_page_id(self):
+    def test_unique_export_directory_uses_page_title(self):
         page = {'page_id': '42', 'title': 'Same', 'version': 1,
                 'space_key': 'TEST', 'storage': '<p>x</p>', 'raw': {}}
         with patch.object(self.exporter, 'fetch_page', return_value=page), \
                 patch.object(self.exporter, '_save_storage_debug'), \
                 patch.object(self.exporter, '_convert_storage_to_markdown', return_value='x\n'):
             path = self.exporter.export_page('42', recursive=False)
-        self.assertEqual(path.parent.name, '42_Same')
+        self.assertEqual(path.parent.name, 'Same')
         self.assertEqual(path.name, 'Same.md')
 
     def test_windows_reserved_page_title_is_prefixed(self):
@@ -685,7 +686,7 @@ class TestExportSafety(ExporterCase):
                 patch.object(self.exporter, '_save_storage_debug'):
             path = self.exporter.export_page('5', recursive=False)
         self.assertEqual(path.name, '_CON.md')
-        self.assertEqual(path.parent.name, '5__CON')
+        self.assertEqual(path.parent.name, '_CON')
 
     def test_attachment_filename_is_basename_and_contained(self):
         assets = Path(self.tmp.name) / 'safe.assets'

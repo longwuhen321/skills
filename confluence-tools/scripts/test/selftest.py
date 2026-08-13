@@ -36,7 +36,7 @@ from md_preflight import (PreflightRun, review_markdown, validate_storage,
 from math_upgrade import ConfluenceMathUpdater
 from toc_upgrade import (ConfluenceTocUpdater, MacroConversionError,
                          normalize_toc_macros, validate_macro_parameters)
-from md_export import ConfluenceExporter
+from md_export import ConfluenceExporter, main as export_main
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_config_sync import ConfigSyncTests
@@ -63,8 +63,8 @@ MOCK_CFG = {
             'useNavigationHiddenMode': 'true',
         },
     },
-    'export_config': {'output_dir': 'confluence_export', 'recursive': True,
-                      'space': ''},
+    'export_config': {'default_page': '', 'output_dir': 'confluence_export',
+                      'recursive': True, 'space': ''},
     'debug_config': {'max_size_mb': 50, 'keep_recent': 20},
 }
 
@@ -1694,6 +1694,53 @@ class TestMdExport(unittest.TestCase):
                 self.assertIs(entered, self.exporter)
             close.assert_called_once_with()
 
+    def test_default_page_loaded_from_config(self):
+        cfg = dict(MOCK_CFG)
+        cfg['export_config'] = dict(MOCK_CFG['export_config'], default_page='123')
+        with patch('md_export.load_config', return_value=cfg):
+            exporter = ConfluenceExporter(output_dir=self.tmp.name)
+        try:
+            self.assertEqual(exporter.default_page, '123')
+        finally:
+            exporter.close()
+
+    def test_main_exports_configured_default_page(self):
+        exporter = mock.MagicMock()
+        exporter.default_page = '123'
+        exporter.space_key = ''
+        exporter.failed_pages = []
+        exporter.stats = {'failed_images': 0}
+        exporter.__enter__.return_value = exporter
+        exporter.__exit__.return_value = False
+        with patch('md_export.ConfluenceExporter', return_value=exporter):
+            self.assertEqual(export_main([]), 0)
+        exporter.export_page.assert_called_once_with('123')
+
+    def test_main_cli_page_overrides_configured_space(self):
+        exporter = mock.MagicMock()
+        exporter.default_page = '123'
+        exporter.space_key = ''
+        exporter.failed_pages = []
+        exporter.stats = {'failed_images': 0}
+        exporter.__enter__.return_value = exporter
+        exporter.__exit__.return_value = False
+        with patch('md_export.ConfluenceExporter', return_value=exporter) as create:
+            self.assertEqual(export_main(['--page-id', '456']), 0)
+        self.assertEqual(create.call_args.kwargs['space_key'], '')
+        exporter.export_page.assert_called_once_with('456')
+
+    def test_main_rejects_missing_default_range(self):
+        exporter = mock.MagicMock()
+        exporter.default_page = None
+        exporter.space_key = ''
+        exporter.__enter__.return_value = exporter
+        exporter.__exit__.return_value = False
+        with patch('md_export.ConfluenceExporter', return_value=exporter), \
+                self.assertRaises(SystemExit):
+            export_main([])
+        exporter.export_page.assert_not_called()
+        exporter.export_space.assert_not_called()
+
     def test_code_macro_to_fence(self):
         html = ('<ac:structured-macro ac:name="code" ac:schema-version="1">'
                 '<ac:parameter ac:name="language">python</ac:parameter>'
@@ -1703,18 +1750,33 @@ class TestMdExport(unittest.TestCase):
         self.assertIn('```python', md)
         self.assertIn('print("hi")', md)
 
-    def test_toc_macro_to_marker(self):
+    def test_toc_macro_is_omitted(self):
         html = '<ac:structured-macro ac:name="toc" ac:schema-version="1" data-layout="default"/>'
         md = self._convert(html)
-        self.assertIn('[toc]', md)
+        self.assertNotIn('[toc]', md)
+        self.assertNotIn('ac:structured-macro', md)
 
-    def test_toc_inside_h1_stays_on_own_line(self):
-        # toc 宏嵌在 h1 内（<h1><ac:toc/><br/>标题</h1>）时，[toc] 必须独占一行，
-        # 否则 Typora 不渲染目录（回归：曾导出为 "# [toc] 前提："）
+    def test_toc_inside_h1_is_omitted_but_heading_remains(self):
         html = ('<h1><ac:structured-macro ac:name="toc" ac:schema-version="1"/>'
                 '<br/>前提：</h1><p>正文</p>')
         md = self._convert(html)
-        self.assertIn('[toc]\n\n# 前提：', md)
+        self.assertNotIn('[toc]', md)
+        self.assertIn('# 前提：', md)
+        self.assertIn('正文', md)
+
+    def test_easy_heading_macro_is_omitted(self):
+        html = (
+            '<h1><ac:structured-macro ac:name="easy-heading-free" '
+            'ac:schema-version="1">'
+            '<ac:parameter ac:name="titleExpandClickable">true</ac:parameter>'
+            '<ac:parameter ac:name="navigationExpandOption">'
+            'expand-all-by-default</ac:parameter>'
+            '</ac:structured-macro><br/>系统启动流程</h1><p>正文</p>')
+        md = self._convert(html)
+        self.assertNotIn('easy-heading-free', md)
+        self.assertNotIn('未处理的宏', md)
+        self.assertIn('# 系统启动流程', md)
+        self.assertIn('正文', md)
 
     def test_empty_pre_dropped_no_empty_fence(self):
         # 页面留白用的空 <pre><br/></pre> 不应导出为空代码围栏
@@ -1834,7 +1896,7 @@ class TestMdExport(unittest.TestCase):
         with patch.object(self.exporter, 'fetch_page', return_value=page), \
              patch.object(self.exporter, 'get_child_pages', return_value=[]):
             md_path = self.exporter.export_page('5')
-        md_path = Path(self.tmp.name) / '5_测试页' / '测试页.md'
+        md_path = Path(self.tmp.name) / '测试页' / '测试页.md'
         self.assertTrue(md_path.exists())
         text = md_path.read_text(encoding='utf-8')
         self.assertIn('title: "测试页"', text)
@@ -1875,8 +1937,64 @@ class TestMdExport(unittest.TestCase):
                           side_effect=[[('6', '子页')], []]):
             self.exporter.export_page('5')
         root = Path(self.tmp.name)
-        self.assertTrue((root / '5_父页' / '父页.md').exists())
-        self.assertTrue((root / '5_父页' / '6_子页' / '子页.md').exists())
+        self.assertTrue((root / '父页' / '父页.md').exists())
+        self.assertTrue((root / '父页' / '子页' / '子页.md').exists())
+
+    def test_recursive_duplicate_sibling_titles_use_page_id_prefix(self):
+        parent = {'page_id': '5', 'title': '父页', 'version': 1,
+                  'space_key': 'TEST', 'storage': '<p>parent</p>',
+                  'raw': {'version': {'when': ''}}}
+        child1 = {'page_id': '6', 'title': '同名', 'version': 1,
+                  'space_key': 'TEST', 'storage': '<p>one</p>',
+                  'raw': {'version': {'when': ''}}}
+        child2 = {'page_id': '7', 'title': '同名', 'version': 1,
+                  'space_key': 'TEST', 'storage': '<p>two</p>',
+                  'raw': {'version': {'when': ''}}}
+        with patch.object(self.exporter, 'fetch_page',
+                          side_effect=[parent, child1, child2]), \
+             patch.object(self.exporter, 'get_child_pages',
+                          side_effect=[[('6', '同名'), ('7', '同名')], [], []]):
+            self.exporter.export_page('5')
+        root = Path(self.tmp.name) / '父页'
+        self.assertTrue((root / '6_同名' / '同名.md').exists())
+        self.assertTrue((root / '7_同名' / '同名.md').exists())
+        self.assertFalse((root / '同名').exists())
+        self.assertEqual(len(self.exporter.name_conflicts), 1)
+
+    def test_name_conflicts_are_printed_in_summary(self):
+        self.exporter.name_conflicts = [{
+            'title': '同名', 'page_ids': ('6', '7'),
+            'parent': Path(self.tmp.name),
+        }]
+        with patch('builtins.print') as output:
+            self.exporter._print_summary()
+        rendered = '\n'.join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn('目录重名: 1 组', rendered)
+        self.assertIn('6, 7', rendered)
+
+    def test_space_duplicate_titles_all_use_page_id_prefix(self):
+        page1 = {'page_id': '6', 'title': '同名', 'version': 1,
+                 'space_key': 'TEST', 'storage': '<p>one</p>',
+                 'raw': {'version': {'when': ''}}}
+        page2 = {'page_id': '7', 'title': '同名', 'version': 1,
+                 'space_key': 'TEST', 'storage': '<p>two</p>',
+                 'raw': {'version': {'when': ''}}}
+        with patch('md_export.collect_space_pages', return_value=[
+                ('6', '同名', 1), ('7', '同名', 1)]), \
+             patch.object(self.exporter, 'fetch_page',
+                          side_effect=[page1, page2]):
+            self.assertTrue(self.exporter.export_space('TEST'))
+        root = Path(self.tmp.name)
+        self.assertTrue((root / '6_同名' / '同名.md').exists())
+        self.assertTrue((root / '7_同名' / '同名.md').exists())
+        self.assertFalse((root / '同名').exists())
+        self.assertEqual(len(self.exporter.name_conflicts), 1)
+
+    def test_sanitized_title_collision_uses_page_id_prefix(self):
+        plans = self.exporter._plan_page_directories(
+            [('6', 'A/B'), ('7', 'AB')], Path(self.tmp.name))
+        self.assertEqual(plans, {'6': '6_AB', '7': '7_AB'})
+        self.assertEqual(self.exporter.name_conflicts[0]['page_ids'], ('6', '7'))
 
 
 if __name__ == '__main__':

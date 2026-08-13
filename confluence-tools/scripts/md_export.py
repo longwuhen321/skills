@@ -5,11 +5,11 @@ Confluence → Markdown 导出工具 (Confluence 9.x)
 
 - mathblock / mathinline 原生宏 → $$...$$ / $...$（旧 mathjax 宏兼容）
 - code 宏 → ```语言 围栏
-- toc 宏 → [toc]
+- toc / Easy Heading 目录宏 → 省略
 - note / info / warning / tip 等提示宏 → 引用块
 - 图片附件下载到 <标题>.assets/，md 内引用改写为相对路径
-- 输出目录结构：<page_id>_<标题>/<标题>.md + <标题>.assets/（页面 ID 防同名覆盖，
-  导出的目录树可直接用 md_import --dir 反向导入）
+- 输出目录结构：<标题>/<标题>.md + <标题>.assets/；同层标题冲突时目录改为
+  <page_id>_<标题>，导出的目录树可直接用 md_import --dir 反向导入
 
 用法:
   python md_export.py --page-id <ID> [--recursive|--no-recursive] [--output <目录>]
@@ -56,7 +56,9 @@ class ConfluenceExporter:
         debug_cfg = cfg.get('debug_config', {})
 
         self.base_url = common['confluence_url'].rstrip('/')
-        self.space_key = space_key or export_cfg.get('space', '')
+        self.space_key = (
+            space_key if space_key is not None else export_cfg.get('space', ''))
+        self.default_page = export_cfg.get('default_page', '') or None
         self.recursive = recursive if recursive is not None else bool(
             export_cfg.get('recursive', True))
         self.output_dir = Path(output_dir or export_cfg.get('output_dir', 'confluence_export'))
@@ -85,6 +87,7 @@ class ConfluenceExporter:
         self.stats = {'pages': 0, 'images': 0, 'failed_images': 0,
                       'skipped_macros': set()}
         self.failed_pages = []
+        self.name_conflicts = []
 
     def __enter__(self):
         return self
@@ -180,19 +183,17 @@ class ConfluenceExporter:
         return ''
 
     def _convert_macros(self, soup):
-        """把 Confluence 宏替换为占位符元素，返回 (math_blocks, math_inlines, codes, tocs)
+        """把 Confluence 宏替换为占位符元素或省略，返回转换载荷。
 
         math_blocks: {占位符: LaTeX}     → $$...$$
         math_inlines: {占位符: LaTeX}    → $...$
         codes: {占位符: 代码原文}        → 围栏内内容
-        tocs: [占位符]                   → [toc]
         """
         math_blocks = {}
         math_inlines = {}
         codes = {}
-        tocs = []
         unknowns = []
-        counters = {'MB': 0, 'MI': 0, 'CODE': 0, 'TOC': 0, 'UNK': 0}
+        counters = {'MB': 0, 'MI': 0, 'CODE': 0, 'UNK': 0}
 
         def ph(kind):
             i = counters[kind]
@@ -230,19 +231,10 @@ class ConfluenceExporter:
                 code.string = p
                 pre.append(code)
                 macro.replace_with(pre)
-            elif name == 'toc':
-                p = ph('TOC')
-                tocs.append(p)
-                div = soup.new_tag('div')
-                div.string = p
-                # toc 宏常嵌在 h1 内（<h1><ac:toc/><br/>标题</h1>）：占位 div 移到
-                # 父元素之前，保证 markdownify 输出时 [toc] 独占一行（Typora 目录要求）
-                parent = macro.parent
-                if parent is not None and parent.name not in ('[document]', 'html', 'body'):
-                    parent.insert_before(div)
-                    macro.decompose()
-                else:
-                    macro.replace_with(div)
+            elif name in ('toc', 'easy-heading-free'):
+                # 目录宏是 Confluence 展示结构，Markdown 导出不保留。
+                # 宏可能嵌在标题内；只删宏节点，保留父标题和后续正文。
+                macro.decompose()
             elif name in ('note', 'info', 'warning', 'error', 'tip', 'success'):
                 # 提示宏 → 引用块（保留宏内部内容）
                 body = macro.find(['ac:rich-text-body', 'ac:plain-text-body'])
@@ -274,7 +266,7 @@ class ConfluenceExporter:
                 macro.replace_with(div)
                 self.stats['skipped_macros'].add(name)
 
-        return math_blocks, math_inlines, codes, tocs, unknowns
+        return math_blocks, math_inlines, codes, unknowns
 
     def _drop_empty_pres(self, soup):
         """删除空 <pre>（仅 <br>/空白，页面作者留白用）——避免 markdownify 输出空代码围栏"""
@@ -427,7 +419,7 @@ class ConfluenceExporter:
         soup = BeautifulSoup(html_content, 'html.parser')
 
         self._drop_empty_pres(soup)
-        math_blocks, math_inlines, codes, tocs, unknowns = self._convert_macros(soup)
+        math_blocks, math_inlines, codes, unknowns = self._convert_macros(soup)
         self._convert_images(soup, page_id, page_dir)
         self._convert_links(soup)
         tables = self._protect_complex_tables(soup)
@@ -441,8 +433,8 @@ class ConfluenceExporter:
         # 因而不会压缩代码或公式载荷内部的空行。
         text = re.sub(r'\n{3,}', '\n\n', text)
 
-        # 还原占位符（公式/代码/[toc]/未知宏注释/HTML 表格 原样输出，避免被 markdownify 转义）
-        # 注意顺序：HTML 表格先还原（其内部可能含 CODE/MI/MB/TOC 等占位符），
+        # 还原占位符（公式/代码/未知宏注释/HTML 表格 原样输出，避免被 markdownify 转义）
+        # 注意顺序：HTML 表格先还原（其内部可能含 CODE/MI/MB 等占位符），
         # 其余占位符随后做全局替换，会一并作用于刚插入的 HTML 部分。
         for p, raw in tables.items():
             text = text.replace(p, raw)
@@ -452,8 +444,6 @@ class ConfluenceExporter:
             text = text.replace(p, f'${content}$')
         for p, content in codes.items():
             text = text.replace(p, content)
-        for p in tocs:
-            text = text.replace(p, '[toc]')
         for p, name, encoded_xhtml in unknowns:
             safe_name = re.sub(r'-{2,}', '-', name).rstrip('-') or 'unknown'
             text = text.replace(
@@ -478,6 +468,62 @@ class ConfluenceExporter:
             name = '_' + name
         return name
 
+    def _plan_page_directories(self, pages, parent_path):
+        """为同层页面规划无覆盖的目录名，并记录标题冲突。"""
+        entries = [(str(pid), self._sanitize_filename(title))
+                   for pid, title, *_rest in pages]
+        by_title = {}
+        for pid, title in entries:
+            by_title.setdefault(title.casefold(), []).append((pid, title))
+
+        use_page_id = {
+            pid for group in by_title.values() if len(group) > 1
+            for pid, _title in group
+        }
+        candidates = {
+            pid: (f'{pid}_{title}' if pid in use_page_id else title)
+            for pid, title in entries
+        }
+
+        # 防止生成的 "<page_id>_<标题>" 恰好撞上另一个页面的纯标题。
+        by_candidate = {}
+        for pid, candidate in candidates.items():
+            by_candidate.setdefault(candidate.casefold(), []).append(pid)
+        for group in by_candidate.values():
+            if len(group) > 1:
+                use_page_id.update(group)
+
+        plans = {
+            pid: (f'{pid}_{title}' if pid in use_page_id else title)
+            for pid, title in entries
+        }
+
+        recorded = set()
+        for group in by_title.values():
+            if len(group) < 2:
+                continue
+            page_ids = tuple(pid for pid, _title in group)
+            recorded.add(frozenset(page_ids))
+            self.name_conflicts.append({
+                'title': group[0][1], 'page_ids': page_ids,
+                'parent': Path(parent_path),
+            })
+            print(f"⚠️ 同层页面目录重名「{group[0][1]}」"
+                  f"（ID: {', '.join(page_ids)}），改用 <页面ID>_页面标题")
+
+        for group in by_candidate.values():
+            if len(group) < 2 or frozenset(group) in recorded:
+                continue
+            page_ids = tuple(group)
+            candidate = candidates[group[0]]
+            self.name_conflicts.append({
+                'title': candidate, 'page_ids': page_ids,
+                'parent': Path(parent_path),
+            })
+            print(f"⚠️ 同层页面目录名冲突「{candidate}」"
+                  f"（ID: {', '.join(page_ids)}），改用 <页面ID>_页面标题")
+        return plans
+
     def _front_matter(self, page):
         """Typora front-matter：title（JSON 转义防冒号/引号破坏 YAML）、date、math"""
         when = page.get('raw', {}).get('version', {}).get('when', '')
@@ -498,7 +544,8 @@ class ConfluenceExporter:
             f.write(page['storage'])
         return path
 
-    def export_page(self, page_id, parent_path=None, recursive=None, _visited=None):
+    def export_page(self, page_id, parent_path=None, recursive=None, _visited=None,
+                    directory_name=None):
         """导出单页（recursive 时递归子页面），返回 md 文件路径"""
         if _visited is None:
             _visited = set()
@@ -511,7 +558,7 @@ class ConfluenceExporter:
         page = self.fetch_page(page_id)
         self._save_storage_debug(page)
         title = self._sanitize_filename(page['title'])
-        page_dir = parent / f"{page_id}_{title}"
+        page_dir = parent / (directory_name or title)
         page_dir.mkdir(parents=True, exist_ok=True)
 
         md_text = self._convert_storage_to_markdown(page['storage'], page_dir, page_id)
@@ -522,10 +569,13 @@ class ConfluenceExporter:
 
         use_recursive = self.recursive if recursive is None else recursive
         if use_recursive:
-            for cid, _ct in self.get_child_pages(page_id):
+            children = self.get_child_pages(page_id)
+            child_dirs = self._plan_page_directories(children, page_dir)
+            for cid, _ct in children:
                 try:
                     self.export_page(cid, str(page_dir), recursive=True,
-                                     _visited=_visited)
+                                     _visited=_visited,
+                                     directory_name=child_dirs[str(cid)])
                 except Exception as exc:
                     self.failed_pages.append((str(cid), str(exc)))
                     print(f"❌ 子页面 {cid} 导出失败: {exc}")
@@ -539,10 +589,12 @@ class ConfluenceExporter:
                              "export_config.space 设置")
         pages = collect_space_pages(self.session, self.base_url, key)
         print(f"📂 空间「{key}」共 {len(pages)} 个页面")
+        page_dirs = self._plan_page_directories(pages, self.output_dir)
         for pid, _t, _v in pages:
             try:
                 # 空间清单已包含每一页；这里禁止再次递归，避免重复导出。
-                self.export_page(pid, recursive=False)
+                self.export_page(pid, recursive=False,
+                                 directory_name=page_dirs[str(pid)])
             except Exception as e:
                 print(f"❌ 页面 {pid} 导出失败: {e}")
                 self.failed_pages.append((str(pid), str(e)))
@@ -556,13 +608,20 @@ class ConfluenceExporter:
         if self.stats['skipped_macros']:
             print("ℹ️ 未处理的宏（已在 md 中保留为注释）: "
                   + ', '.join(sorted(self.stats['skipped_macros'])))
+        if self.name_conflicts:
+            print(f"⚠️ 页面目录重名: {len(self.name_conflicts)} 组，"
+                  "已使用 Page ID 前缀避免覆盖")
+            for conflict in self.name_conflicts:
+                ids = ', '.join(conflict['page_ids'])
+                print(f"  - {conflict['parent']} / {conflict['title']} "
+                      f"(ID: {ids})")
         if self.failed_pages:
             print(f"❌ 导出失败页面: {len(self.failed_pages)}")
             for page_id, reason in self.failed_pages:
                 print(f"  - {page_id}: {reason}")
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser(description='Confluence → Markdown 导出工具')
     parser.add_argument('--page-id', default=None,
                         help='页面 ID（recursive 时含子页面）')
@@ -574,28 +633,39 @@ if __name__ == "__main__":
                         help='不递归，仅导出页面本身')
     parser.add_argument('--output', default=None,
                         help='输出根目录（默认从 config.py 的 export_config.output_dir 读取）')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    if not args.page_id and not args.space:
-        parser.error("必须指定 --page-id 或 --space")
-
-    print("=" * 60)
-    print("📤 Confluence → Markdown 导出工具")
-    print("=" * 60)
-
-    with ConfluenceExporter(space_key=args.space, recursive=args.recursive,
+    space_override = '' if args.page_id is not None else args.space
+    with ConfluenceExporter(space_key=space_override, recursive=args.recursive,
                             output_dir=args.output) as exporter:
+        page_id = (
+            args.page_id if args.page_id is not None
+            else (None if args.space is not None else exporter.default_page))
+        if page_id and exporter.space_key:
+            parser.error('页面范围与空间范围不能同时生效，请清空其中一个配置')
+        if not page_id and not exporter.space_key:
+            parser.error(
+                '必须指定 --page-id 或 --space，或在 export_config 中设置默认范围')
+
+        print("=" * 60)
+        print("📤 Confluence → Markdown 导出工具")
+        print("=" * 60)
+
         ok = True
         try:
-            if args.page_id:
-                exporter.export_page(args.page_id)
+            if page_id:
+                exporter.export_page(page_id)
                 ok = (not exporter.failed_pages
                       and exporter.stats['failed_images'] == 0)
             else:
-                ok = exporter.export_space(args.space)
+                ok = exporter.export_space()
         except Exception as exc:
             print(f"❌ 导出失败: {exc}")
             ok = False
         finally:
             exporter._print_summary()
-    sys.exit(0 if ok else 1)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

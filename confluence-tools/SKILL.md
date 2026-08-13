@@ -144,15 +144,18 @@ scripts/config_parser.py      scripts/debug_utils.py
 ### Markdown 导出
 
 ```bash
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_export.py"
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_export.py" --page-id <ID> [--recursive|--no-recursive] [--output <目录>]
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_export.py" --space <KEY> [--output <目录>]
 ```
 
 核心红线：
 
+- 无参数运行从 `export_config.default_page` 或 `export_config.space` 取默认范围；两者不能同时设置。
+- 导出时省略 Confluence 原生 `toc` 和 Easy Heading 目录宏，不生成 Markdown 目录标记或宏注释。
 - 页面、子页面和附件列表必须全量分页；请求错误不能返回截断结果。
 - 空间模式每个页面导出一次，不对空间索引中的页面重复递归。
-- 输出目录含稳定 page ID；附件只取 basename 并验证路径仍位于页面 assets 目录内。
+- 页面目录默认只用标题；同一导出层级标题冲突时，冲突组全部改用 `page ID_标题`，即时提示并在结束时汇总。附件只取 basename 并验证路径仍位于页面 assets 目录内。
 - 附件下载失败必须保留说明、累计失败并令命令返回非零。
 
 ## 全局安全红线

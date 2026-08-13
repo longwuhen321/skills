@@ -96,9 +96,10 @@
 
 ### `export_config`
 
-1. `output_dir`：默认 `confluence_export`，支持相对或绝对路径。
-2. `recursive`：页面导出是否默认包含后代，默认 `true`。
-3. `space`：默认导出空间，可留空。
+1. `default_page`：默认导出页面 ID，可留空；与 `space` 不能同时设置。
+2. `output_dir`：默认 `confluence_export`，支持相对或绝对路径。
+3. `recursive`：页面导出是否默认包含后代，默认 `true`。
+4. `space`：默认导出空间，可留空；与 `default_page` 不能同时设置。
 
 ### `debug_config`
 
