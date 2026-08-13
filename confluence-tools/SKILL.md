@@ -153,6 +153,7 @@ scripts/config_parser.py      scripts/debug_utils.py
 
 - 无参数运行从 `export_config.default_page` 或 `export_config.space` 取默认范围；两者不能同时设置。
 - 导出时省略 Confluence 原生 `toc` 和 Easy Heading 目录宏，不生成 Markdown 目录标记或宏注释。
+- 含代码表格不得保留为会破坏 Markdown 渲染的 HTML：单列纯代码表拆成围栏，多列或混合表按行列标签纵向展开；纯文本表格继续使用 Markdown 表格。
 - 页面、子页面和附件列表必须全量分页；请求错误不能返回截断结果。
 - 空间模式每个页面导出一次，不对空间索引中的页面重复递归。
 - 页面目录默认只用标题；同一导出层级标题冲突时，冲突组全部改用 `page ID_标题`，即时提示并在结束时汇总。附件只取 basename 并验证路径仍位于页面 assets 目录内。

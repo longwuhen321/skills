@@ -85,9 +85,12 @@ class ConfluenceExporter:
         self._attachments_cache = {}
         # 统计
         self.stats = {'pages': 0, 'images': 0, 'failed_images': 0,
-                      'skipped_macros': set()}
+                      'skipped_macros': set(),
+                      'code_tables_single': 0, 'code_tables_multi': 0,
+                      'code_tables_irregular': 0}
         self.failed_pages = []
         self.name_conflicts = []
+        self.table_warnings = []
 
     def __enter__(self):
         return self
@@ -378,16 +381,17 @@ class ConfluenceExporter:
             self.stats['failed_images'] += 1
             image.replace_with(f'<!-- 图片未导出: {filename or "?"} -->')
 
-    def _protect_complex_tables(self, soup):
-        """表格降级保护（在宏/图片转换之后调用）
+    def _protect_complex_tables(self, soup, page_id):
+        """展开含代码表格，并保护其余复杂表格。
 
         GFM/Typora 表格单元格不能含多行围栏代码块，markdownify 把表格内的
         <pre><code> 输出为围栏会彻底破坏表格结构（行列错乱、| 误判列分隔）。
         处理：
-        - 含块级内容（pre/code 等）的表格 → 整体保留为原始 HTML
-          （Typora 原生渲染 HTML 表格，代码/图片/公式引用均不丢失）
+        - 单列且每格仅一个代码块 → 按行拆成独立围栏代码块
+        - 多列或混合内容且含代码 → 按行、列标签纵向展开
+        - 不含代码但含其他复杂宏 → 整体保留为原始 HTML
         - 纯文本表格 → 继续走 GFM，但单元格文本内的 | 转义为 \\|，防止破坏列结构
-        返回 {占位符: 原始 HTML 表格}，还原阶段替换回。
+        返回 {占位符: 原始 HTML 表格}，供还原阶段替换。
         """
         tables = {}
         counter = [0]
@@ -397,9 +401,92 @@ class ConfluenceExporter:
             counter[0] += 1
             return p
 
-        for table in soup.find_all('table'):
-            if table.find(['pre', 'code', 'ac:structured-macro']):
-                # 含块级内容 → 保留原始 HTML
+        def direct_cells(row):
+            return row.find_all(['td', 'th'], recursive=False)
+
+        def cell_is_only_code(cell):
+            pres = cell.find_all('pre')
+            if len(pres) != 1:
+                return False
+            clone = BeautifulSoup(str(cell), 'html.parser').find(['td', 'th'])
+            for pre in clone.find_all('pre'):
+                pre.decompose()
+            if clone.get_text(strip=True):
+                return False
+            return clone.find(['img', 'table', 'ul', 'ol', 'blockquote',
+                               'ac:structured-macro']) is None
+
+        def append_cell_content(container, cell):
+            for child in list(cell.children):
+                container.append(child.extract())
+
+        for table_index, table in enumerate(soup.find_all('table'), 1):
+            # 只处理当前表格直属语义行，避免把嵌套表格的行重复算入外层。
+            rows = [row for row in table.find_all('tr')
+                    if row.find_parent('table') is table]
+            row_cells = [direct_cells(row) for row in rows]
+            has_code = table.find(['pre', 'code']) is not None
+
+            if has_code:
+                single_code = bool(row_cells) and all(
+                    len(cells) == 1 and cell_is_only_code(cells[0])
+                    for cells in row_cells)
+                container = soup.new_tag('div')
+
+                if single_code:
+                    for cells in row_cells:
+                        container.append(cells[0].find('pre').extract())
+                    self.stats['code_tables_single'] += 1
+                    print(f"ℹ️ 页面 {page_id} 的第 {table_index} 个单列代码表"
+                          f"已拆成 {len(row_cells)} 个围栏代码块")
+                    table.replace_with(container)
+                    continue
+
+                header_cells = []
+                data_rows = row_cells
+                if (row_cells and row_cells[0]
+                        and all(cell.name == 'th' for cell in row_cells[0])
+                        and not any(cell.find(['pre', 'code'])
+                                    for cell in row_cells[0])):
+                    header_cells = row_cells[0]
+                    data_rows = row_cells[1:]
+                headers = [cell.get_text(' ', strip=True) for cell in header_cells]
+
+                widths = [len(cells) for cells in data_rows]
+                irregular = (not data_rows or not widths or len(set(widths)) > 1
+                             or any(cell.has_attr('rowspan') or cell.has_attr('colspan')
+                                    for cells in row_cells for cell in cells))
+                if irregular:
+                    self.stats['code_tables_irregular'] += 1
+                    warning = {'page_id': str(page_id), 'table': table_index}
+                    self.table_warnings.append(warning)
+                    print(f"⚠️ 页面 {page_id} 的第 {table_index} 个含代码表格布局不规则，"
+                          "已按单元格顺序纵向展开")
+
+                for row_index, cells in enumerate(data_rows, 1):
+                    row_label = soup.new_tag('p')
+                    row_strong = soup.new_tag('strong')
+                    row_strong.string = f'第 {row_index} 行'
+                    row_label.append(row_strong)
+                    container.append(row_label)
+                    for column_index, cell in enumerate(cells, 1):
+                        label = (headers[column_index - 1]
+                                 if column_index <= len(headers)
+                                 and headers[column_index - 1]
+                                 else f'第 {column_index} 列')
+                        field_label = soup.new_tag('p')
+                        field_strong = soup.new_tag('strong')
+                        field_strong.string = label
+                        field_label.append(field_strong)
+                        container.append(field_label)
+                        append_cell_content(container, cell)
+
+                self.stats['code_tables_multi'] += 1
+                print(f"ℹ️ 页面 {page_id} 的第 {table_index} 个含代码表格"
+                      "已按行列标签纵向展开")
+                table.replace_with(container)
+            elif table.find('ac:structured-macro'):
+                # 其他复杂宏不在本次语义展开范围内，保留原始 HTML。
                 p = ph()
                 tables[p] = str(table)
                 div = soup.new_tag('div')
@@ -422,7 +509,7 @@ class ConfluenceExporter:
         math_blocks, math_inlines, codes, unknowns = self._convert_macros(soup)
         self._convert_images(soup, page_id, page_dir)
         self._convert_links(soup)
-        tables = self._protect_complex_tables(soup)
+        tables = self._protect_complex_tables(soup, page_id)
 
         md = markdownify.MarkdownConverter(
             heading_style='ATX', bullets='-',
@@ -615,6 +702,16 @@ class ConfluenceExporter:
                 ids = ', '.join(conflict['page_ids'])
                 print(f"  - {conflict['parent']} / {conflict['title']} "
                       f"(ID: {ids})")
+        code_tables = (self.stats['code_tables_single']
+                       + self.stats['code_tables_multi'])
+        if code_tables:
+            print("ℹ️ 含代码表格已展开: "
+                  f"单列代码表 {self.stats['code_tables_single']} 个, "
+                  f"多列/混合表 {self.stats['code_tables_multi']} 个")
+        if self.table_warnings:
+            print(f"⚠️ 不规则含代码表格: {len(self.table_warnings)} 个")
+            for warning in self.table_warnings:
+                print(f"  - 页面 {warning['page_id']}, 第 {warning['table']} 个表格")
         if self.failed_pages:
             print(f"❌ 导出失败页面: {len(self.failed_pages)}")
             for page_id, reason in self.failed_pages:

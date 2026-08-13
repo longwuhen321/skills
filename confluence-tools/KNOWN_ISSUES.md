@@ -25,6 +25,13 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-13] md_export：HTML 表格包裹代码块导致 Typora 标签泄漏与 Shell 变量误渲染
+
+- **现象**：导出单列表格内的多个 Confluence `code` 宏后，Typora 直接显示 `</code></pre></td>` 等 HTML 标签，代码行列错乱；`$FRC`、`$PARAM_FILE` 和 `#` 等 Shell 内容脱离代码块后被误作数学公式或 Markdown 语法。
+- **根因**：旧 `_protect_complex_tables` 将任何含 `<pre>/<code>` 的表格整体保留为 HTML；Typora 对 `<table><pre><code>` 组合不能稳定解析，代码占位符还原后又把多行载荷塞回 HTML 表格，最终破坏标签和代码边界。GFM 管道表格本身也不能容纳多行围栏，因此不能直接改成普通 Markdown 表格。
+- **修复**：`scripts/md_export.py` 在 markdownify 前按结构展开含代码表格：单列且每格只有一个代码块时按行拆成独立围栏；多列或混合内容时按“第 N 行 + 表头/第 N 列”纵向展开；合并单元格或行宽不一致时仍按原单元格顺序保留内容，并即时提示、末尾汇总。纯文本表格继续走 GFM，不含代码的其他复杂宏表格保持原有 HTML 兜底。
+- **排查方法**：导出 Markdown 出现 `<table`、`</code>` 等标签正文，或 Shell 变量在表格区域触发数学错误时，检查 storage 是否为表格单元格内嵌 `code` 宏；selftest 的 `test_single_column_code_macro_table_preserves_order_and_shell_text`、`test_multi_column_code_table_expands_vertically` 和 `test_irregular_code_table_flattens_without_losing_cells` 覆盖。
+
 ## [2026-08-12] 空格公式在 Markdown 表格中泄露为文本或被 emphasis 拆坏（已修复）
 
 - **现象**：`$ \boldsymbol{x}_{n} $` 等公式在 Confluence 表格中显示原始美元符和 LaTeX；下划线可能先被 Markdown 转成 `<em>`，导致公式结构破坏。块公式中的嵌套 `$...$` 还可能被重复转换为 `mathinline`。
@@ -79,8 +86,8 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 
 - **现象**：md_export 导出含代码表格的页面（apriltag 方案精准降落实测），Typora 打开表格乱码——行列错乱、`|` 被误判列分隔；md 中表格单元格出现 ` ``` ` 围栏横跨多行。
 - **根因**：GFM/Typora 表格单元格不能含多行围栏代码块。markdownify 把表格内的 `<pre><code>` 直接输出为围栏（` ``` `），围栏横跨单元格结构；代码内 `|`（如 `||`）未转义，进一步破坏列分割。
-- **修复**：`scripts/md_export.py` 新增 `_protect_complex_tables`（宏/图片转换后、markdownify 前调用）：含 `pre`/`code`/`ac:` 的表格整体保留为**原始 HTML**（占位符还原，Typora 原生渲染 HTML 表格，代码/图片/公式引用不丢）；纯文本表格走 GFM 且单元格文本 `|` → `\|`。同时修正占位符还原顺序——HTML 表格先还原（其内部含 CODE/MI/MB 占位符），其余占位符随后全局替换，否则表格内占位符残留。
-- **排查方法**：导出的 md 中表格单元格出现 ` ``` ` 围栏或行列错乱即此类；selftest 有 `test_table_with_code_kept_as_html` / `test_table_pipe_escaped_in_gfm` / `test_table_html_code_placeholder_restored` 覆盖。
+- **修复**：`scripts/md_export.py` 当时新增 `_protect_complex_tables`（宏/图片转换后、markdownify 前调用）：含 `pre`/`code`/`ac:` 的表格整体保留为原始 HTML，纯文本表格走 GFM 且单元格文本 `|` → `\|`；同时修正占位符还原顺序。后续发现 Typora 对 HTML 表格嵌套代码块仍不可靠，此临时兜底已由 2026-08-13 的“含代码表格纵向展开”方案取代。
+- **排查方法**：导出的 md 中表格单元格出现围栏、HTML 标签或行列错乱即此类；当前由 `test_single_column_code_macro_table_preserves_order_and_shell_text`、`test_multi_column_code_table_expands_vertically`、`test_table_pipe_escaped_in_gfm` 覆盖。
 
 ## [2026-08-04] ==高亮== 正则误配 base64 图片 padding，`<strong>` 进入 src 属性 → 导入 400
 

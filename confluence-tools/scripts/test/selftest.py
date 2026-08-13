@@ -1849,23 +1849,60 @@ class TestMdExport(unittest.TestCase):
         self.assertIn('| --- | --- |', md)
         self.assertIn('| a | b |', md)
 
-    def test_table_with_code_kept_as_html(self):
-        # 表格单元格内含代码块 → 整体保留为原始 HTML（GFM 表格不能含多行围栏）
+    def test_multi_column_code_table_expands_vertically(self):
+        # 多列代码表纵向展开，不能保留会被 Typora 打散的 HTML 表格。
         html = ('<table><tbody><tr><th>代码</th><th>说明</th></tr>'
                 '<tr><td><pre><code>if (a || b) {\n  x();\n}</code></pre></td>'
                 '<td>条件判断</td></tr></tbody></table>')
         md = self._convert(html)
-        self.assertIn('<table>', md)
+        self.assertNotIn('<table', md)
+        self.assertNotIn('</code>', md)
         self.assertIn('if (a || b)', md)
         self.assertNotIn('| 代码 |', md)
+        self.assertIn('**代码**', md)
+        self.assertIn('**说明**', md)
+        self.assertIn('条件判断', md)
 
-    def test_table_html_code_placeholder_restored(self):
-        # HTML 表格内的代码占位符必须被还原为原文，且无占位符残留
-        html = ('<table><tbody><tr><td><pre><code>int x = 1;</code></pre></td>'
-                '<td>说明</td></tr></tbody></table>')
+    def test_single_column_code_macro_table_preserves_order_and_shell_text(self):
+        def macro(body):
+            return ('<ac:structured-macro ac:name="code">'
+                    '<ac:parameter ac:name="language">c</ac:parameter>'
+                    f'<ac:plain-text-body><![CDATA[{body}]]></ac:plain-text-body>'
+                    '</ac:structured-macro>')
+
+        html = ('<table><tbody><tr><td>' + macro('set +e') + '</td></tr>'
+                '<tr><td>' + macro('if [ -f $FRC ]\nthen\n  . $FRC\nfi')
+                + '</td></tr></tbody></table>')
         md = self._convert(html)
-        self.assertIn('int x = 1;', md)
+        self.assertNotIn('<table', md)
+        self.assertNotIn('</code>', md)
+        self.assertEqual(md.count('```c'), 2)
+        self.assertLess(md.index('set +e'), md.index('if [ -f $FRC ]'))
+        self.assertIn('$FRC', md)
         self.assertNotIn('⟦', md)
+
+    def test_irregular_code_table_flattens_without_losing_cells(self):
+        html = ('<table><tbody><tr><td colspan="2"><pre><code>x</code></pre></td></tr>'
+                '<tr><td>left</td><td><pre><code>y</code></pre></td></tr>'
+                '</tbody></table>')
+        md = self._convert(html)
+        self.assertNotIn('<table', md)
+        self.assertIn('x', md)
+        self.assertIn('left', md)
+        self.assertIn('y', md)
+        self.assertEqual(self.exporter.stats['code_tables_irregular'], 1)
+
+    def test_code_table_summary_reports_conversions_and_warnings(self):
+        self.exporter.stats['code_tables_single'] = 1
+        self.exporter.stats['code_tables_multi'] = 2
+        self.exporter.table_warnings = [{'page_id': '9', 'table': 3}]
+        with patch('builtins.print') as output:
+            self.exporter._print_summary()
+        rendered = '\n'.join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn('单列代码表 1 个', rendered)
+        self.assertIn('多列/混合表 2 个', rendered)
+        self.assertIn('不规则含代码表格: 1 个', rendered)
+        self.assertIn('页面 9, 第 3 个表格', rendered)
 
     def test_table_pipe_escaped_in_gfm(self):
         # 纯文本表格单元格内的 | 需转义，防止被当成列分隔
