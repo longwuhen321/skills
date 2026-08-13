@@ -4,7 +4,7 @@
 
 **网页 → 中文 → Confluence：一条命令式的知识流水线。**
 
-三个相互对齐的 Claude Code skills，把「抓取网页 → 翻译成中文 → 发布到 Confluence」整条链路做成自动化工作流——抓出来的 Markdown 直接能译，译完直接能导入，格式层层兼容，不需要任何手工修复。
+三个相互对齐的 Agent Skills，把「抓取网页 → 翻译成中文 → 发布到 Confluence」整条链路做成自动化工作流——抓出来的 Markdown 直接能译，译完直接能导入，格式层层兼容，不需要任何手工修复。
 
 ## 这套技能能做什么
 
@@ -49,7 +49,31 @@
 git clone https://github.com/longwuhen321/skills.git ~/.claude/skills/
 ```
 
-Claude Code（及 Reasonix 等支持 SKILL.md 标准的助手）会自动发现并加载。首次调用时，每个 skill 会通过配置向导引导你完成 Python 环境与凭据设置——只需回答几个问题，之后不再询问。
+将仓库放入所用 Agent 的 skills 发现目录后即可加载；例如 Claude Code 使用 `~/.claude/skills/`，Codex 通常使用 `~/.codex/skills/`。首次调用时，每个 skill 会通过配置向导引导你完成 Python 环境与凭据设置。
+
+## 运行环境参考
+
+下面是 **2026-08-13 已验证环境的参考快照**，用于帮助迁移和排障，不是最低版本锁定。未列出的版本组合不代表一定不支持；在新环境中应先运行对应 skill 的配置检查、依赖检查和自测。
+
+### 公共基础
+
+| 项目 | 已验证参考 | 使用说明 |
+|---|---|---|
+| Agent 宿主 | 支持 `SKILL.md`，可读写本地文件并调用 Python 进程 | skills 发现目录由宿主决定，不应在脚本中写死某个用户目录 |
+| 操作系统 / Shell | Windows + PowerShell 5.1 | Linux / macOS 尚未做同等强度的整套回归验证 |
+| Python | CPython 3.11.9 | 项目尚未声明严格最低版本；新部署优先使用 Python 3.11，并在同一任务中保持解释器一致 |
+| 文本与仓库格式 | UTF-8；仓库文本使用 LF | Markdown、JSON 和脚本均应显式按 UTF-8 处理 |
+| 本地配置 | 各 skill 的 `scripts/config.py` | 真实配置不入库；从 `config.example.py` 创建，并避免公开本机路径、URL、Token、代理、Space Key、页面 ID 等环境信息 |
+
+### 各 skill 的依赖与外部环境
+
+| Skill | Python 依赖（已验证版本） | 外部环境 | 兼容边界与可选项 |
+|---|---|---|---|
+| `web2md` | `requests 2.32.3`、`beautifulsoup4 4.13.4`、`markdownify 1.2.3`、`lxml 5.3.1` | 可访问目标网页及图片资源的网络 | 普通抓取不依赖浏览器；JavaScript 渲染的导航可能需要浏览器渲染后再处理。HTTP 代理可选，SOCKS 需另装 PySocks。Typora 只是可选阅读器 |
+| `md2zh` | 仅 Python 标准库 | 需要具备翻译与复核能力的 AI Agent；默认不依赖外部机器翻译服务 | 转换脚本负责字节保护、校验和断点状态；翻译与语义复核由 Agent 完成。全流程应使用同一 Python 解释器和 UTF-8 |
+| `confluence-tools` | `requests 2.32.3`、`markdown2 2.5.3`、`beautifulsoup4 4.13.4`、`markdownify 1.2.3` | Confluence Data Center 9.2.1（build 9109）及 PAT Bearer 认证 | Easy Heading 模式已验证插件版本为 `3.6.3`，storage 宏名为 `easy-heading-free`、schema version 为 `1`；使用原生 `toc` 模式不需要该插件。Confluence Cloud 及其他 Server / DC 版本尚未完成同等验证 |
+
+表中的第三方包版本是一次通过当前测试集的组合，不是 `requirements.txt` 式精确锁定。升级 Python、依赖、Confluence 或 Easy Heading 后，应重新运行三个 skill 的自测；分发仓库时不要附带真实 `config.py`、日志、缓存或本地修复副本。
 
 ---
 
@@ -118,7 +142,7 @@ Claude Code（及 Reasonix 等支持 SKILL.md 标准的助手）会自动发现�
 ## 常见问题
 
 **Q: 必须安装 Python 吗？**
-三个 skill 都依赖 Python 执行脚本。首次调用时配置向导会先问你的环境路径，没有的话自动扫描，缺的依赖自动安装。
+三个 skill 都依赖 Python 执行脚本。首次调用时配置向导会先确认解释器；缺少依赖时会报告安装命令，并在获得用户确认后再安装。
 
 **Q: 必须用 Confluence 吗？**
 不是。web2md 和 md2zh 完全独立——一个把网页存成本地 Markdown 知识库，一个做文档翻译。只有想发布到 Confluence 时才需要 confluence-tools。
