@@ -12,19 +12,19 @@ GROUPS = ('common_config,import_config,upgrade_config,toc_upgrade_config,'
           'export_config,debug_config')
 
 EXAMPLE_TEXT = (
-    "common_config = {'python_path': 'x', 'confluence_token': 'placeholder'}\n"
-    "import_config = {'space': 'ALG', 'toc_enabled': True}\n"
+    "common_config = {'python_path': 'x', 'confluence_token': 'placeholder', 'toc_target_macro': 'easy_heading'}\n"
+    "import_config = {'space': 'ALG', 'toc_enabled': True, 'materialize_root_page': False}\n"
     "upgrade_config = {'recursive': True}\n"
-    "toc_upgrade_config = {'target_macro': 'easy_heading'}\n"
+    "toc_upgrade_config = {'recursive': False}\n"
     "export_config = {'output_dir': 'out'}\n"
     "debug_config = {'max_size_mb': 50}\n"
 )
 
 CONFIG_TEXT = (
-    "common_config = {'python_path': 'D:/py/python.exe', 'confluence_token': 'test-token'}\n"
-    "import_config = {'space': 'ES', 'toc_enabled': False}\n"
+    "common_config = {'python_path': 'D:/py/python.exe', 'confluence_token': 'test-token', 'toc_target_macro': 'toc'}\n"
+    "import_config = {'space': 'ES', 'toc_enabled': False, 'materialize_root_page': True}\n"
     "upgrade_config = {'recursive': False}\n"
-    "toc_upgrade_config = {'target_macro': 'toc'}\n"
+    "toc_upgrade_config = {'recursive': True}\n"
     "export_config = {'output_dir': 'D:/out'}\n"
     "debug_config = {'max_size_mb': 20}\n"
 )

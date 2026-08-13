@@ -64,6 +64,7 @@
 |---|---|
 | 配置无副作用解析、六组键和类型同步 | `test_config_sync.py`、`TestSafeConfigAndPackaging` |
 | 导入页面消歧、409 和附件失败 | `TestImportLookupAndConflict` |
+| 导入原件直传、完整修复副本、两级复审和哈希门禁 | `TestMdImport`、`TestMdPreflight` |
 | 树计划唯一 ID 和断点恢复 | `TestTreePlanAndResume` |
 | 数学零残留与过期确认 | `TestMathSafety` |
 | 目录宏转换矩阵和参数校验 | `TestTocUpgrade` |
@@ -119,6 +120,8 @@ confluence-tools/
 
 日志清理由 `debug_utils.py` 统一控制；总大小超过 `max_size_mb` 或已识别的时间戳目录
 超过 `keep_recent` 时，从最旧开始删除但至少保留最近 N 个。恢复树导入时跳过启动清理。
+导入预审日志只允许报告与 manifest，不存放供 AI 修改的 Markdown 候选文件；修复副本必须
+位于上传对象同级，不得放入 `logs/`。
 
 ## 记录与凭据
 

@@ -50,6 +50,9 @@
 3. `confluence_user`：选填，仅记录，不参与认证。
 4. `confluence_token`：PAT，必需；运行时可由 `CONFLUENCE_TOKEN` 环境变量覆盖。
 5. `heading_math_mode`：`literal` 或 `mathinline`；默认 `literal`。
+6. `toc_target_macro`：导入与目录升级共用的目标宏，`easy_heading` 或 `toc`；
+   默认 `easy_heading`。`toc_upgrade.py --target` 可临时覆盖；旧配置中的
+   `toc_upgrade_config.target_macro` 仅作为兼容回退读取。
 
 ### `import_config`
 
@@ -58,10 +61,13 @@
 3. `default_parent_id`：新建页面的默认父页面 ID；留空则建在空间根。
 4. `default_page_name`：默认标题；留空取 Markdown 文件名。
 5. `tree_import`：是否允许 `--dir` 树导入，默认 `false`。
-6. `fix_hierarchy`：`confirm`、`auto` 或 `off`，默认 `confirm`。
-7. `toc_enabled`：是否自动插入原生目录宏，默认 `true`。
-8. `toc_min_headings`：H2～H6 达到多少个时插入目录宏，默认 `4`。
-9. `preflight_review`：上传前生成并验证审核副本，默认 `true`。
+6. `materialize_root_page`：是否把 `--dir` 传入的根文件夹实体化为根页面，默认 `false`。
+   开启后优先使用同名 `.md`；缺少时创建空的 Confluence 页面而不补写本地文件，
+   根目录内其他 `.md` 各自作为该根页面的直接子页面。
+7. `fix_hierarchy`：`confirm`、`auto` 或 `off`，默认 `confirm`。
+8. `toc_enabled`：是否按 `common_config.toc_target_macro` 自动插入目录宏，默认 `true`。
+9. `toc_min_headings`：H2～H6 达到多少个时插入目录宏，默认 `4`。
+10. `preflight_review`：上传前只读审核原件；有问题时创建并验证同级完整修复副本，默认 `true`。
 
 ### `upgrade_config`
 
@@ -75,13 +81,12 @@
 
 ### `toc_upgrade_config`
 
-1. `target_macro`：`easy_heading` 或 `toc`，默认 `easy_heading`。
-2. `default_page`：目录宏转换默认页面 ID，可留空。
-3. `space`：空间范围默认值；建议留空，避免误触空间批量写入。
-4. `recursive`：是否默认处理全部后代，默认 `false`；不设置深度上限。
-5. `auto_update`：验证后是否自动提交，默认 `true`。
-6. `ai_verify`：是否等待人工确认，默认 `false`。
-7. `macro_parameters`：只用于新建 Easy Heading，不覆盖已有 Easy 宏参数：
+1. `default_page`：目录宏转换默认页面 ID，可留空。
+2. `space`：空间范围默认值；建议留空，避免误触空间批量写入。
+3. `recursive`：是否默认处理全部后代，默认 `false`；不设置深度上限。
+4. `auto_update`：验证后是否自动提交，默认 `true`。
+5. `ai_verify`：是否等待人工确认，默认 `false`。
+6. `macro_parameters`：供导入或升级新建 Easy Heading 使用，不覆盖已有 Easy 宏参数：
    - `titleExpandClickable`：`true` / `false`，默认 `true`；
    - `hiddenEditedFlag`：插件内部标记，固定建议 `true`；
    - `navigationExpandOption`：展开策略，默认 `expand-all-by-default`；
@@ -106,4 +111,3 @@
 - 取值优先级：用户显式 CLI 参数 > `config.py` > 代码默认值。
 - 401、403、连接超时或配置门禁失败时，停止页面操作并引导重新配置。
 - `config.py` 被 `.gitignore` 排除，git 无法恢复；丢失后必须重新运行配置向导。
-

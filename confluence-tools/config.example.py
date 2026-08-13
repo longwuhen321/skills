@@ -10,7 +10,7 @@
 #   common_config      — 通用配置（四个页面脚本共用）
 #   import_config      — md_import 专属配置
 #   upgrade_config     — math_upgrade 专属配置
-#   toc_upgrade_config — toc_upgrade 专属配置
+#   toc_upgrade_config — 目录升级范围及 Easy Heading 创建参数（导入也复用参数）
 #   export_config      — md_export 专属配置
 #   debug_config       — 调试日志配置（共用）
 # ============================================================
@@ -22,6 +22,12 @@ common_config = {
     #   "literal"    = 保留 $...$（Confluence 9.2.1 目录宏推荐，默认）
     #   "mathinline" = 转为原生 mathinline 宏（供其他版本/插件环境使用）
     "heading_math_mode": "literal",
+
+    # Markdown 导入与目录宏升级共用的目标目录宏：
+    #   "easy_heading" = Easy Heading Macro
+    #   "toc"          = Confluence 原生“目录”(toc) 宏
+    # toc_upgrade.py 可通过 --target easy_heading|toc 临时覆盖。
+    "toc_target_macro": "easy_heading",
 
     # Python 解释器的完整路径。AI 助手使用此路径执行所有 skill 脚本。
     # 可以是系统 Python、conda 环境或 venv 中的 python.exe。
@@ -61,6 +67,12 @@ import_config = {
     # 未开启时使用 --dir 会报错提示（防误用）。
     "tree_import": False,
 
+    # --dir 树导入是否把传入的根文件夹实体化为根页面：
+    # False = 保持旧行为；根目录没有可用正文时跳过根节点。
+    # True  = 根目录始终生成页面；缺少同名 .md 时创建空页面，根级其他 .md 作为其子页面。
+    # 只创建 Confluence 页面，不在本地补写同名 .md。
+    "materialize_root_page": False,
+
     # --dir 树导入命中已有页面的处理方式（仅树导入生效）：
     #   "confirm" = 存在需移动层级的页面时先输出预览并暂停，每次执行都等用户确认（默认，安全）
     #   "auto"    = 不确认，直接更新并移动到正确层级
@@ -69,7 +81,7 @@ import_config = {
     "fix_hierarchy": "confirm",
 
     # 自动目录宏：子标题（H2~H6）数量达到 toc_min_headings 时，自动在页面正文顶部
-    # 插入 Confluence 目录宏（toc）。toc_enabled=False 关闭此功能。
+    # 插入 common_config.toc_target_macro 指定的目录宏。toc_enabled=False 关闭此功能。
     "toc_enabled": True,
     "toc_min_headings": 4,
 
@@ -111,12 +123,6 @@ upgrade_config = {
 
 # ==================== toc_upgrade 配置 ====================
 toc_upgrade_config = {
-    # 转换后的目标宏：
-    #   "easy_heading" = 将原生“目录”(toc) 宏转换为 Easy Heading Macro
-    #   "toc"          = 将 Easy Heading Macro 转换为原生“目录”(toc) 宏
-    # 可被 --target easy_heading|toc 覆盖。
-    "target_macro": "easy_heading",
-
     # 默认目标页面 ID。留空时必须通过 --page-id 或 --space 指定范围。
     "default_page": "",
 
@@ -135,7 +141,7 @@ toc_upgrade_config = {
     # 可被 --ai-verify / --no-ai-verify 覆盖。
     "ai_verify": False,
 
-    # 仅在“toc → Easy Heading”新建宏时使用；页面中已有 Easy Heading
+    # 导入或“toc → Easy Heading”新建宏时使用；页面中已有 Easy Heading
     # 宏时保留原参数，不用这里的值覆盖。适配截图中的 Easy Heading Macro 3.6.3；
     # 前三项取自参考页面 68223008，隐藏侧边目录项按本次需求默认开启。
     "macro_parameters": {

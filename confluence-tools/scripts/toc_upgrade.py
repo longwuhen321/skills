@@ -4,13 +4,11 @@
 import argparse
 import datetime
 import hashlib
-import html
 import io
 import os
 import re
 import sys
 import time
-import uuid
 
 from dependency_check import require_dependencies
 require_dependencies()
@@ -20,35 +18,17 @@ import requests
 if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from common import (SKILL_ROOT, check_xhtml_balance, collect_page_tree,
-                    collect_space_pages, fetch_page, load_config,
-                    update_page_storage)
+from common import (EASY_HEADING_MACRO, MacroConversionError, SKILL_ROOT,
+                    TOC_MACRO, TOC_TARGETS, build_toc_macro,
+                    check_xhtml_balance, collect_page_tree,
+                    collect_space_pages, fetch_page, get_toc_target_macro,
+                    load_config, update_page_storage,
+                    validate_toc_macro_parameters)
 from debug_utils import cleanup_debug
 
 
-TOC_MACRO = 'toc'
-EASY_MACRO = 'easy-heading-free'
-TARGETS = ('easy_heading', 'toc')
-BOOLEAN_PARAMETERS = {
-    'titleExpandClickable',
-    'useNavigationHiddenMode',
-    'wrapNavigationText',
-}
-NAVIGATION_EXPAND_OPTIONS = {
-    'expand-all-by-default',
-    'collapse-all-by-default',
-    'collapse-all-but-headings-1',
-    'collapse-all-but-headings-1-2',
-    'collapse-all-but-headings-1-3',
-    'collapse-all-but-headings-1-4',
-    'disable-expand-collapse',
-}
-ALLOWED_PARAMETERS = BOOLEAN_PARAMETERS | {
-    'hiddenEditedFlag',
-    'navigationExpandOption',
-    'selector',
-    'navigationTitle',
-}
+EASY_MACRO = EASY_HEADING_MACRO
+TARGETS = TOC_TARGETS
 MACRO_TOKEN_PATTERN = re.compile(
     r'<ac:structured-macro\b[^>]*?/?>|</ac:structured-macro\s*>',
     re.IGNORECASE | re.DOTALL)
@@ -58,43 +38,7 @@ PROTECTED_XHTML_PATTERN = re.compile(
     r'<!\[CDATA\[.*?\]\]>|<!--.*?-->', re.DOTALL)
 
 
-class MacroConversionError(ValueError):
-    """页面宏结构或配置不满足安全转换条件。"""
-
-
-def validate_macro_parameters(parameters):
-    """严格校验 Easy Heading 创建参数，并返回保序副本。"""
-    if not isinstance(parameters, dict):
-        raise MacroConversionError('macro_parameters 必须是字典')
-    unknown = set(parameters) - ALLOWED_PARAMETERS
-    if unknown:
-        raise MacroConversionError(
-            '不支持的 Easy Heading 参数: ' + ', '.join(sorted(unknown)))
-    for key, value in parameters.items():
-        if not isinstance(value, str):
-            raise MacroConversionError(f'macro_parameters.{key} 必须是字符串')
-        if key in BOOLEAN_PARAMETERS and value not in ('true', 'false'):
-            raise MacroConversionError(
-                f'macro_parameters.{key} 只能是 "true" 或 "false"')
-    if ('hiddenEditedFlag' in parameters
-            and parameters['hiddenEditedFlag'] != 'true'):
-        raise MacroConversionError(
-            'macro_parameters.hiddenEditedFlag 是插件内部标记，只支持 "true"')
-    expand = parameters.get('navigationExpandOption')
-    if expand is not None and expand not in NAVIGATION_EXPAND_OPTIONS:
-        raise MacroConversionError(
-            'macro_parameters.navigationExpandOption 取值无效')
-    selector = parameters.get('selector')
-    if selector is not None:
-        headings = [item.strip() for item in selector.split(',')]
-        if (not headings or any(not re.fullmatch(r'h[1-6]', item)
-                                for item in headings)
-                or len(set(headings)) != len(headings)):
-            raise MacroConversionError(
-                'macro_parameters.selector 只能是不重复的 h1~h6，以英文逗号分隔')
-    if 'navigationTitle' in parameters and not parameters['navigationTitle'].strip():
-        raise MacroConversionError('macro_parameters.navigationTitle 不能为空')
-    return dict(parameters)
+validate_macro_parameters = validate_toc_macro_parameters
 
 
 def _macro_name(opening_tag):
@@ -142,24 +86,6 @@ def find_structured_macros(storage_html):
     return sorted(macros, key=lambda item: item['start'])
 
 
-def _build_easy_heading(parameters):
-    parts = [
-        '<ac:structured-macro ac:name="easy-heading-free" '
-        f'ac:schema-version="1" ac:macro-id="{uuid.uuid4()}">'
-    ]
-    for key, value in parameters.items():
-        parts.append(
-            f'<ac:parameter ac:name="{key}">{html.escape(value)}</ac:parameter>')
-    parts.append('</ac:structured-macro>')
-    return ''.join(parts)
-
-
-def _build_toc():
-    return (
-        '<ac:structured-macro ac:name="toc" ac:schema-version="1" '
-        f'ac:macro-id="{uuid.uuid4()}"/>')
-
-
 def _apply_edits(storage_html, edits):
     result = storage_html
     for start, end, replacement in sorted(edits, reverse=True):
@@ -194,14 +120,15 @@ def normalize_toc_macros(storage_html, target_macro, macro_parameters):
             stats['action'] = 'remove_toc_keep_existing_easy'
         elif toc:
             edits.append((toc[0]['start'], toc[0]['end'],
-                          _build_easy_heading(parameters)))
+                          build_toc_macro('easy_heading', parameters)))
             stats['action'] = 'toc_to_easy_heading'
     else:
         if easy and toc:
             edits.append((easy[0]['start'], easy[0]['end'], ''))
             stats['action'] = 'remove_easy_keep_existing_toc'
         elif easy:
-            edits.append((easy[0]['start'], easy[0]['end'], _build_toc()))
+            edits.append((easy[0]['start'], easy[0]['end'],
+                          build_toc_macro('toc', parameters)))
             stats['action'] = 'easy_heading_to_toc'
 
     if edits:
@@ -231,10 +158,10 @@ class ConfluenceTocUpdater:
         self.default_page = toc_cfg.get('default_page', '') or None
         self.target_macro = (
             target_macro if target_macro is not None
-            else toc_cfg.get('target_macro', 'easy_heading'))
+            else get_toc_target_macro(common, toc_cfg))
         if self.target_macro not in TARGETS:
             raise MacroConversionError(
-                f'toc_upgrade_config.target_macro 必须是 {" 或 ".join(TARGETS)}')
+                f'target_macro 必须是 {" 或 ".join(TARGETS)}')
         self.recursive = bool(toc_cfg.get('recursive', False))
         self.auto_update = (
             auto_update if auto_update is not None

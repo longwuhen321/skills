@@ -31,7 +31,8 @@ from common import (load_config, request_with_retry, collect_space_pages,
                     build_block_template)
 from debug_utils import cleanup_debug
 from md_import import MarkdownImporter
-from md_preflight import PreflightRun, review_markdown, validate_storage
+from md_preflight import (PreflightRun, review_markdown, validate_storage,
+                          REVIEW_CLEAN, REVIEW_FIXABLE, REVIEW_BLOCKED)
 from math_upgrade import ConfluenceMathUpdater
 from toc_upgrade import (ConfluenceTocUpdater, MacroConversionError,
                          normalize_toc_macros, validate_macro_parameters)
@@ -45,13 +46,15 @@ MOCK_CFG = {
     'common_config': {
         'confluence_url': 'http://test:8090',
         'confluence_token': 'test-token',
+        'toc_target_macro': 'easy_heading',
     },
     'import_config': {'space': 'TEST', 'math_align': 'left',
-                      'preflight_review': False},
+                      'preflight_review': False,
+                      'materialize_root_page': False},
     'upgrade_config': {'math_align': 'left', 'auto_update': True,
                        'ai_verify': False, 'recursive': True, 'max_depth': 0},
     'toc_upgrade_config': {
-        'target_macro': 'easy_heading', 'default_page': '', 'space': '',
+        'default_page': '', 'space': '',
         'recursive': False, 'auto_update': True, 'ai_verify': False,
         'macro_parameters': {
             'titleExpandClickable': 'true',
@@ -99,6 +102,7 @@ class TestMdPreflight(unittest.TestCase):
             source.write_text(original, encoding='utf-8')
             result = review_markdown(source, root / 'artifacts')
             self.assertTrue(result['passed'], result['report'])
+            self.assertEqual(result['status'], REVIEW_FIXABLE)
             self.assertEqual(source.read_text(encoding='utf-8'), original)
             self.assertIn('$\\mu_{x}$', result['candidate_text'])
             self.assertEqual(result['report']['formula_counts']['inline'], 1)
@@ -110,6 +114,7 @@ class TestMdPreflight(unittest.TestCase):
             source.write_text('broken $ x + y\n', encoding='utf-8')
             result = review_markdown(source, root / 'artifacts')
             self.assertFalse(result['passed'])
+            self.assertEqual(result['status'], REVIEW_BLOCKED)
             self.assertIn('MATH_INLINE_DELIMITER_UNMATCHED',
                           {i['rule_id'] for i in result['report']['issues']})
 
@@ -209,7 +214,20 @@ class TestMdPreflight(unittest.TestCase):
             result = run.review(source)
             destination = run.finish(True)
             self.assertTrue((destination / 'manifest.json').is_file())
-            self.assertTrue((destination / 'pages' / '0001' / 'candidate.md').is_file())
+            page_dir = destination / 'pages' / '0001'
+            self.assertTrue((page_dir / 'review.json').is_file())
+            self.assertFalse((page_dir / 'candidate.md').exists())
+            self.assertEqual(result['status'], REVIEW_CLEAN)
+
+    def test_plain_markdown_is_clean_without_candidate_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'page.md'
+            source.write_text('# Title\n\nplain\n', encoding='utf-8')
+            result = review_markdown(source, root / 'artifacts')
+            self.assertEqual(result['status'], REVIEW_CLEAN)
+            self.assertEqual(result['candidate_bytes'], source.read_bytes())
+            self.assertFalse((root / 'artifacts' / 'candidate.md').exists())
 
 
 class TestCommon(unittest.TestCase):
@@ -647,6 +665,158 @@ class TestMdImport(unittest.TestCase):
         cfg['import_config'] = ic
         return cfg
 
+    def _preflight_cfg(self, tree_import=False, **kw):
+        cfg = dict(MOCK_CFG)
+        ic = dict(MOCK_CFG['import_config'], preflight_review=True,
+                  tree_import=tree_import, fix_hierarchy='off')
+        ic.update(kw)
+        cfg['import_config'] = ic
+        return cfg
+
+    def test_clean_single_upload_uses_original_without_repair_copy(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'Page.md'
+            source.write_text('# Page\n\nplain\n', encoding='utf-8')
+            with patch('md_import.load_config',
+                       return_value=self._preflight_cfg()):
+                importer = MarkdownImporter(space_key='TEST')
+            with patch.object(importer, '_find_page_by_title',
+                              return_value=('NOT_FOUND', None, None)), \
+                 patch.object(importer, '_create_page',
+                              return_value=('9', 1)) as create, \
+                 patch.object(importer, '_convert_md_links',
+                              side_effect=lambda html, path, page_id: html):
+                self.assertEqual(importer.import_markdown(source), '9')
+            self.assertFalse((Path(td) / 'Page__修复.md').exists())
+            self.assertEqual(create.call_args.args[0], 'Page')
+
+    def test_fixable_single_upload_uses_repair_copy_and_keeps_title(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'Page.md'
+            original = '| x |\n| --- |\n| $ x $ |\n'
+            source.write_text(original, encoding='utf-8')
+            with patch('md_import.load_config',
+                       return_value=self._preflight_cfg()):
+                importer = MarkdownImporter(space_key='TEST')
+            with patch.object(importer, '_find_page_by_title',
+                              return_value=('NOT_FOUND', None, None)), \
+                 patch.object(importer, '_create_page',
+                              return_value=('9', 1)) as create, \
+                 patch.object(importer, '_convert_md_links',
+                              side_effect=lambda html, path, page_id: html):
+                self.assertEqual(importer.import_markdown(source), '9')
+            repair = Path(td) / 'Page__修复.md'
+            self.assertTrue(repair.is_file())
+            self.assertEqual(source.read_text(encoding='utf-8'), original)
+            self.assertIn('$x$', repair.read_text(encoding='utf-8'))
+            self.assertEqual(create.call_args.args[0], 'Page')
+            self.assertTrue(importer._repair_state_path(repair).is_file())
+
+    def test_tree_problem_copies_entire_root_before_any_remote_query(self):
+        with tempfile.TemporaryDirectory() as td:
+            parent = Path(td)
+            source = parent / 'Course'
+            source.mkdir()
+            (source / 'Course.md').write_text(
+                'broken $ x + y\n', encoding='utf-8')
+            assets = source / 'Course.assets'
+            assets.mkdir()
+            (assets / 'image.bin').write_bytes(b'attachment')
+            child = source / 'Child'
+            child.mkdir()
+            (child / 'Child.md').write_text('plain\n', encoding='utf-8')
+            with patch('md_import.load_config',
+                       return_value=self._preflight_cfg(tree_import=True)):
+                importer = MarkdownImporter(space_key='TEST')
+            with patch.object(importer, '_ensure_page_index') as index:
+                self.assertFalse(importer.import_tree(source, yes=True))
+            index.assert_not_called()
+            repair = parent / 'Course__修复'
+            self.assertEqual((repair / 'Course.md').read_text(encoding='utf-8'),
+                             'broken $ x + y\n')
+            self.assertEqual((repair / 'Child' / 'Child.md').read_text(
+                encoding='utf-8'), 'plain\n')
+            self.assertEqual((repair / 'Course.assets' / 'image.bin').read_bytes(),
+                             b'attachment')
+
+    def test_repair_resume_reviews_problem_files_before_full_tree(self):
+        with tempfile.TemporaryDirectory() as td:
+            parent = Path(td)
+            source = parent / 'Course'
+            source.mkdir()
+            (source / 'Course.md').write_text(
+                'broken $ x + y\n', encoding='utf-8')
+            cfg = self._preflight_cfg(tree_import=True)
+            with patch('md_import.load_config', return_value=cfg):
+                first = MarkdownImporter(space_key='TEST')
+            self.assertFalse(first.import_tree(source, yes=True))
+            repair = parent / 'Course__修复'
+            (repair / 'Course.md').write_text('# fixed\n', encoding='utf-8')
+
+            with patch('md_import.load_config', return_value=cfg):
+                second = MarkdownImporter(space_key='TEST')
+            phases = []
+            original_audit = second._audit_markdown_paths
+
+            def record(paths, phase):
+                phases.append(phase)
+                return original_audit(paths, phase)
+
+            def index():
+                second._page_records = []
+                return []
+
+            with patch.object(second, '_audit_markdown_paths',
+                              side_effect=record), \
+                 patch.object(second, '_ensure_page_index', side_effect=index), \
+                 patch.object(second, '_build_plan',
+                              wraps=second._build_plan) as build:
+                self.assertTrue(second.import_tree(repair, plan_only=True))
+            self.assertEqual(phases[:2], ['problem-files', 'full-repair'])
+            self.assertEqual(build.call_args.args[0]['name'], 'Course')
+
+    def test_existing_repair_copy_asks_for_alternative_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'Course'
+            source.mkdir()
+            (Path(td) / 'Course__修复').mkdir()
+            with patch('builtins.input',
+                       side_effect=['n', 'Course__修复_另一个']):
+                chosen = self.importer._choose_repair_path(source)
+            self.assertEqual(chosen, Path(td) / 'Course__修复_另一个')
+
+    def test_repair_state_problem_path_cannot_escape_copy(self):
+        with tempfile.TemporaryDirectory() as td:
+            repair = Path(td) / 'Course__修复'
+            repair.mkdir()
+            outside = Path(td) / 'outside.md'
+            outside.write_text('plain\n', encoding='utf-8')
+            results, clean = self.importer._review_problem_files(
+                repair, ['../outside.md'])
+            self.assertEqual(results, {})
+            self.assertFalse(clean)
+
+    def test_tree_change_after_final_review_blocks_remote_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'Course'
+            source.mkdir()
+            md = source / 'Course.md'
+            md.write_text('# clean\n', encoding='utf-8')
+            with patch('md_import.load_config',
+                       return_value=self._preflight_cfg(tree_import=True)):
+                importer = MarkdownImporter(space_key='TEST')
+
+            def index_and_mutate():
+                importer._page_records = []
+                md.write_text('# changed after review\n', encoding='utf-8')
+                return []
+
+            with patch.object(importer, '_ensure_page_index',
+                              side_effect=index_and_mutate), \
+                 patch.object(importer, '_create_page') as create:
+                self.assertFalse(importer.import_tree(source, yes=True))
+            create.assert_not_called()
+
     def test_tree_import_disabled(self):
         # tree_import 未开启：--dir 直接报错
         importer = MarkdownImporter(space_key='TEST')  # MOCK_CFG 无 tree_import → False
@@ -680,6 +850,98 @@ class TestMdImport(unittest.TestCase):
             tree = importer._scan_tree(td)
             self.assertIsNone(tree['md_path'])           # 多个 md 无法确定内容
             self.assertEqual(tree['children'], [])
+
+    def test_materialized_root_without_same_name_is_synthetic_and_keeps_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / 'ROS2'
+            root.mkdir()
+            intro = root / '课程简介.md'
+            intro.write_text('# intro', encoding='utf-8')
+            chapter = root / '第1章'
+            chapter.mkdir()
+            (chapter / '第1章.md').write_text('# chapter', encoding='utf-8')
+            with patch('md_import.load_config', return_value=self._tree_cfg(
+                    materialize_root_page=True)):
+                importer = MarkdownImporter(space_key='TEST')
+            tree = importer._scan_tree(root)
+            self.assertEqual(tree['name'], 'ROS2')
+            self.assertTrue(tree['synthetic'])
+            self.assertIsNone(tree['md_path'])
+            self.assertEqual([child['name'] for child in tree['children']],
+                             ['课程简介', '第1章'])
+            self.assertEqual(tree['children'][0]['md_path'], intro)
+            self.assertFalse((root / 'ROS2.md').exists())
+
+    def test_materialized_root_uses_same_name_and_keeps_other_md_as_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / 'Course'
+            root.mkdir()
+            same = root / 'Course.md'
+            same.write_text('# root', encoding='utf-8')
+            extra = root / 'Intro.md'
+            extra.write_text('# intro', encoding='utf-8')
+            with patch('md_import.load_config', return_value=self._tree_cfg(
+                    materialize_root_page=True)):
+                importer = MarkdownImporter(space_key='TEST')
+            tree = importer._scan_tree(root)
+            self.assertFalse(tree['synthetic'])
+            self.assertEqual(tree['md_path'], same)
+            self.assertEqual(len(tree['children']), 1)
+            self.assertEqual(tree['children'][0]['name'], 'Intro')
+            self.assertEqual(tree['children'][0]['md_path'], extra)
+
+    def test_materialized_synthetic_root_creates_empty_page_before_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / 'Course'
+            root.mkdir()
+            (root / 'Intro.md').write_text('# intro', encoding='utf-8')
+            with patch('md_import.load_config', return_value=self._tree_cfg(
+                    materialize_root_page=True)):
+                importer = MarkdownImporter(space_key='TEST')
+            importer._page_records = []
+            with patch.object(importer, '_create_page',
+                              side_effect=[('100', 1), ('101', 1)]) as create, \
+                 patch.object(importer, '_convert_md_links',
+                              side_effect=lambda html, path, page_id: html):
+                self.assertTrue(importer.import_tree(root, yes=True))
+            self.assertEqual(create.call_args_list[0].args,
+                             ('Course', '<p></p>', None))
+            self.assertEqual(create.call_args_list[1].args[0], 'Intro')
+            self.assertEqual(create.call_args_list[1].args[2], '100')
+
+    def test_existing_synthetic_root_is_reused_without_erasing_content(self):
+        importer = MarkdownImporter(space_key='TEST', fix_hierarchy='off')
+        importer._page_records = [
+            {'id': '10', 'title': 'Course', 'version': 3, 'parent_id': '77'}]
+        node = {'name': 'Course', 'md_path': None, 'synthetic': True,
+                'children': []}
+        plan = importer._build_plan(node, target_parent_id='99')
+        self.assertEqual(plan['status'], 'keep')
+        with patch.object(importer, '_update_page') as update, \
+             patch.object(importer, '_create_page') as create:
+            result = importer._execute_plan(plan)
+        self.assertEqual(result['status'], 'keep')
+        update.assert_not_called()
+        create.assert_not_called()
+
+    def test_moving_synthetic_root_preserves_existing_storage(self):
+        importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
+        importer._page_records = [
+            {'id': '10', 'title': 'Course', 'version': 3, 'parent_id': '77'}]
+        node = {'name': 'Course', 'md_path': None, 'synthetic': True,
+                'children': []}
+        plan = importer._build_plan(node, target_parent_id='99')
+        self.assertEqual(plan['status'], 'move')
+        current = {
+            'page_id': '10', 'title': 'Course', 'version': 3,
+            'space_key': 'TEST', 'storage': '<p>user content</p>',
+        }
+        with patch('md_import.fetch_page', return_value=current), \
+             patch.object(importer, '_update_page', return_value=('10', 4)) as update:
+            result = importer._execute_plan(plan)
+        self.assertEqual(result['status'], 'move')
+        update.assert_called_once_with(
+            '10', 'Course', '<p>user content</p>', 3, ancestors='99')
 
     def test_build_plan_statuses(self):
         importer = MarkdownImporter(space_key='TEST', fix_hierarchy='confirm')
@@ -783,8 +1045,29 @@ class TestMdImport(unittest.TestCase):
             importer = MarkdownImporter(space_key='TEST')
         md = '# Title\n\n## A\n\n## B\n\n## C\n\n## D\n\n## E\n'
         html = importer._convert_md_to_storage(md)
-        self.assertIn('<ac:structured-macro ac:name="toc"', html)
+        self.assertIn('<ac:structured-macro ac:name="easy-heading-free"', html)
         self.assertTrue(html.startswith('<ac:structured-macro'))
+
+    def test_native_toc_target_applies_to_marker_and_auto_insert(self):
+        cfg = dict(MOCK_CFG)
+        cfg['common_config'] = dict(
+            MOCK_CFG['common_config'], toc_target_macro='toc')
+        cfg['import_config'] = dict(
+            MOCK_CFG['import_config'], toc_enabled=True, toc_min_headings=4)
+        with patch('md_import.load_config', return_value=cfg):
+            importer = MarkdownImporter(space_key='TEST')
+        marker = importer._convert_md_to_storage('[toc]\n\n## A\n')
+        automatic = importer._convert_md_to_storage(
+            '## A\n\n## B\n\n## C\n\n## D\n')
+        self.assertEqual(marker.count('ac:name="toc"'), 1)
+        self.assertNotIn('easy-heading-free', marker)
+        self.assertEqual(automatic.count('ac:name="toc"'), 1)
+
+    def test_existing_easy_heading_prevents_duplicate_auto_toc(self):
+        html = ('<ac:structured-macro ac:name="easy-heading-free" '
+                'ac:schema-version="1"></ac:structured-macro>'
+                '<h2>A</h2><h2>B</h2><h2>C</h2><h2>D</h2>')
+        self.assertEqual(self.importer._maybe_add_toc(html), html)
 
     def test_toc_heading_math_stays_literal_while_body_uses_macro(self):
         cfg = dict(MOCK_CFG)
@@ -800,7 +1083,7 @@ class TestMdImport(unittest.TestCase):
         self.assertEqual(heading, '$0&lt;x&lt;\\pi$')
         self.assertNotIn('mathinline', heading)
         self.assertIn('ac:name="mathinline"', body)
-        self.assertEqual(html.count('ac:name="toc"'), 1)
+        self.assertEqual(html.count('ac:name="easy-heading-free"'), 1)
 
     def test_heading_mathinline_mode_converts_heading_and_body(self):
         cfg = dict(MOCK_CFG)
@@ -844,6 +1127,14 @@ class TestMdImport(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'heading_math_mode'):
                 MarkdownImporter(space_key='TEST')
 
+    def test_invalid_common_toc_target_is_rejected_by_importer(self):
+        cfg = dict(MOCK_CFG)
+        cfg['common_config'] = dict(MOCK_CFG['common_config'],
+                                    toc_target_macro='unknown')
+        with patch('md_import.load_config', return_value=cfg):
+            with self.assertRaisesRegex(ValueError, 'toc_target_macro'):
+                MarkdownImporter(space_key='TEST')
+
     def test_context_manager_closes_session(self):
         with patch.object(self.importer.session, 'close') as close:
             with self.importer as entered:
@@ -867,6 +1158,7 @@ class TestMdImport(unittest.TestCase):
         md = '# Title\n\n## A\n\n## B\n\n## C\n'
         html = importer._convert_md_to_storage(md)
         self.assertNotIn('ac:name="toc"', html)
+        self.assertNotIn('ac:name="easy-heading-free"', html)
 
     def test_toc_disabled(self):
         cfg = dict(MOCK_CFG)
@@ -877,6 +1169,7 @@ class TestMdImport(unittest.TestCase):
         md = '# Title\n\n## A\n\n## B\n\n## C\n\n## D\n\n## E\n'
         html = importer._convert_md_to_storage(md)
         self.assertNotIn('ac:name="toc"', html)
+        self.assertNotIn('ac:name="easy-heading-free"', html)
 
     def test_self_closing_macro_does_not_swallow_images(self):
         # 自闭合宏（toc，无 </ac:structured-macro>）后紧跟图片：保护段不应把图片吞掉。

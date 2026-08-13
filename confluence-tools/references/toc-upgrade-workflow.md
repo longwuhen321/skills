@@ -20,7 +20,8 @@
 - `--page-id --no-recursive`：只处理指定页面。
 - `--page-id --recursive`：处理根页面及全部后代，不提供最大层级限制。
 - `--space`：处理空间内所有页面，每个 page ID 只处理一次。
-- `--target easy_heading|toc` 覆盖 `toc_upgrade_config.target_macro`。
+- 默认目标来自导入与升级共用的 `common_config.toc_target_macro`；
+  `--target easy_heading|toc` 仅覆盖本次目录升级。
 - `--no-auto-update`、`--ai-verify`、`--confirm` 和 `--stop-on-error` 的提交保护
   与数学升级一致；确认时必须复查源版本和源正文 SHA256。
 
@@ -38,7 +39,8 @@
 
 - 插件版本目标为 Easy Heading Macro 3.6.3，固定宏名 `easy-heading-free`、schema `1`。
 - 新建 Easy 宏生成新的 UUID，不复制参考页的 `macro-id`。
-- 创建参数来自严格校验的 `toc_upgrade_config.macro_parameters`；未知键、非法枚举、
+- 创建参数来自严格校验的 `toc_upgrade_config.macro_parameters`，导入新建 Easy Heading
+  时也使用同一组参数；未知键、非法枚举、
   非字符串或非法布尔值在写入前失败。
 - 页面已有 Easy 宏时保持其原始文本和参数，不用配置覆盖。
 - 转换只替换或删除目标宏的原始 storage 跨度，不重序列化整个页面；
@@ -53,4 +55,3 @@
 - 批量页面存在歧义时默认继续其他页面，最终汇总失败并返回非零；
   `--stop-on-error` 可立即停止。
 - 真实验证仅创建唯一命名测试页，记录精确 ID；完成后只删除这些 ID。
-

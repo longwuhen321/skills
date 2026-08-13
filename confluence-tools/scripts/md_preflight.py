@@ -1,4 +1,4 @@
-"""Markdown 上传前预审与审核副本生成。"""
+"""Markdown 上传前只读预审与结构化审核报告。"""
 
 import datetime
 import hashlib
@@ -26,6 +26,10 @@ ASYMMETRIC_INLINE_MATH_RE = re.compile(
     r'(?P<right>(?P<right_content>(?![ \t])[^$\n]+?)[ \t]+)'
     r')\$(?!\$)')
 IMAGE_RE = re.compile(r'!\[[^\]]*\]\(([^)\n]+)\)')
+
+REVIEW_CLEAN = 'CLEAN'
+REVIEW_FIXABLE = 'FIXABLE'
+REVIEW_BLOCKED = 'BLOCKED'
 
 
 def _sha256_bytes(data):
@@ -262,6 +266,7 @@ def _check_residual_dollars(source, residue, issues):
 
 def _check_attachments(source_path, candidate, issues):
     base = Path(source_path).resolve().parent
+    attachments = []
     for match in IMAGE_RE.finditer(candidate):
         raw = match.group(1).strip()
         if raw.startswith('<') and raw.endswith('>'):
@@ -274,6 +279,9 @@ def _check_attachments(source_path, candidate, issues):
             issues.append(_issue(
                 'ATTACHMENT_NOT_FOUND', 'error', candidate, match.start(1),
                 f'本地附件不存在: {raw}'))
+        else:
+            attachments.append(str(path))
+    return attachments
 
 
 def review_markdown(source_path, artifact_dir):
@@ -298,32 +306,39 @@ def review_markdown(source_path, artifact_dir):
     candidate, residue = _candidate_and_residue(
         source, counts, fixes, issues)
     _check_residual_dollars(source, residue, issues)
-    _check_attachments(source_path, candidate, issues)
+    attachments = _check_attachments(source_path, candidate, issues)
 
     artifact_dir = Path(artifact_dir)
-    candidate_path = artifact_dir / 'candidate.md'
     review_path = artifact_dir / 'review.json'
     candidate_bytes = candidate.encode('utf-8')
-    _atomic_write_bytes(candidate_path, candidate_bytes)
+    has_errors = any(item['severity'] == 'error' for item in issues)
+    if has_errors:
+        status = REVIEW_BLOCKED
+    elif fixes or candidate_bytes != raw:
+        status = REVIEW_FIXABLE
+    else:
+        status = REVIEW_CLEAN
     report = {
-        'schema_version': 1,
+        'schema_version': 2,
         'source_path': str(source_path),
         'source_sha256': _sha256_bytes(raw),
-        'candidate_path': str(candidate_path.resolve()),
         'candidate_sha256': _sha256_bytes(candidate_bytes),
-        'passed': not any(item['severity'] == 'error' for item in issues),
+        'status': status,
+        'passed': not has_errors,
         'formula_counts': counts,
         'fixes': fixes,
         'issues': issues,
+        'attachments': attachments,
         'storage_validation': None,
     }
     _atomic_write_json(review_path, report)
     return {
         'passed': report['passed'],
+        'status': status,
         'source_path': source_path,
-        'candidate_path': candidate_path.resolve(),
         'review_path': review_path.resolve(),
         'candidate_text': candidate,
+        'candidate_bytes': candidate_bytes,
         'report': report,
     }
 
@@ -410,8 +425,35 @@ def validate_storage(result, storage_html, heading_math_mode):
     }
     result['report']['passed'] = result['report']['passed'] and not errors
     result['passed'] = result['report']['passed']
+    if errors:
+        result['status'] = REVIEW_BLOCKED
+        result['report']['status'] = REVIEW_BLOCKED
     _atomic_write_json(result['review_path'], result['report'])
     return not errors, errors
+
+
+def apply_review_fixes(result, target_path):
+    """把确定性候选内容写入明确的修复副本，不修改预审源文件。"""
+    if result['status'] != REVIEW_FIXABLE:
+        return False
+    _atomic_write_bytes(Path(target_path), result['candidate_bytes'])
+    return True
+
+
+def block_review(result, rule_id, message):
+    """把正文转换阶段的异常写回结构化报告并阻断上传。"""
+    result['report']['issues'].append({
+        'rule_id': rule_id,
+        'severity': 'error',
+        'line': 1,
+        'column': 1,
+        'message': message,
+    })
+    result['report']['status'] = REVIEW_BLOCKED
+    result['report']['passed'] = False
+    result['status'] = REVIEW_BLOCKED
+    result['passed'] = False
+    _atomic_write_json(result['review_path'], result['report'])
 
 
 class PreflightRun:
@@ -436,13 +478,14 @@ class PreflightRun:
         }
         _atomic_write_json(self.run_dir / 'manifest.json', payload)
 
-    def review(self, source_path):
+    def review(self, source_path, phase='full'):
         page_dir = self.run_dir / 'pages' / f'{len(self.entries) + 1:04d}'
         result = review_markdown(source_path, page_dir)
         self.entries.append({
             'source_path': str(result['source_path']),
-            'candidate_path': str(result['candidate_path']),
             'review_path': str(result['review_path']),
+            'phase': phase,
+            'status': result['status'],
             'passed': result['passed'],
         })
         self._write_manifest('running')
@@ -452,6 +495,7 @@ class PreflightRun:
         for entry in self.entries:
             if entry['review_path'] == str(result['review_path']):
                 entry['passed'] = result['passed']
+                entry['status'] = result['status']
                 break
         self._write_manifest('running')
 

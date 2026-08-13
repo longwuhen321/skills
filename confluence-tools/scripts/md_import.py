@@ -17,7 +17,9 @@ import html
 import json
 import argparse
 import datetime
+import hashlib
 import secrets
+import shutil
 
 from dependency_check import require_dependencies
 require_dependencies()
@@ -32,18 +34,24 @@ if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
 from urllib.parse import unquote
 import markdown2
 
-from common import (SKILL_ROOT, load_config, request_with_retry,
-                    collect_space_page_records, build_block_template,
-                    normalize_heading_inline_math, get_heading_math_mode,
-                    compile_inline_math_pattern, inline_math_content)
+from common import (SKILL_ROOT, build_block_template, build_toc_macro,
+                    collect_space_page_records, compile_inline_math_pattern,
+                    contains_toc_macro, fetch_page, get_heading_math_mode,
+                    get_toc_target_macro, inline_math_content, load_config,
+                    normalize_heading_inline_math, request_with_retry,
+                    validate_toc_macro_parameters)
 from debug_utils import cleanup_debug
-from md_preflight import PreflightRun, validate_storage
+from md_preflight import (PreflightRun, validate_storage, apply_review_fixes,
+                          block_review, REVIEW_CLEAN, REVIEW_FIXABLE,
+                          REVIEW_BLOCKED)
 
 
 LOOKUP_FOUND = 'FOUND'
 LOOKUP_NOT_FOUND = 'NOT_FOUND'
 LOOKUP_ERROR = 'ERROR'
 _ANY_PARENT = object()
+REPAIR_SUFFIX = '__修复'
+EMPTY_PAGE_STORAGE = '<p></p>'
 
 
 class MarkdownImporter:
@@ -54,6 +62,7 @@ class MarkdownImporter:
         cfg = load_config()
         common = cfg['common_config']
         import_cfg = cfg['import_config']
+        toc_cfg = cfg['toc_upgrade_config']
         debug_cfg = cfg['debug_config']
 
         self.base_url = common['confluence_url'].rstrip('/')
@@ -65,11 +74,16 @@ class MarkdownImporter:
         self.default_page_name = import_cfg.get('default_page_name', '') or None
         # 树导入（--dir）配置：tree_import 功能开关；fix_hierarchy 命中已有页面的层级处理
         self.tree_import = bool(import_cfg.get('tree_import', False))
+        self.materialize_root_page = bool(
+            import_cfg.get('materialize_root_page', False))
         self.fix_hierarchy = fix_hierarchy if fix_hierarchy is not None else import_cfg.get('fix_hierarchy', 'confirm')
         self.force = bool(force)
         # 自动目录宏：子标题（H2~H6）数量达到 toc_min_headings 时，在正文最前插入 toc 宏
         self.toc_enabled = bool(import_cfg.get('toc_enabled', True))
         self.toc_min_headings = int(import_cfg.get('toc_min_headings', 4))
+        self.toc_target_macro = get_toc_target_macro(common, toc_cfg)
+        self.toc_macro_parameters = validate_toc_macro_parameters(
+            toc_cfg.get('macro_parameters', {}))
         configured_preflight = bool(import_cfg.get('preflight_review', True))
         self.preflight_review = (configured_preflight if preflight_review is None
                                  else bool(preflight_review))
@@ -96,6 +110,8 @@ class MarkdownImporter:
         self.data_images_skipped = 0
         self._preflight_run = None
         self._prepared_storage = {}
+        self._validated_snapshot = None
+        self._validated_scope = None
         # 调试目录统一放在 skill 目录下
         self.debug_dir = os.path.join(SKILL_ROOT, 'logs', 'import')
         os.makedirs(self.debug_dir, exist_ok=True)
@@ -127,6 +143,342 @@ class MarkdownImporter:
         self._preflight_run = None
         return destination
 
+    @staticmethod
+    def _file_sha256(path):
+        digest = hashlib.sha256()
+        with open(path, 'rb') as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def _snapshot_target(self, target, review_results=None):
+        target = Path(target).resolve()
+        if target.is_dir():
+            files = sorted(path for path in target.rglob('*') if path.is_file())
+        else:
+            files = [target]
+            for result in (review_results or {}).values():
+                files.extend(Path(path) for path in result['report'].get(
+                    'attachments', []))
+            files = sorted(set(path.resolve() for path in files))
+        return {str(path.resolve()): self._file_sha256(path) for path in files}
+
+    def _set_validated_snapshot(self, target, review_results):
+        self._validated_scope = str(Path(target).resolve())
+        self._validated_snapshot = self._snapshot_target(target, review_results)
+
+    def _validated_target_unchanged(self):
+        if not self._validated_scope or self._validated_snapshot is None:
+            return not self.preflight_review
+        try:
+            scope = Path(self._validated_scope)
+            if scope.is_dir():
+                current = self._snapshot_target(scope)
+            else:
+                current = {
+                    path: self._file_sha256(path)
+                    for path in self._validated_snapshot
+                }
+        except OSError as exc:
+            print(f"❌ 上传前无法复核已审核对象: {exc}")
+            return False
+        if current != self._validated_snapshot:
+            print("❌ 上传对象在最终审核后发生变化，已停止远端写入；请重新审核。")
+            return False
+        return True
+
+    @staticmethod
+    def _markdown_paths(target):
+        target = Path(target).resolve()
+        if target.is_file():
+            return [target]
+        return sorted(path for path in target.rglob('*')
+                      if path.is_file() and path.suffix.lower() == '.md')
+
+    def _audit_markdown_paths(self, paths, phase):
+        """审核一组 Markdown；只有 CLEAN 才能作为最终上传输入。"""
+        paths = [Path(path).resolve() for path in paths]
+        run = PreflightRun(Path(SKILL_ROOT) / 'logs')
+        results = {}
+        for path in paths:
+            result = run.review(path, phase=phase)
+            if result['passed']:
+                try:
+                    html_content = self._convert_md_to_storage(
+                        result['candidate_text'])
+                    validate_storage(
+                        result, html_content, self.heading_math_mode)
+                except Exception as exc:
+                    block_review(
+                        result, 'STORAGE_CONVERSION_ERROR',
+                        f'正文转换失败: {exc}')
+                run.refresh(result)
+                if result['status'] == REVIEW_CLEAN:
+                    self._prepared_storage[str(path)] = html_content
+            results[str(path)] = result
+            if result['status'] == REVIEW_CLEAN:
+                print(f"✓ CLEAN: {path}")
+            elif result['status'] == REVIEW_FIXABLE:
+                print(f"⚠️ FIXABLE: {path}")
+                for fix in result['report']['fixes']:
+                    print(f"  - {fix['rule_id']}: {fix['message']}")
+            else:
+                print(f"❌ BLOCKED: {path}")
+                for issue in result['report']['issues']:
+                    if issue['severity'] == 'error':
+                        print(f"  - {issue['rule_id']}@{issue['line']}:"
+                              f"{issue['column']} {issue['message']}")
+        clean = bool(results) and all(
+            result['status'] == REVIEW_CLEAN for result in results.values())
+        destination = run.finish(clean)
+        label = '已归档' if clean else '已保留供排查'
+        print(f"审核报告{label}: {destination}")
+        return results, clean
+
+    @staticmethod
+    def _repair_state_path(repair_path):
+        repair_path = Path(repair_path).resolve()
+        return repair_path.with_name(
+            repair_path.name + '.confluence-review.json')
+
+    def _read_repair_state(self, target):
+        state_path = self._repair_state_path(target)
+        if not state_path.is_file():
+            return None
+        try:
+            state = json.loads(state_path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"❌ 无法读取修复副本状态 {state_path}: {exc}")
+            return False
+        if (state.get('format_version') != 1
+                or str(Path(state.get('repair_path', '')).resolve())
+                != str(Path(target).resolve())):
+            print(f"❌ 修复副本状态与当前路径不一致: {state_path}")
+            return False
+        return state
+
+    def _write_repair_state(self, repair_path, state):
+        state_path = self._repair_state_path(repair_path)
+        temporary = state_path.with_name(
+            state_path.name + '.tmp-' + secrets.token_hex(4))
+        temporary.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + '\n',
+            encoding='utf-8', newline='\n')
+        os.replace(temporary, state_path)
+        return state_path
+
+    @staticmethod
+    def _logical_name_from_path(path):
+        path = Path(path)
+        name = path.stem if path.is_file() else path.name
+        if name.endswith(REPAIR_SUFFIX):
+            return name[:-len(REPAIR_SUFFIX)]
+        return name
+
+    @staticmethod
+    def _relative_review_path(path, root):
+        path = Path(path).resolve()
+        root = Path(root).resolve()
+        return path.name if root.is_file() else path.relative_to(root).as_posix()
+
+    @staticmethod
+    def _resolve_review_path(root, relative):
+        root = Path(root).resolve()
+        if root.is_file():
+            return root
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f'问题文件路径越出修复副本: {relative}') from exc
+        return candidate
+
+    def _choose_repair_path(self, source):
+        source = Path(source).resolve()
+        if source.is_dir():
+            desired = source.with_name(source.name + REPAIR_SUFFIX)
+        else:
+            desired = source.with_name(
+                source.stem + REPAIR_SUFFIX + source.suffix)
+        while desired.exists():
+            answer = input(
+                f"⚠️ 修复副本已存在: {desired}\n"
+                "输入 o 覆盖、n 另起名称、c 取消: ").strip().lower()
+            if answer == 'o':
+                if desired.is_dir():
+                    shutil.rmtree(desired)
+                else:
+                    desired.unlink()
+                state_path = self._repair_state_path(desired)
+                if state_path.exists():
+                    state_path.unlink()
+                break
+            if answer == 'n':
+                name = input("请输入同级副本的新名称: ").strip()
+                if (not name or Path(name).name != name
+                        or name in ('.', '..')):
+                    print("❌ 名称必须是不含路径分隔符的单个文件或文件夹名。")
+                    continue
+                desired = source.with_name(name)
+                continue
+            if answer == 'c':
+                return None
+            print("❌ 请输入 o、n 或 c。")
+        return desired
+
+    def _copy_repair_target(self, source):
+        source = Path(source).resolve()
+        repair = self._choose_repair_path(source)
+        if repair is None:
+            print("已取消创建修复副本。")
+            return None
+        if source.is_dir():
+            shutil.copytree(source, repair)
+        else:
+            shutil.copy2(source, repair)
+        print(f"✓ 已创建完整修复副本: {repair}")
+        return repair.resolve()
+
+    def _problem_relatives(self, results, root):
+        return [self._relative_review_path(path, root)
+                for path, result in results.items()
+                if result['status'] != REVIEW_CLEAN]
+
+    def _review_problem_files(self, repair_root, relatives):
+        """先复审全部问题文件；确定性修复只写入修复副本。"""
+        try:
+            paths = [self._resolve_review_path(repair_root, relative)
+                     for relative in relatives]
+        except ValueError as exc:
+            print(f"❌ {exc}")
+            return {}, False
+        if any(not path.is_file() for path in paths):
+            missing = [str(path) for path in paths if not path.is_file()]
+            print("❌ 修复副本中的问题文件不存在: " + ', '.join(missing))
+            return {}, False
+        for _attempt in range(3):
+            results, clean = self._audit_markdown_paths(
+                paths, phase='problem-files')
+            if clean:
+                return results, True
+            applied = False
+            for path, result in results.items():
+                if result['status'] == REVIEW_FIXABLE:
+                    applied = apply_review_fixes(result, path) or applied
+                    if applied:
+                        print(f"✓ 已在修复副本应用确定性修复: {path}")
+            if not applied:
+                return results, False
+        return results, False
+
+    def _validate_repair_target(self, repair_root, state):
+        problem_files = list(state.get('problem_files', []))
+        if problem_files:
+            results, clean = self._review_problem_files(
+                repair_root, problem_files)
+            if not clean:
+                state['problem_files'] = self._problem_relatives(
+                    results, repair_root)
+                state['status'] = 'needs-repair'
+                self._write_repair_state(repair_root, state)
+                print("❌ 问题文件尚未全部通过；请只修改上述文件后重新运行。")
+                return None
+
+        for _attempt in range(3):
+            all_paths = self._markdown_paths(repair_root)
+            results, clean = self._audit_markdown_paths(
+                all_paths, phase='full-repair')
+            if clean:
+                state['problem_files'] = []
+                state['status'] = 'validated'
+                self._write_repair_state(repair_root, state)
+                self._set_validated_snapshot(repair_root, results)
+                return Path(repair_root).resolve(), results
+            problem_files = self._problem_relatives(results, repair_root)
+            state['problem_files'] = problem_files
+            state['status'] = 'needs-repair'
+            self._write_repair_state(repair_root, state)
+            _problem_results, problem_clean = self._review_problem_files(
+                repair_root, problem_files)
+            if not problem_clean:
+                print("❌ 最终全量审核发现问题；已回到问题文件修复阶段。")
+                return None
+        print("❌ 修复副本多轮审核仍未稳定，已停止。")
+        return None
+
+    def _prepare_upload_target(self, source, allow_copy=True):
+        """先审原件；有问题时复制完整对象并执行两级复审。"""
+        source = Path(source).resolve()
+        if not self.preflight_review:
+            return source, self._logical_name_from_path(source)
+
+        state = self._read_repair_state(source)
+        if state is False:
+            return None
+        if state:
+            validated = self._validate_repair_target(source, state)
+            if validated is None:
+                return None
+            return validated[0], state['logical_name']
+
+        before = self._snapshot_target(source)
+        paths = self._markdown_paths(source)
+        if not paths:
+            print(f"❌ 指定对象中没有 Markdown: {source}")
+            return None
+        results, clean = self._audit_markdown_paths(paths, phase='original')
+        after = self._snapshot_target(source)
+        if before != after:
+            print("❌ 原件在只读审核期间发生变化，已停止；请重新审核。")
+            return None
+        logical_name = self._logical_name_from_path(source)
+        if clean:
+            self._set_validated_snapshot(source, results)
+            return source, logical_name
+
+        if REPAIR_SUFFIX in (source.stem if source.is_file() else source.name):
+            state = {
+                'format_version': 1,
+                'source_path': str(source),
+                'repair_path': str(source),
+                'logical_name': logical_name,
+                'problem_files': self._problem_relatives(results, source),
+                'status': 'needs-repair',
+            }
+            self._write_repair_state(source, state)
+            print("❌ 当前对象已经是修复副本，不再嵌套复制；请修复问题文件后重试。")
+            return None
+        if not allow_copy:
+            print("❌ 只读计划发现审核问题；未创建修复副本。")
+            return None
+
+        repair = self._copy_repair_target(source)
+        if repair is None:
+            return None
+        problem_files = self._problem_relatives(results, source)
+        for path, result in results.items():
+            if result['status'] != REVIEW_FIXABLE:
+                continue
+            relative = self._relative_review_path(path, source)
+            target_path = self._resolve_review_path(repair, relative)
+            if apply_review_fixes(result, target_path):
+                print(f"✓ 已在修复副本应用确定性修复: {target_path}")
+        state = {
+            'format_version': 1,
+            'source_path': str(source),
+            'repair_path': str(repair),
+            'logical_name': logical_name,
+            'problem_files': problem_files,
+            'status': 'needs-repair',
+        }
+        state_path = self._write_repair_state(repair, state)
+        print(f"修复状态文件: {state_path}")
+        validated = self._validate_repair_target(repair, state)
+        if validated is None:
+            return None
+        return validated[0], logical_name
+
     def _prepare_markdown(self, md_file_path):
         source_path = str(Path(md_file_path).resolve())
         if not self.preflight_review:
@@ -137,7 +489,7 @@ class MarkdownImporter:
             return html_content
 
         result = self._ensure_preflight_run().review(source_path)
-        if not result['passed']:
+        if result['status'] != REVIEW_CLEAN:
             print(f"❌ Markdown 预审失败: {result['review_path']}")
             for issue in result['report']['issues']:
                 if issue['severity'] == 'error':
@@ -153,7 +505,7 @@ class MarkdownImporter:
             for error in errors:
                 print(f"  - {error}")
             return None
-        print(f"✓ Markdown 预审通过，上传副本: {result['candidate_path']}")
+        print(f"✓ Markdown 预审通过，直接使用已审核原文件: {source_path}")
         self._prepared_storage[source_path] = html_content
         return html_content
 
@@ -697,8 +1049,8 @@ class MarkdownImporter:
         html_content = self._convert_code_blocks(html_content)
         html_content = self._convert_highlight_marks(html_content)
         html_content = self._clean_unnecessary_backslashes(html_content)
-        toc_macro = ('<ac:structured-macro ac:name="toc" ac:schema-version="1" '
-                     'data-layout="default"/>')
+        toc_macro = build_toc_macro(
+            self.toc_target_macro, self.toc_macro_parameters)
         html_content = re.sub(
             rf'<p>\s*{re.escape(toc_placeholder)}\s*</p>', toc_macro,
             html_content, flags=re.DOTALL)
@@ -733,14 +1085,13 @@ class MarkdownImporter:
         """
         if not self.toc_enabled:
             return html_content
-        if re.search(r'<ac:structured-macro\b[^>]*ac:name=["\']toc["\']',
-                     html_content):
+        if contains_toc_macro(html_content):
             return html_content
         heading_count = len(re.findall(r'<h([2-6])(?=[\s>])', html_content))
         if heading_count < self.toc_min_headings:
             return html_content
-        toc_macro = ('<ac:structured-macro ac:name="toc" ac:schema-version="1" '
-                     'data-layout="default"/>')
+        toc_macro = build_toc_macro(
+            self.toc_target_macro, self.toc_macro_parameters)
         print(f"ℹ️ 检测到 {heading_count} 个子标题（阈值 {self.toc_min_headings}），已自动插入目录宏")
         return toc_macro + html_content
 
@@ -749,14 +1100,20 @@ class MarkdownImporter:
         """Markdown 导入主函数"""
         self.failed_images = []
         self.data_images_skipped = 0
+        prepared = self._prepare_upload_target(md_file_path)
+        if prepared is None:
+            return False
+        upload_path, logical_name = prepared
         # 优先级：CLI --page-name > 配置 default_page_name > md 文件名（不含扩展名）
-        title = page_name or self.default_page_name or Path(md_file_path).stem
+        title = page_name or self.default_page_name or logical_name
         # 优先级：CLI --parent-id > 配置 default_parent_id（仅新建页面时生效）
         parent_id = parent_id or self.default_parent_id
 
-        html_content = self._prepare_markdown(md_file_path)
+        source_path = str(Path(upload_path).resolve())
+        html_content = self._prepared_storage.get(source_path)
+        if html_content is None and not self.preflight_review:
+            html_content = self._prepare_markdown(source_path)
         if html_content is None:
-            self._finish_preflight(False)
             return False
 
         # 6. 创建或更新页面
@@ -764,7 +1121,8 @@ class MarkdownImporter:
         lookup, existing_id, existing_version = self._find_page_by_title(
             title, parent_id=parent_scope, page_id=page_id)
         if lookup == LOOKUP_ERROR:
-            self._finish_preflight(False)
+            return False
+        if not self._validated_target_unchanged():
             return False
         if lookup == LOOKUP_FOUND:
             print(f"页面已存在 (ID: {existing_id}, v{existing_version})，执行更新...")
@@ -773,16 +1131,14 @@ class MarkdownImporter:
         else:
             page_id, current_version = self._create_page(title, html_content, parent_id)
         if not page_id:
-            self._finish_preflight(False)
             return False
 
         # 7. 处理图片链接（需 page_id 上传附件），在最新版本号上再 +1
-        final_content = self._convert_md_links(html_content, md_file_path, page_id)
+        final_content = self._convert_md_links(html_content, source_path, page_id)
         if final_content != html_content:
             updated_id, current_version = self._update_page(
                 page_id, title, final_content, current_version)
             if not updated_id:
-                self._finish_preflight(False)
                 return False
 
         self._remember_page(page_id, title, current_version, parent_id)
@@ -797,11 +1153,9 @@ class MarkdownImporter:
 
         if self.failed_images:
             print("❌ 导入存在附件失败，任务未完整完成。")
-            self._finish_preflight(False)
             return False
 
-        self._finish_preflight(True)
-        print(f"✅ 导入完成: {md_file_path} → {title} (ID: {page_id})")
+        print(f"✅ 导入完成: {upload_path} → {title} (ID: {page_id})")
         return page_id
 
     # ==================== --dir 树导入 ====================
@@ -822,24 +1176,40 @@ class MarkdownImporter:
         except Exception:
             return None, None
 
-    def _scan_tree(self, root_dir):
+    def _scan_tree(self, root_dir, root_name=None):
         """扫描目录树为页面节点树（--dir 模式）
 
         规则：每个含 .md 的文件夹 = 一个页面节点（标题=文件夹名，内容=同名 .md；
         无同名取唯一 .md；多个 .md 时跳过该节点并提示）。`.assets/` 目录不算节点。
         中间文件夹无 .md 时跳级（其子节点直接并入上层，页面层级由实际含 md 的文件夹决定）。
+
+        materialize_root_page=True 时根文件夹始终是页面：优先使用同名 .md；
+        缺少同名文件时使用空正文，根目录内其他 .md 各自成为直接子页面。
         """
         root = Path(root_dir)
         if not root.is_dir():
             raise SystemExit(f"❌ 目录不存在: {root_dir}")
 
-        def scan(path):
+        def scan(path, is_root=False):
             mds = sorted(p for p in path.iterdir()
                          if p.is_file() and p.suffix.lower() == '.md')
+            node_name = root_name if is_root and root_name else path.name
             md_path = None
             has_md_but_ambiguous = False
-            if mds:
-                same = [m for m in mds if m.stem == path.name]
+            synthetic = False
+            file_children = []
+            if is_root and self.materialize_root_page:
+                same = [m for m in mds if m.stem == node_name]
+                if len(same) == 1:
+                    md_path = same[0]
+                synthetic = md_path is None
+                file_children = [
+                    {'name': item.stem, 'md_path': item, 'synthetic': False,
+                     'children': []}
+                    for item in mds if item != md_path
+                ]
+            elif mds:
+                same = [m for m in mds if m.stem == node_name]
                 if len(same) == 1:
                     md_path = same[0]
                 elif len(mds) == 1:
@@ -847,17 +1217,27 @@ class MarkdownImporter:
                 else:
                     print(f"⚠️ 跳过 {path.name}：含多个 .md（{'、'.join(m.name for m in mds)}），无法确定页面内容")
                     has_md_but_ambiguous = True
-            children = []
+            children = file_children
             for child in sorted(path.iterdir()):
                 if child.is_dir() and not child.name.endswith('.assets'):
                     sub = scan(child)
                     if sub is not None:
                         children.append(sub)
-            if md_path is None and not children and not has_md_but_ambiguous:
+            if is_root and self.materialize_root_page:
+                child_names = [child['name'] for child in children]
+                duplicates = sorted({name for name in child_names
+                                     if child_names.count(name) > 1})
+                if duplicates:
+                    raise SystemExit(
+                        '❌ 根目录文件与子文件夹生成重复页面标题: '
+                        + '、'.join(duplicates))
+            if (md_path is None and not synthetic and not children
+                    and not has_md_but_ambiguous):
                 return None
-            return {'name': path.name, 'md_path': md_path, 'children': children}
+            return {'name': node_name, 'md_path': md_path,
+                    'synthetic': synthetic, 'children': children}
 
-        tree = scan(root)
+        tree = scan(root, is_root=True)
         if tree is None:
             raise SystemExit(f"❌ {root_dir} 下没有任何含 .md 的文件夹")
         return tree
@@ -878,8 +1258,10 @@ class MarkdownImporter:
         """
         if claimed_page_ids is None:
             claimed_page_ids = set()
-        if node['md_path'] is None:
+        synthetic = bool(node.get('synthetic'))
+        if node['md_path'] is None and not synthetic:
             return {'title': node['name'], 'md_path': None, 'status': 'skip',
+                    'synthetic': False,
                     'page_id': None, 'version': None,
                     'parent_title': parent_title,
                     'target_parent_id': target_parent_id,
@@ -912,12 +1294,16 @@ class MarkdownImporter:
             hierarchy_differs = parent_pending or (
                 (None if current_parent in (None, '') else str(current_parent))
                 != wanted_parent)
-            status = ('move' if self.fix_hierarchy != 'off' and hierarchy_differs
-                      else 'update')
+            if synthetic and (self.fix_hierarchy == 'off' or not hierarchy_differs):
+                status = 'keep'
+            else:
+                status = ('move' if self.fix_hierarchy != 'off' and hierarchy_differs
+                          else 'update')
 
         plan = {
             'title': title,
-            'md_path': str(node['md_path']),
+            'md_path': None if synthetic else str(node['md_path']),
+            'synthetic': synthetic,
             'status': status,
             'page_id': existing_id,
             'version': existing_version,
@@ -937,7 +1323,7 @@ class MarkdownImporter:
 
     def _print_plan(self, plan):
         mark = {'new': '🆕 新建', 'update': '🔄 更新', 'move': '📦 移动',
-                'error': '❌ 歧义'}.get(plan['status'], '')
+                'keep': '✅ 复用', 'error': '❌ 歧义'}.get(plan['status'], '')
         prefix = '  ' * plan['depth']
         if plan['status'] != 'skip':
             extra = ''
@@ -986,8 +1372,8 @@ class MarkdownImporter:
     def _preflight_plan(self, plan):
         """在任何树节点写入前预审全部未完成 Markdown。"""
         passed = True
-        if (plan['status'] not in ('skip', 'error')
-                and not plan.get('completed')):
+        if (plan['status'] not in ('skip', 'keep', 'error')
+                and not plan.get('completed') and not plan.get('synthetic')):
             if self._prepare_markdown(plan['md_path']) is None:
                 passed = False
         for child in plan['children']:
@@ -1016,20 +1402,51 @@ class MarkdownImporter:
                     'page_id': page_id, 'children': children}
 
         title = plan['title']
-        source_path = str(Path(plan['md_path']).resolve())
-        html_content = self._prepared_storage.get(source_path)
-        if html_content is None and not self.preflight_review:
-            html_content = self._prepare_markdown(source_path)
-        if html_content is None:
-            print(f"❌ 失败: {title}（缺少已验证的上传副本）")
-            return {'title': title, 'status': 'failed',
-                    'page_id': plan.get('page_id'), 'children': []}
-
         status = plan['status']
         result_status = status
-        page_id = None
         existing_id = plan.get('page_id')
         existing_version = plan.get('version')
+        if status == 'keep':
+            plan['completed'] = True
+            if checkpoint:
+                checkpoint()
+            self._title_id_map[title] = existing_id
+            record = self._record_for_id(existing_id) or {}
+            self._remember_page(
+                existing_id, title, existing_version, record.get('parent_id'))
+            children = [self._execute_plan(c, existing_id, checkpoint)
+                        for c in plan['children']]
+            return {'title': title, 'status': 'keep',
+                    'page_id': existing_id, 'children': children}
+
+        synthetic = bool(plan.get('synthetic'))
+        source_path = None
+        if synthetic:
+            html_content = EMPTY_PAGE_STORAGE
+            if existing_id and status == 'move':
+                try:
+                    current = fetch_page(
+                        self.session, self.base_url, existing_id)
+                except Exception as exc:
+                    print(f"❌ 失败: {title}（无法读取现有根页面: {exc}）")
+                    return {'title': title, 'status': 'failed',
+                            'page_id': existing_id, 'children': []}
+                if current['version'] != existing_version:
+                    print(f"❌ 失败: {title}（根页面版本已变化，请重新生成计划）")
+                    return {'title': title, 'status': 'failed',
+                            'page_id': existing_id, 'children': []}
+                html_content = current['storage']
+        else:
+            source_path = str(Path(plan['md_path']).resolve())
+            html_content = self._prepared_storage.get(source_path)
+            if html_content is None and not self.preflight_review:
+                html_content = self._prepare_markdown(source_path)
+            if html_content is None:
+                print(f"❌ 失败: {title}（缺少已验证的上传副本）")
+                return {'title': title, 'status': 'failed',
+                        'page_id': existing_id, 'children': []}
+
+        page_id = None
         target_parent = plan.get('target_parent_id')
         if target_parent is None and plan.get('parent_title'):
             target_parent = self._title_id_map.get(plan['parent_title'])
@@ -1066,28 +1483,30 @@ class MarkdownImporter:
             checkpoint()
         self._title_id_map[title] = page_id
 
-        # 图片处理（与单文件流程一致），在最新版本号上再 +1
-        self.failed_images = []
-        self.data_images_skipped = 0
-        final_content = self._convert_md_links(html_content, plan['md_path'], page_id)
-        if final_content != html_content:
-            updated_id, current_version = self._update_page(
-                page_id, title, final_content, current_version)
-            if not updated_id:
-                return {'title': title, 'status': 'failed',
-                        'page_id': page_id, 'children': []}
-            plan['version'] = current_version
-            if checkpoint:
-                checkpoint()
-        if self.failed_images:
-            print(f"❌ {title} 以下图片未能上传：{self.failed_images}")
+        if not synthetic:
+            # 图片处理（与单文件流程一致），在最新版本号上再 +1
             self.failed_images = []
             self.data_images_skipped = 0
-            return {'title': title, 'status': 'failed',
-                    'page_id': page_id, 'children': []}
-        if self.data_images_skipped:
-            print(f"ℹ️ {title} 跳过 {self.data_images_skipped} 张 base64 内嵌图片")
-            self.data_images_skipped = 0
+            final_content = self._convert_md_links(
+                html_content, plan['md_path'], page_id)
+            if final_content != html_content:
+                updated_id, current_version = self._update_page(
+                    page_id, title, final_content, current_version)
+                if not updated_id:
+                    return {'title': title, 'status': 'failed',
+                            'page_id': page_id, 'children': []}
+                plan['version'] = current_version
+                if checkpoint:
+                    checkpoint()
+            if self.failed_images:
+                print(f"❌ {title} 以下图片未能上传：{self.failed_images}")
+                self.failed_images = []
+                self.data_images_skipped = 0
+                return {'title': title, 'status': 'failed',
+                        'page_id': page_id, 'children': []}
+            if self.data_images_skipped:
+                print(f"ℹ️ {title} 跳过 {self.data_images_skipped} 张 base64 内嵌图片")
+                self.data_images_skipped = 0
 
         self._remember_page(page_id, title, current_version, target_parent)
         plan['completed'] = True
@@ -1100,7 +1519,8 @@ class MarkdownImporter:
 
     def _print_results(self, res, prefix=''):
         mark = {'new': '🆕 新建', 'update': '🔄 更新', 'move': '📦 移动',
-                'resumed': '⏩ 已完成', 'failed': '❌ 失败'}.get(res['status'], '')
+                'keep': '✅ 复用', 'resumed': '⏩ 已完成',
+                'failed': '❌ 失败'}.get(res['status'], '')
         if res['status'] != 'skip':
             print(f"{prefix}{mark} {res['title']} (ID: {res['page_id']})")
         for c in res['children']:
@@ -1138,6 +1558,16 @@ class MarkdownImporter:
                 f"❌ 恢复计划空间 {document.get('space_key')} 与当前空间 {self.space_key} 不一致")
         return path, document
 
+    def _remap_plan_paths(self, plan, old_root, new_root):
+        old_root = Path(old_root).resolve()
+        new_root = Path(new_root).resolve()
+        md_path = plan.get('md_path')
+        if md_path:
+            relative = Path(md_path).resolve().relative_to(old_root)
+            plan['md_path'] = str((new_root / relative).resolve())
+        for child in plan.get('children', []):
+            self._remap_plan_paths(child, old_root, new_root)
+
     def import_tree(self, root_dir=None, plan_only=False, yes=False,
                     resume_file=None):
         """批量导入文件夹树（--dir 模式），保留层级关系
@@ -1151,16 +1581,31 @@ class MarkdownImporter:
         if resume_file:
             checkpoint_path, document = self._load_tree_checkpoint(resume_file)
             plan = document['plan']
+            old_root = Path(document['root_dir']).resolve()
+            prepared = self._prepare_upload_target(old_root)
+            if prepared is None:
+                return False
+            upload_root, _logical_name = prepared
+            if upload_root != old_root:
+                self._remap_plan_paths(plan, old_root, upload_root)
+                document['root_dir'] = str(upload_root)
+                self._write_tree_checkpoint(checkpoint_path, document)
             print(f"\n⏩ 从计划恢复: {checkpoint_path}")
         else:
             if not root_dir:
                 raise SystemExit('❌ 必须指定 --dir，或使用 --resume <tree_plan.json>')
-            tree = self._scan_tree(root_dir)
+            prepared = self._prepare_upload_target(
+                root_dir, allow_copy=not plan_only)
+            if prepared is None:
+                return False
+            upload_root, logical_name = prepared
+            tree = self._scan_tree(upload_root, root_name=logical_name)
             self._ensure_page_index()
             plan = self._build_plan(
                 tree, target_parent_id=self.default_parent_id,
                 parent_pending=False)
-            checkpoint_path, document = self._new_tree_checkpoint(root_dir, plan)
+            checkpoint_path, document = self._new_tree_checkpoint(
+                upload_root, plan)
 
         print("\n📋 导入计划：")
         self._print_plan(plan)
@@ -1177,17 +1622,18 @@ class MarkdownImporter:
             print("\n（仅计划，未执行任何操作）")
             return True
 
-        if not self._preflight_plan(plan):
+        if not self.preflight_review and not self._preflight_plan(plan):
             print("❌ 树导入预审失败，未执行任何远端写操作。")
-            self._finish_preflight(False)
             return False
 
         if self._plan_has_move(plan) and self.fix_hierarchy == 'confirm' and not yes:
             ans = input("⚠️ 检测到需移动层级的页面，确认执行？[y/N] ").strip().lower()
             if ans != 'y':
                 print("已取消，未执行任何操作。")
-                self._finish_preflight(False)
                 return False
+
+        if not self._validated_target_unchanged():
+            return False
 
         print("\n🚀 开始导入...")
         checkpoint = lambda: self._write_tree_checkpoint(checkpoint_path, document)
@@ -1196,9 +1642,7 @@ class MarkdownImporter:
         self._print_results(results)
         if self._result_has_failure(results):
             print(f"❌ 树导入存在失败；可用 --resume {checkpoint_path} 继续。")
-            self._finish_preflight(False)
             return False
-        self._finish_preflight(True)
         print("✅ 树导入完成。")
         return True
 

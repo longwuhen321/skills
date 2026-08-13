@@ -27,18 +27,20 @@ MOCK_CFG = {
     'common_config': {
         'confluence_url': 'http://test.invalid:8090',
         'confluence_token': 'fixture-token',
+        'toc_target_macro': 'easy_heading',
     },
     'import_config': {
         'space': 'TEST', 'math_align': 'left', 'tree_import': True,
         'fix_hierarchy': 'confirm', 'toc_enabled': True,
         'toc_min_headings': 4, 'preflight_review': False,
+        'materialize_root_page': False,
     },
     'upgrade_config': {
         'math_align': 'left', 'auto_update': True, 'ai_verify': False,
         'recursive': True, 'max_depth': 0,
     },
     'toc_upgrade_config': {
-        'target_macro': 'easy_heading', 'default_page': '', 'space': '',
+        'default_page': '', 'space': '',
         'recursive': False, 'auto_update': True, 'ai_verify': False,
         'macro_parameters': {
             'titleExpandClickable': 'true',
@@ -377,7 +379,7 @@ class TestImportLookupAndConflict(ImporterCase):
 
     def test_toc_marker_round_trips_to_single_macro(self):
         storage = self.importer._convert_md_to_storage('[toc]\n\n## One\n')
-        self.assertEqual(storage.count('ac:name="toc"'), 1)
+        self.assertEqual(storage.count('ac:name="easy-heading-free"'), 1)
 
     def test_single_import_attachment_failure_returns_false(self):
         with tempfile.NamedTemporaryFile(

@@ -6,10 +6,12 @@
     cfg = load_config()
 """
 
+import html
 import os
 import re
 import sys
 import time
+import uuid
 from urllib.parse import urljoin
 
 from config_parser import ConfigParseError, parse_config_text
@@ -20,6 +22,113 @@ CONFIG_PATH = os.path.join(SKILL_ROOT, 'scripts', 'config.py')
 # 所有 HTTP 请求的默认超时（秒），防网络挂起卡死脚本
 DEFAULT_TIMEOUT = 30
 HEADING_MATH_MODES = ('literal', 'mathinline')
+TOC_TARGETS = ('easy_heading', 'toc')
+TOC_MACRO = 'toc'
+EASY_HEADING_MACRO = 'easy-heading-free'
+TOC_BOOLEAN_PARAMETERS = {
+    'titleExpandClickable',
+    'useNavigationHiddenMode',
+    'wrapNavigationText',
+}
+TOC_NAVIGATION_EXPAND_OPTIONS = {
+    'expand-all-by-default',
+    'collapse-all-by-default',
+    'collapse-all-but-headings-1',
+    'collapse-all-but-headings-1-2',
+    'collapse-all-but-headings-1-3',
+    'collapse-all-but-headings-1-4',
+    'disable-expand-collapse',
+}
+TOC_ALLOWED_PARAMETERS = TOC_BOOLEAN_PARAMETERS | {
+    'hiddenEditedFlag',
+    'navigationExpandOption',
+    'selector',
+    'navigationTitle',
+}
+
+
+class MacroConversionError(ValueError):
+    """目录宏结构或配置不满足安全转换条件。"""
+
+
+def get_toc_target_macro(common_config, legacy_toc_config=None):
+    """读取导入与目录升级共用的目标宏，并兼容旧配置键。"""
+    target = common_config.get('toc_target_macro')
+    if target is None and legacy_toc_config is not None:
+        target = legacy_toc_config.get('target_macro')
+    if target is None:
+        target = 'easy_heading'
+    if target not in TOC_TARGETS:
+        allowed = ' 或 '.join(TOC_TARGETS)
+        raise MacroConversionError(
+            f'common_config.toc_target_macro 必须是 {allowed}')
+    return target
+
+
+def validate_toc_macro_parameters(parameters):
+    """严格校验 Easy Heading 创建参数，并返回保序副本。"""
+    if not isinstance(parameters, dict):
+        raise MacroConversionError('macro_parameters 必须是字典')
+    unknown = set(parameters) - TOC_ALLOWED_PARAMETERS
+    if unknown:
+        raise MacroConversionError(
+            '不支持的 Easy Heading 参数: ' + ', '.join(sorted(unknown)))
+    for key, value in parameters.items():
+        if not isinstance(value, str):
+            raise MacroConversionError(f'macro_parameters.{key} 必须是字符串')
+        if key in TOC_BOOLEAN_PARAMETERS and value not in ('true', 'false'):
+            raise MacroConversionError(
+                f'macro_parameters.{key} 只能是 "true" 或 "false"')
+    if ('hiddenEditedFlag' in parameters
+            and parameters['hiddenEditedFlag'] != 'true'):
+        raise MacroConversionError(
+            'macro_parameters.hiddenEditedFlag 是插件内部标记，只支持 "true"')
+    expand = parameters.get('navigationExpandOption')
+    if expand is not None and expand not in TOC_NAVIGATION_EXPAND_OPTIONS:
+        raise MacroConversionError(
+            'macro_parameters.navigationExpandOption 取值无效')
+    selector = parameters.get('selector')
+    if selector is not None:
+        headings = [item.strip() for item in selector.split(',')]
+        if (not headings or any(not re.fullmatch(r'h[1-6]', item)
+                                for item in headings)
+                or len(set(headings)) != len(headings)):
+            raise MacroConversionError(
+                'macro_parameters.selector 只能是不重复的 h1~h6，以英文逗号分隔')
+    if 'navigationTitle' in parameters and not parameters['navigationTitle'].strip():
+        raise MacroConversionError('macro_parameters.navigationTitle 不能为空')
+    return dict(parameters)
+
+
+def build_toc_macro(target_macro, macro_parameters):
+    """按通用配置生成一个新的原生 TOC 或 Easy Heading 宏。"""
+    if target_macro not in TOC_TARGETS:
+        allowed = ' 或 '.join(TOC_TARGETS)
+        raise MacroConversionError(f'target_macro 必须是 {allowed}')
+    parameters = validate_toc_macro_parameters(macro_parameters)
+    macro_id = uuid.uuid4()
+    if target_macro == 'toc':
+        return (
+            '<ac:structured-macro ac:name="toc" ac:schema-version="1" '
+            f'ac:macro-id="{macro_id}"/>')
+    parts = [
+        '<ac:structured-macro ac:name="easy-heading-free" '
+        f'ac:schema-version="1" ac:macro-id="{macro_id}">'
+    ]
+    for key, value in parameters.items():
+        parts.append(
+            f'<ac:parameter ac:name="{key}">{html.escape(value)}</ac:parameter>')
+    parts.append('</ac:structured-macro>')
+    return ''.join(parts)
+
+
+def contains_toc_macro(storage_html):
+    """判断正文是否已有原生 TOC 或 Easy Heading，忽略 CDATA 与注释。"""
+    visible = re.sub(r'<!\[CDATA\[.*?\]\]>|<!--.*?-->', '', storage_html,
+                     flags=re.DOTALL)
+    return bool(re.search(
+        r'<ac:structured-macro\b[^>]*ac:name=["\'](?:toc|easy-heading-free)["\']',
+        visible, flags=re.IGNORECASE))
 
 
 def get_heading_math_mode(common_config: dict) -> str:

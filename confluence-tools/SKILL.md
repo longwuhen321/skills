@@ -81,7 +81,7 @@ scripts/config_parser.py      scripts/debug_utils.py
 
 | 能力 | 范围 | 脚本 | 核心边界 |
 |---|---|---|---|
-| Markdown 导入 | 单页、文件夹树、恢复计划 | `md_import.py` | 查询三态；歧义不写；开启预审时先全量验证再写 |
+| Markdown 导入 | 单页、文件夹树、恢复计划 | `md_import.py` | 原件只读预审；必要时完整修复副本；查询歧义不写 |
 | 数学升级 | 单页、页面树、空间 | `math_upgrade.py` | 默认公式零残留；确认前复查源版本和哈希 |
 | 目录宏转换 | 单页、完整页面树、空间 | `toc_upgrade.py` | 无源不注入；重复宏拒绝；已有目标宏保持原文 |
 | Markdown 导出 | 单页、页面树、空间 | `md_export.py` | 全量分页；安全附件路径；空间每页一次 |
@@ -99,7 +99,14 @@ scripts/config_parser.py      scripts/debug_utils.py
 - `--page-id` 精确定位；否则查询必须区分 `FOUND`、`NOT_FOUND`、`ERROR`。
 - 只有 `NOT_FOUND` 可以新建；同名多候选、分页或 API 错误禁止猜测。
 - 409 默认拒绝覆盖；只有用户明确要求并传 `--force` 才从最新版本重试一次。
-- `preflight_review=true` 时，树导入必须先验证全部待写 Markdown；任一失败时零远端写入。
+- `preflight_review=true` 时先只读全量审核：全净直接上传原件；发现问题则在同级创建完整
+  `<原名>__修复` 副本，只修改副本。问题文件全部通过后再全量审核副本。
+- 修复副本重名必须询问覆盖、另起名称或取消；`__修复` 只作本地标识，不改变页面标题。
+- `materialize_root_page=true` 时根文件夹必须成为页面；缺少同名 Markdown 时只创建空的
+  Confluence 根页，不补写本地文件，根级其他 Markdown 作为其直接子页面。
+- `[toc]` 与自动目录统一服从 `common_config.toc_target_macro`，已有原生或 Easy 目录时不重复插入。
+- 最终审核对象与上传对象必须一致；远端写入前哈希变化时停止，日志只保存报告而不保存候选 Markdown。
+- 导入后复盘审核项：通用修复按维护流程固化到脚本并补测试；个例先询问是否记入问题库。
 - 页面、附件或树节点任一失败，整体命令返回非零。
 
 ### 数学公式升级
