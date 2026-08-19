@@ -5,6 +5,7 @@ Markdown → Confluence 导入工具 (Confluence 9.x)
 数学公式：mathblock / mathinline 原生宏。
 
 用法: python md_import.py <md_file_path> [--parent-id ID] [--page-name NAME] [--space KEY]
+      python md_import.py --manual [--parent-id ID] [--page-name NAME] [--space KEY]
 
 配置从 scripts/config.py 读取（CLI 参数可覆盖默认值）。
 """
@@ -52,6 +53,37 @@ LOOKUP_ERROR = 'ERROR'
 _ANY_PARENT = object()
 REPAIR_SUFFIX = '__修复'
 EMPTY_PAGE_STORAGE = '<p></p>'
+
+
+def resolve_import_source(md_file=None, manual=False, dir_path=None,
+                          resume_file=None, config=None):
+    """解析单文件导入源；人工默认值只能由显式 ``--manual`` 启用。"""
+    if not manual:
+        return md_file
+    if md_file or dir_path or resume_file:
+        raise ValueError('--manual 不能与 Markdown 路径、--dir 或 --resume 同时使用')
+
+    cfg = load_config() if config is None else config
+    raw_path = cfg.get('manual_run_config', {}).get('md_import_file', '')
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError(
+            'manual_run_config.md_import_file 为空；请先配置 Markdown 文件路径')
+
+    try:
+        path = Path(raw_path.strip()).expanduser().resolve()
+        is_file = path.is_file()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            f'manual_run_config.md_import_file 无法解析: {raw_path!r}') from exc
+    if path.suffix.lower() != '.md':
+        raise ValueError(
+            f'manual_run_config.md_import_file 必须指向 .md 文件: {path}')
+    if not is_file:
+        raise ValueError(
+            f'manual_run_config.md_import_file 文件不存在: {path}')
+
+    print(f'ℹ️ 人工运行配置文件: {path}')
+    return str(path)
 
 
 class MarkdownImporter:
@@ -1650,6 +1682,8 @@ class MarkdownImporter:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Markdown → Confluence 导入工具')
     parser.add_argument('md_file', nargs='?', help='Markdown 文件路径（与 --dir 二选一）')
+    parser.add_argument('--manual', action='store_true',
+                        help='使用 manual_run_config.md_import_file（仅供人工运行）')
     parser.add_argument('--dir', default=None,
                         help='批量导入文件夹树（保留层级；需 config.py 的 import_config.tree_import 开启）')
     parser.add_argument('--resume', default=None, metavar='TREE_PLAN_JSON',
@@ -1685,6 +1719,13 @@ if __name__ == "__main__":
     print("=" * 60)
     print("📘 Markdown → Confluence 导入工具")
     print("=" * 60)
+
+    try:
+        args.md_file = resolve_import_source(
+            md_file=args.md_file, manual=args.manual,
+            dir_path=args.dir, resume_file=args.resume)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.dir or args.resume:
         with MarkdownImporter(

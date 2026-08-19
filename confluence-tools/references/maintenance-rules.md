@@ -62,7 +62,7 @@
 
 | 能力 | 验收位置 |
 |---|---|
-| 配置无副作用解析、六组键和类型同步 | `test_config_sync.py`、`TestSafeConfigAndPackaging` |
+| 配置无副作用解析、七组键和类型同步 | `test_config_sync.py`、`TestSafeConfigAndPackaging` |
 | 导入页面消歧、409 和附件失败 | `TestImportLookupAndConflict` |
 | 导入原件直传、完整修复副本、两级复审和哈希门禁 | `TestMdImport`、`TestMdPreflight` |
 | 树计划唯一 ID 和断点恢复 | `TestTreePlanAndResume` |

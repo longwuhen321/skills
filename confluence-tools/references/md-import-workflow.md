@@ -10,6 +10,7 @@
 
 ```bash
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" "<md文件>" [--page-id ID] [--parent-id ID] [--page-name NAME] [--space KEY] [--align left|center] [--force] [--preflight-review|--no-preflight-review]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --manual [--page-id ID] [--parent-id ID] [--page-name NAME] [--space KEY] [--align left|center] [--force] [--preflight-review|--no-preflight-review]
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --dir "<根文件夹>" [--space KEY] [--align left|center] [--fix-hierarchy confirm|auto|off] [--plan-only] [--yes] [--force] [--preflight-review|--no-preflight-review]
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --resume "<tree_plan.json>" [--yes] [--force]
 ```
@@ -17,6 +18,9 @@
 ## 通用流程
 
 1. 使用用户指定的 Markdown 文件或目录，并直接读取 `import_config`；不重复询问配置已有值。
+   人工运行可显式传 `--manual`，此时读取 `manual_run_config.md_import_file`。该开关与位置参数、
+   `--dir`、`--resume` 互斥；解析后的文件必须存在且扩展名为 `.md`，并在远端操作前显示完整路径。
+   AI 助手执行导入时始终显式传入文件或目录范围，不使用人工默认值。
 2. 用户主动指定 `--space`、`--parent-id`、`--page-id`、`--page-name`、`--align`
    等参数时覆盖配置；不得自行推断更窄或更宽范围。
 3. 先计算最终 `preflight_review`。开启时，按 `SKILL.md` 的直接路由，在任何远端查询或写入前

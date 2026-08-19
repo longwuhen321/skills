@@ -8,11 +8,12 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 CHECKER = SCRIPT_DIR / 'check_config_sync.py'
 
-GROUPS = ('common_config,import_config,upgrade_config,toc_upgrade_config,'
+GROUPS = ('common_config,manual_run_config,import_config,upgrade_config,toc_upgrade_config,'
           'export_config,debug_config')
 
 EXAMPLE_TEXT = (
     "common_config = {'python_path': 'x', 'confluence_token': 'placeholder', 'toc_target_macro': 'easy_heading'}\n"
+    "manual_run_config = {'md_import_file': ''}\n"
     "import_config = {'space': 'ALG', 'toc_enabled': True, 'materialize_root_page': False}\n"
     "upgrade_config = {'recursive': True}\n"
     "toc_upgrade_config = {'recursive': False}\n"
@@ -22,6 +23,7 @@ EXAMPLE_TEXT = (
 
 CONFIG_TEXT = (
     "common_config = {'python_path': 'D:/py/python.exe', 'confluence_token': 'test-token', 'toc_target_macro': 'toc'}\n"
+    "manual_run_config = {'md_import_file': 'E:/doc.md'}\n"
     "import_config = {'space': 'ES', 'toc_enabled': False, 'materialize_root_page': True}\n"
     "upgrade_config = {'recursive': False}\n"
     "toc_upgrade_config = {'recursive': True}\n"
@@ -41,7 +43,7 @@ def run_checker(args):
 
 class ConfigSyncTests(unittest.TestCase):
     def test_tmp_pair_synced_passes(self):
-        """临时六分组 example/config 键集一致 → 退出码 0（值不同不误报）。"""
+        """临时七分组 example/config 键集一致 → 退出码 0（值不同不误报）。"""
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'
             config = Path(tmp) / 'config.py'
@@ -50,8 +52,8 @@ class ConfigSyncTests(unittest.TestCase):
             result = run_checker([f'--example-file={example}', f'--config-file={config}', f'--groups={GROUPS}'])
             self.assertEqual(result.returncode, 0, result.stdout)
 
-    def test_tmp_pair_default_six_groups_passes(self):
-        """不传 --groups 时也必须完整检查默认六分组。"""
+    def test_tmp_pair_default_seven_groups_passes(self):
+        """不传 --groups 时也必须完整检查默认七分组。"""
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'
             config = Path(tmp) / 'config.py'
@@ -90,22 +92,22 @@ class ConfigSyncTests(unittest.TestCase):
             self.assertIn('import_config', result.stdout)
 
     def test_tmp_pair_both_missing_default_group_fails(self):
-        """默认六分组中的任一组在双方都缺失，也必须显式失败。"""
+        """默认七分组中的任一组在双方都缺失，也必须显式失败。"""
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.py'
             config = Path(tmp) / 'config.py'
-            missing_debug_example = EXAMPLE_TEXT.replace(
-                "debug_config = {'max_size_mb': 50}\n", '')
-            missing_debug_config = CONFIG_TEXT.replace(
-                "debug_config = {'max_size_mb': 20}\n", '')
-            example.write_text(missing_debug_example, encoding='utf-8')
-            config.write_text(missing_debug_config, encoding='utf-8')
+            missing_manual_example = EXAMPLE_TEXT.replace(
+                "manual_run_config = {'md_import_file': ''}\n", '')
+            missing_manual_config = CONFIG_TEXT.replace(
+                "manual_run_config = {'md_import_file': 'E:/doc.md'}\n", '')
+            example.write_text(missing_manual_example, encoding='utf-8')
+            config.write_text(missing_manual_config, encoding='utf-8')
             result = run_checker([
                 f'--example-file={example}',
                 f'--config-file={config}',
             ])
             self.assertEqual(result.returncode, 1)
-            self.assertIn('debug_config', result.stdout)
+            self.assertIn('manual_run_config', result.stdout)
 
     def test_tmp_pair_missing_key_fails(self):
         """config.py 分组内缺键 → 退出码 1，报 missing。"""

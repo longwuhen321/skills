@@ -26,7 +26,7 @@
    "<python_path>" -X utf8 "<SKILL_DIR>/scripts/check_config_sync.py"
    ```
 
-   门禁比较六个配置分组的键集合和值类型，不比较值；退出码 1/2 时中断，
+   门禁比较七个配置分组的键集合和值类型，不比较值；退出码 1/2 时中断，
    按报告补齐后重新检查。配置使用 AST + `ast.literal_eval` 解析，拒绝函数调用、
    导入和其他副作用代码。
 
@@ -41,7 +41,7 @@
 - 使用普通文本逐项一问一答，不使用选项式提问工具承载 URL、Token、路径等开放输入。
 - 配置确认后写入 `scripts/config.py`；真实凭据只能存在于该文件，不能写入模板、文档或日志。
 
-## 六组配置项
+## 七组配置项
 
 ### `common_config`
 
@@ -53,6 +53,11 @@
 6. `toc_target_macro`：导入与目录升级共用的目标宏，`easy_heading` 或 `toc`；
    默认 `easy_heading`。`toc_upgrade.py --target` 可临时覆盖；旧配置中的
    `toc_upgrade_config.target_macro` 仅作为兼容回退读取。
+
+### `manual_run_config`
+
+1. `md_import_file`：仅在人工显式执行 `md_import.py --manual` 时作为单文件导入源；
+   建议填写绝对路径，留空表示禁用。AI 助手执行导入时显式传入文件或目录，不使用该默认值。
 
 ### `import_config`
 
@@ -110,5 +115,7 @@
 
 - 后续执行直接读取 `scripts/config.py`，不重复询问；只有用户主动要求时才用 CLI 覆盖。
 - 取值优先级：用户显式 CLI 参数 > `config.py` > 代码默认值。
+- `--manual` 必须显式启用，并与 Markdown 位置参数、`--dir`、`--resume` 互斥；
+  配置路径为空、不是 `.md` 或文件不存在时，在连接服务器前失败。
 - 401、403、连接超时或配置门禁失败时，停止页面操作并引导重新配置。
 - `config.py` 被 `.gitignore` 排除，git 无法恢复；丢失后必须重新运行配置向导。

@@ -45,6 +45,14 @@ common_config = {
 }
 
 
+# ==================== 人工运行脚本配置 ====================
+manual_run_config = {
+    # 仅供人工执行 md_import.py --manual 时读取。
+    # 建议填写绝对路径；留空表示禁用人工默认文件。AI 助手应显式传入 Markdown 路径。
+    "md_import_file": "",
+}
+
+
 # ==================== md_import 配置 ====================
 import_config = {
     # 导入页面时的默认空间 Key。可被 --space 参数覆盖。

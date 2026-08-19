@@ -5,7 +5,7 @@
 
 覆盖:
   - common:        429 限流重试、分页收集、token 环境变量覆盖
-  - md_import:     占位符保护/还原、公式/代码转换、版本号流程、标题内存匹配
+  - md_import:     人工入口、占位符保护/还原、公式/代码转换、版本号流程、标题内存匹配
   - math_upgrade:  $/$$/```latex``` 转换、旧宏升级、原生 alignment、span 限制删除、verify
   - toc_upgrade:   toc / Easy Heading 双向转换、冲突保护、参数校验、幂等性
   - md_export:     storage → Markdown（宏还原、图片引用改写、树导出结构）
@@ -30,7 +30,7 @@ import requests
 from common import (load_config, request_with_retry, collect_space_pages,
                     build_block_template)
 from debug_utils import cleanup_debug
-from md_import import MarkdownImporter
+from md_import import MarkdownImporter, resolve_import_source
 from md_preflight import (PreflightRun, review_markdown, validate_storage,
                           REVIEW_CLEAN, REVIEW_FIXABLE, REVIEW_BLOCKED)
 from math_upgrade import ConfluenceMathUpdater
@@ -48,6 +48,7 @@ MOCK_CFG = {
         'confluence_token': 'test-token',
         'toc_target_macro': 'easy_heading',
     },
+    'manual_run_config': {'md_import_file': ''},
     'import_config': {'space': 'TEST', 'math_align': 'left',
                       'preflight_review': False,
                       'materialize_root_page': False},
@@ -352,6 +353,7 @@ class TestCommon(unittest.TestCase):
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 f.write("common_config = {'confluence_url': 'http://x',"
                         " 'confluence_token': 't'}\n")
+                f.write("manual_run_config = {'md_import_file': 'E:/doc.md'}\n")
                 f.write("export_config = {'output_dir': 'E:/out',"
                         " 'recursive': False, 'space': 'ES'}\n")
                 f.write("toc_upgrade_config = {'target_macro': 'toc'}\n")
@@ -360,6 +362,42 @@ class TestCommon(unittest.TestCase):
         self.assertEqual(cfg['export_config']['output_dir'], 'E:/out')
         self.assertEqual(cfg['export_config']['space'], 'ES')
         self.assertEqual(cfg['toc_upgrade_config']['target_macro'], 'toc')
+        self.assertEqual(cfg['manual_run_config']['md_import_file'], 'E:/doc.md')
+
+
+class TestManualImportSource(unittest.TestCase):
+
+    def test_explicit_file_ignores_manual_config(self):
+        with patch('md_import.load_config') as loader:
+            self.assertEqual(resolve_import_source(md_file='cli.md'), 'cli.md')
+        loader.assert_not_called()
+
+    def test_manual_uses_existing_markdown_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'doc.md'
+            source.write_text('# title\n', encoding='utf-8')
+            cfg = {'manual_run_config': {'md_import_file': str(source)}}
+            resolved = resolve_import_source(manual=True, config=cfg)
+        self.assertEqual(Path(resolved), source.resolve())
+
+    def test_manual_rejects_conflicting_sources(self):
+        cfg = {'manual_run_config': {'md_import_file': 'doc.md'}}
+        for kwargs in ({'md_file': 'cli.md'}, {'dir_path': 'tree'},
+                       {'resume_file': 'tree_plan.json'}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+                    ValueError, '不能与'):
+                resolve_import_source(manual=True, config=cfg, **kwargs)
+
+    def test_manual_rejects_empty_missing_and_non_markdown_paths(self):
+        cases = (
+            ({'manual_run_config': {'md_import_file': ''}}, '为空'),
+            ({'manual_run_config': {'md_import_file': 'missing.md'}}, '文件不存在'),
+            ({'manual_run_config': {'md_import_file': __file__}}, '必须指向 .md'),
+        )
+        for cfg, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                    ValueError, message):
+                resolve_import_source(manual=True, config=cfg)
 
 
 class TestMdImport(unittest.TestCase):

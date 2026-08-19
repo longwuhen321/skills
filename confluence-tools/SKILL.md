@@ -74,7 +74,7 @@ scripts/config_parser.py      scripts/debug_utils.py
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/check_config_sync.py"
 ```
 
-门禁检查六个配置组的键集合和值类型；退出码 1/2 时中断，不能接受静默默认值降级。
+门禁检查七个配置组的键集合和值类型；退出码 1/2 时中断，不能接受静默默认值降级。
 `config.py` 不存在时按配置路由执行向导，不创建半成品。
 
 ## 功能路由
@@ -90,6 +90,7 @@ scripts/config_parser.py      scripts/debug_utils.py
 
 ```bash
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" "<md文件>" [--page-id ID] [--parent-id ID] [--page-name NAME] [--space KEY] [--force]
+"<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --manual [--page-id ID] [--parent-id ID] [--page-name NAME] [--space KEY] [--force]
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --dir "<根文件夹>" [--plan-only] [--yes] [--force]
 "<python_path>" -X utf8 "<SKILL_DIR>/scripts/md_import.py" --resume "<tree_plan.json>" [--yes] [--force]
 ```
@@ -97,6 +98,8 @@ scripts/config_parser.py      scripts/debug_utils.py
 核心红线：
 
 - `--page-id` 精确定位；否则查询必须区分 `FOUND`、`NOT_FOUND`、`ERROR`。
+- `--manual` 仅供人工运行，读取 `manual_run_config.md_import_file`；与显式 Markdown 路径、
+  `--dir`、`--resume` 互斥。AI 助手执行导入时始终显式传入文件或目录范围。
 - 只有 `NOT_FOUND` 可以新建；同名多候选、分页或 API 错误禁止猜测。
 - 409 默认拒绝覆盖；只有用户明确要求并传 `--force` 才从最新版本重试一次。
 - `preflight_review=true` 时先只读全量审核：全净直接上传原件；发现问题则在同级创建完整
@@ -186,6 +189,7 @@ scripts/config_parser.py      scripts/debug_utils.py
 ```bash
 python -X utf8 scripts/dependency_check.py
 python -X utf8 scripts/md_import.py my_doc.md --space ES
+python -X utf8 scripts/md_import.py --manual
 python -X utf8 scripts/math_upgrade.py --page-id 12345
 python -X utf8 scripts/toc_upgrade.py --page-id 12345 --target easy_heading
 python -X utf8 scripts/md_export.py --page-id 12345

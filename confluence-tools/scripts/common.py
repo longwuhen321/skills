@@ -494,15 +494,16 @@ def collect_page_tree(session, base_url, root_id, max_depth=0):
 def load_config():
     """从 scripts/config.py 读取配置，返回 dict
 
-    配置文件定义了六个分组字典：
+    配置文件定义了七个分组字典：
         common_config   — 通用（url、token、python_path 等）
+        manual_run_config — 人工运行入口默认值
         import_config   — md_import 专属（space）
         upgrade_config  — math_upgrade 专属（对齐、递归、页面等）
         toc_upgrade_config — toc_upgrade 专属（目标宏、范围、Easy 参数）
         export_config   — md_export 专属（输出目录、递归、空间）
         debug_config    — 调试日志（阈值、保留数）
 
-    返回值即为这六个 dict 组成的 dict，脚本按需取用。
+    返回值即为这七个 dict 组成的 dict，脚本按需取用。
     缺失文件时报错退出并引导用户首次配置。
     """
     if not os.path.exists(CONFIG_PATH):
@@ -534,6 +535,7 @@ def load_config():
 
     return {
         'common_config': common,
+        'manual_run_config': ns.get('manual_run_config', {}),
         'import_config': ns.get('import_config', {}),
         'upgrade_config': ns.get('upgrade_config', {}),
         'toc_upgrade_config': ns.get('toc_upgrade_config', {}),
