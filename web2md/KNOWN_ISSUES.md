@@ -25,6 +25,13 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-19] Wikipedia 无边框公式布局被转换成 Markdown 表格并显示空表头注释（已修复）
+
+- **现象**：网页中连续显示的卷积公式、线性/时不变条件和 Eq 编号，在 Markdown 中被拆成多列表格；为满足空表头校验加入的 `<!-- intentionally blank header -->` 又被部分编辑器直接渲染成可见文字，内容看起来被割裂。Wikipedia 消息框也被误转为空表头表格。
+- **根因**：Wikipedia 源码使用 `<table>` 对齐公式、空白占位格和编号，CSS 在浏览器中隐藏表格边框；`markdownify` 不读取 CSS/`role="presentation"` 的布局意图，只按 HTML 标签机械生成 Markdown 表格。部分公式表有 `numblk` / presentation 标记，另一些无 class/role，只能依靠单元格结构判断。
+- **修复**：`scripts/web2md.py` 新增 `flatten_wikipedia_layout_tables`。显式 presentation/`numblk` 公式表转 `$$`；无标记表仅在「无表头/caption + 有空白格 + 每行有公式 + 其余仅允许 Eq/交换律等注释」时转 `aligned`；`ambox` 等消息框转引用块；真实数据表和非 Wikipedia 页面保持原样。定义列表中的占位符同时去除 markdownify 的 `:   ` 前缀，但保留后续空行，防止段落合并。新增三组正反例及真实页面回归，selftest 103 项全绿，最终验证无 FAIL/REVIEW。
+- **排查方法**：产物出现原网页没有边框的公式表时，先检查源码 table 是否为 `role="presentation"` / `numblk`，或是否无 `th`/caption、含空白占位格且每行均为公式；转换后 `rg '^\|'` 应只剩真实数据表，`rg 'intentionally blank header|WEB2MDWIKILAYOUTBLOCK|^:\s*$'` 应无命中，再依次运行 `fix_escapes.py`、`list_display_fixes.py --apply` 和 `final_verify.py`。
+
 ## [2026-08-11] 配置执行、公式标签合并和输出路径冲突可导致副作用或内容覆盖（已修复）
 
 - **现象**：配置同步与运行期读取会执行 Python 配置文本；`merge_paragraphs` 可能删除公式标签行的 hard break 并与后文合并；不同标题清洗后可能落到同一目录，`CON .txt` 等名称在 Windows 创建失败；渲染导航会把不同 query 页面误判为同页或跨版本收集；跨节点 TeX 可能把 HTML Comment/Doctype 文本吞进公式。

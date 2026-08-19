@@ -228,11 +228,11 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 在通读全文时，除公式外一并检查 Markdown 结构：
 
 1. 每个表格有合法的分隔行、列数一致、无 `:   ` 或四空格代码块缩进、表格后与下一块之间有空行（脚本 `ensure_table_separators` 已保证生成，final_verify 兜底检查「表格后缺空行」）
-2. 一个数学元组 / 序列 / 等式被拆进多个单元格时，按语义重建表格（不做页面特异的自动改写）
-   - **表格单元格内的公式**（`table_formula_inline` 开启时由脚本行内化为 `$...$`）：单行公式直接留在单元格内；
-     **含 `\\` 行断的多行公式**需由 AI 改写为 `$\begin{aligned} ... \end{aligned}$`（单物理行，`\\` 换行、
-     `&` 对齐；外层跨行括号改用手动大小 `\Bigg( ... \Bigg)`，禁用跨行 `\left...\right`——
-     它必须同行成对，跨行会渲染失败或回退单行），`\color` 等宏保持原样
+2. Wikipedia 页面先由脚本区分**布局表格**与**语义表格**：
+   - `role="presentation"` / `class="numblk"` 且含公式的表格，自动展开为 `$$` 公式块；无显式标记但同时满足「无 `th`/`caption`、含空白占位单元格、每行都有公式、其余内容仅为 Eq 编号或交换律/结合律/分配律注释」时，同样自动展开，多行公式用 `aligned` 重建
+   - Wikipedia `ambox` / `tmbox` / `ombox` 等消息框转为引用块，不生成空表头
+   - 有 `th` / `caption` 的数据表及不满足可靠判据的表格保持 Markdown 表格；禁止用 `<!-- intentionally blank header -->` 等注释伪造表头
+   - 对保留下来的语义表格，`table_formula_inline` 开启时把单元格显示公式行内化为 `$...$`；若一个数学元组 / 序列 / 等式仍被拆进多个单元格，按语义人工重建。含 `\\` 行断的多行公式改写为 `$\begin{aligned} ... \end{aligned}$`（单物理行，`\\` 换行、`&` 对齐；外层跨行括号改用手动大小 `\Bigg( ... \Bigg)`，禁用跨行 `\left...\right`），`\color` 等宏保持原样
 3. 每个本地图片引用目标真实存在；下载失败且未生成图片引用的视为无害，但**不留失效的本地引用**
 4. 围栏代码块闭合；散文占位符（如 `<path>`）已 code 化——行内代码、围栏代码、LaTeX 内部的占位符形状文本忽略
 5. Sphinx 页面：标题文本链接到精确源章节、无 `` 图标残留、相对非图片链接解析到源站点、无 `#cmdmount` 之类的旧本地命令锚点；公式类遗留（`\(...\)`、`(N)#\[` 锚点、裸 LaTeX 命令、`aligned` 内 `\label`）按 `references/formula-conversion-rules.md` §3 检查
@@ -351,7 +351,7 @@ Wikipedia 用 `<b>` `<i>` `<sup>` 渲染的简单公式，markdownify 转成了 
 
 ## 测试（本地，git 追踪）
 
-`scripts/test/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、导航解析 collect_children、渲染后 DOM 降级、`--children-from` 清单解析、同节点/跨节点裸定界符转换、段落合并、配置安全解析和发布检查）：
+`scripts/test/` 存放离线测试（掩码行为、`--apply` 升级、验证器各检查项、DOM 规范化、Wikipedia 布局表格分类、导航解析 collect_children、渲染后 DOM 降级、`--children-from` 清单解析、同节点/跨节点裸定界符转换、段落合并、配置安全解析和发布检查）：
 
 ```powershell
 & "<python路径>" "<skill-directory>/scripts/test/selftest.py"

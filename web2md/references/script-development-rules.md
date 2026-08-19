@@ -18,6 +18,7 @@
 | 配置同步门禁 | `check_config_sync.py` | 对比 `scripts/config.py` 与 `config.example.py` 的 `web2md_config` **键集合 + 值类型**；只比结构不比 `python_path` 值（占位符 vs 真实路径天然不同）；不一致退出码 1（缺失/多余/类型不匹配逐条列出），文件缺失/损坏退出码 2；`--config-text` 从 stdin 读取供向导写入后复核 |
 | 发布敏感检查 | `package_check.py` | `--root` 只读扫描待发布目录：先按路径拒绝 `config.py`、`.env*`、logs、缓存、Token 文件、符号链接及 junction/reparse point；禁用目录不进入，被拒文件不打开；再检查允许文本中的 Token 前后缀键（如 `api_token` / `auth_token` / `confluence_token`）的引号或无引号真实值及已知 Token 格式。0/1/2 分别为通过/发现禁项/无法完整读取 |
 | `is_wiki` 域名判断 | `html_to_markdown` | 语言栏/编辑链接清理、`[[edit]]` 移除仅对 `wikipedia.org` / `wikimedia.org` 生效 |
+| Wikipedia 布局表格分类 | `flatten_wikipedia_layout_tables` | 仅在 `is_wiki` 分支运行：`role="presentation"` / `numblk` 公式表直接展开；无标记表须同时满足无表头/caption、含空白占位格、每行有公式且其余仅为 Eq 编号或交换律/结合律/分配律注释，才转为 `$$`/`aligned`。`ambox` 等消息框转引用块；有 `th`/`caption` 或判据不足的语义表保持原样，禁止用空表头注释绕过验证 |
 | 定义列表表格去缩进 | `normalize_definition_list_tables` | 去掉 markdownify 的 `:   ` 与四空格嵌套，让 Typora 能解析表格 |
 | `$$` 独占一行 | `html_to_markdown` | `([^\n])\$\$` → 前插 `\n\n`，`\$\$([^\n])` → 后插 `\n\n`，确保 Typora 识别 |
 | Windows 安全输出名 | `sanitize_filename` / `resolve_output_name` | 处理非法字符与保留名；保留名判断前对第一个点前的 stem 去除 Windows 会忽略的尾随空格/点。按 `root/name/name.assets/<图片文件>` 计算路径预算；清洗冲突时追加规范化源 URL 的稳定 SHA-256 前缀，不覆盖既有不同来源目录 |

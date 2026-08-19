@@ -241,6 +241,76 @@ class SphinxConversionTests(unittest.TestCase):
             mapping = download_images(soup, Path(tmp), 'https://example.com', None)
         self.assertEqual(mapping, {})
 
+    def test_wikipedia_layout_tables_flatten_but_semantic_table_stays(self):
+        html = r'''
+        <main>
+          <dl><dt>Formula</dt><dd><table id="formula-layout"><tbody>
+            <tr>
+              <td>${\displaystyle y(t)=(x*h)(t)}$</td>
+              <td>${\displaystyle =\int x(t-\tau)h(\tau)\,d\tau}$</td>
+            </tr>
+            <tr>
+              <td></td>
+              <td>${\displaystyle =\int x(\tau)h(t-\tau)\,d\tau}$
+                (using <a href="https://en.wikipedia.org/wiki/Convolution">commutativity</a>)
+              </td>
+            </tr>
+            <tr>
+              <td></td>
+              <td>${\displaystyle =\int h(\tau)x(t-\tau)\,d\tau}$
+                (<a href="https://en.wikipedia.org/wiki/Convolution">commutativity</a>)
+              </td>
+            </tr>
+          </tbody></table></dd></dl>
+          <p>After layout.</p>
+          <table class="numblk" role="presentation"><tbody><tr>
+            <td>${\displaystyle O_t\{x\}=y(t)}$</td><td></td><td>Eq.2</td>
+          </tr></tbody></table>
+          <table><caption>Measurements</caption>
+            <tr><th>Name</th><th>Value</th></tr>
+            <tr><td>gain</td><td>${\displaystyle H(s)}$</td></tr>
+          </table>
+        </main>
+        '''
+        markdown = html_to_markdown(
+            BeautifulSoup(html, 'lxml'), {},
+            'https://en.wikipedia.org/wiki/Example', 'unused.assets',
+        )
+        before_semantic = markdown.split('Measurements', 1)[0]
+        self.assertNotIn('|', before_semantic)
+        self.assertNotIn(':   ', before_semantic)
+        self.assertNotIn('intentionally blank header', markdown)
+        self.assertIn('$$\n\\begin{aligned}', markdown)
+        self.assertIn('[commutativity](https://en.wikipedia.org/wiki/Convolution)', markdown)
+        self.assertIn('commutativity](https://en.wikipedia.org/wiki/Convolution))\n\nAfter layout.', markdown)
+        self.assertIn('Eq.2', markdown)
+        self.assertIn('| Name | Value |', markdown)
+        self.assertIn('| gain | ${\\displaystyle H(s)}$ |', markdown)
+
+    def test_wikipedia_message_box_becomes_blockquote(self):
+        html = r'''
+        <main><table class="ambox ambox-style"><tr>
+          <td><img src="icon.png" alt="notice"></td>
+          <td>This article needs <a href="https://example.com/citations">more citations</a>.</td>
+        </tr></table></main>
+        '''
+        markdown = html_to_markdown(
+            BeautifulSoup(html, 'lxml'), {},
+            'https://en.wikipedia.org/wiki/Example', 'unused.assets',
+        )
+        self.assertIn('> This article needs [more citations](https://example.com/citations).', markdown)
+        self.assertNotIn('|', markdown)
+
+    def test_non_wikipedia_formula_layout_remains_table(self):
+        html = r'''
+        <main><table><tr><td>${\displaystyle x}$</td><td>${\displaystyle y}$</td></tr>
+        <tr><td></td><td>${\displaystyle z}$</td></tr></table></main>
+        '''
+        markdown = html_to_markdown(
+            BeautifulSoup(html, 'lxml'), {}, BASE_URL, 'unused.assets',
+        )
+        self.assertIn('|', markdown)
+
     def test_save_debug_snapshot(self):
         # 用临时 skill 根验证路径规则，绝不写入真实 <skill>/logs。
         with tempfile.TemporaryDirectory() as tmp:

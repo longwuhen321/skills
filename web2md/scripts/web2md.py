@@ -935,6 +935,178 @@ def ensure_table_separators(markdown: str) -> str:
     return '\n'.join(out)
 
 
+WIKIPEDIA_MESSAGE_BOX_CLASSES = {
+    'ambox', 'tmbox', 'ombox', 'cmbox', 'fmbox', 'imbox', 'mbox-small',
+}
+WIKIPEDIA_EQUATION_LABEL = re.compile(r'^Eq\.?\s*\d+$', re.IGNORECASE)
+
+
+def _markdownify_fragment(tag) -> str:
+    """Convert one table cell without letting markdownify see the table container."""
+    fragment = ''.join(str(child) for child in tag.contents)
+    converted = md(fragment, heading_style="ATX", bullets="-", strip=['meta', 'link'])
+    return re.sub(r'\s*\n\s*', ' ', converted).strip()
+
+
+def _direct_table_rows(table):
+    """Return rows/cells owned by ``table`` and ignore any nested tables."""
+    rows = []
+    for row in table.find_all('tr'):
+        if row.find_parent('table') is not table:
+            continue
+        cells = row.find_all(['td', 'th'], recursive=False)
+        if cells:
+            rows.append(cells)
+    return rows
+
+
+def _split_formula_cell(text: str):
+    """Split a leading Markdown math span from an optional note/label."""
+    text = text.strip()
+    if text.startswith('$$'):
+        match = re.match(r'^\$\$(.*?)\$\$(.*)$', text, re.DOTALL)
+    elif text.startswith('$'):
+        match = re.match(r'^\$(.*?)\$(.*)$', text, re.DOTALL)
+    else:
+        match = None
+    if not match:
+        return None, text
+    return match.group(1).strip(), match.group(2).strip()
+
+
+def _is_layout_note(text: str) -> bool:
+    """Accept only narrow equation labels/parenthetical notes beside formula cells."""
+    plain = re.sub(r'\[([^]]+)\]\([^)]+\)', r'\1', text)
+    plain = re.sub(r'[*_`]', '', plain).strip()
+    return bool(
+        WIKIPEDIA_EQUATION_LABEL.fullmatch(plain)
+        or re.match(r'^\(?\s*using\b', plain, re.IGNORECASE)
+        or re.match(
+            r'^\(?\s*(?:commutativity|associativity|distributivity)\b',
+            plain,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _formula_layout_rows(table):
+    """Classify a Wikipedia formula layout table and return converted cell rows."""
+    if table.find('th') or table.find('caption'):
+        return None
+    rows = _direct_table_rows(table)
+    if not rows:
+        return None
+
+    converted_rows = []
+    formula_cells = blank_cells = unsupported_cells = 0
+    rows_with_formula = 0
+    for row in rows:
+        converted = []
+        row_has_formula = False
+        for cell in row:
+            cell_markdown = _markdownify_fragment(cell)
+            if not cell_markdown:
+                blank_cells += 1
+                converted.append(('', ''))
+                continue
+            formula, rest = _split_formula_cell(cell_markdown)
+            if formula is not None:
+                formula_cells += 1
+                row_has_formula = True
+                if rest and not _is_layout_note(rest):
+                    unsupported_cells += 1
+                converted.append((formula, rest))
+            else:
+                if not _is_layout_note(cell_markdown):
+                    unsupported_cells += 1
+                converted.append((None, cell_markdown))
+        if row_has_formula:
+            rows_with_formula += 1
+        converted_rows.append(converted)
+
+    classes = {str(value).lower() for value in table.get('class', [])}
+    explicit_presentation = (
+        str(table.get('role', '')).lower() == 'presentation'
+        or 'numblk' in classes
+    )
+    if explicit_presentation:
+        return converted_rows if formula_cells else None
+
+    # Unlabelled Wikipedia formula layouts use blank spacer cells but no semantic
+    # headers/caption. Require every row to carry math and reject unknown prose so
+    # genuine data tables containing occasional formulas remain tables.
+    if (formula_cells >= 2 and blank_cells >= 1 and unsupported_cells == 0
+            and rows_with_formula == len(rows)):
+        return converted_rows
+    return None
+
+
+def _render_formula_layout(rows) -> str:
+    formula_rows = []
+    trailing = []
+    for row in rows:
+        formulas = []
+        for formula, rest in row:
+            if formula:
+                formulas.append(formula)
+            if rest:
+                trailing.append(rest)
+        if formulas:
+            formula_rows.append(r' \qquad '.join(formulas))
+
+    if len(formula_rows) == 1:
+        body = formula_rows[0]
+    elif any(r'\begin{aligned}' in row for row in formula_rows):
+        separator = ' ' + r'\\' + '\n'
+        body = r'\begin{gathered}' + '\n' + separator.join(formula_rows) + '\n' + r'\end{gathered}'
+    else:
+        aligned_rows = []
+        for index, row in enumerate(formula_rows):
+            suffix = r' \\' if index < len(formula_rows) - 1 else ''
+            aligned_rows.append('&' + row + suffix)
+        body = r'\begin{aligned}' + '\n' + '\n'.join(aligned_rows) + '\n' + r'\end{aligned}'
+
+    result = ['$$', body, '$$']
+    result.extend(trailing)
+    return '\n'.join(result)
+
+
+def _render_wikipedia_message_box(table) -> str:
+    cells = [cell for row in _direct_table_rows(table) for cell in row]
+    candidates = [_markdownify_fragment(cell) for cell in cells]
+    message = max((value for value in candidates if value), key=len, default='')
+    if not message:
+        return ''
+    return '\n'.join('> ' + line if line else '>' for line in message.splitlines())
+
+
+def flatten_wikipedia_layout_tables(content) -> dict:
+    """Replace presentation-only Wikipedia tables with Markdown block placeholders.
+
+    Formula alignment tables become display math; Wikipedia message boxes become
+    blockquotes. Semantic tables are left untouched for markdownify.
+    """
+    replacements = {}
+    for table in list(content.find_all('table')):
+        if table.find_parent('table') is not None:
+            continue
+        classes = {str(value).lower() for value in table.get('class', [])}
+        block = ''
+        if classes & WIKIPEDIA_MESSAGE_BOX_CLASSES:
+            block = _render_wikipedia_message_box(table)
+        else:
+            rows = _formula_layout_rows(table)
+            if rows:
+                block = _render_formula_layout(rows)
+        if not block:
+            continue
+        token = f'WEB2MDWIKILAYOUTBLOCK{len(replacements) + 1:04d}'
+        placeholder = BeautifulSoup(f'<p>{token}</p>', 'lxml').p
+        table.replace_with(placeholder)
+        replacements[token] = block
+    return replacements
+
+
 def html_to_markdown(soup, img_mapping: dict, base_url: str, assets_folder_name: str) -> str:
     is_wiki = 'wikipedia.org' in base_url or 'wikimedia.org' in base_url
 
@@ -976,9 +1148,18 @@ def html_to_markdown(soup, img_mapping: dict, base_url: str, assets_folder_name:
             for tag in content.select(selector):
                 tag.decompose()
 
+    layout_blocks = flatten_wikipedia_layout_tables(content) if is_wiki else {}
     html_str = str(content)
 
     markdown = md(html_str, heading_style="ATX", bullets="-", strip=['meta', 'link'])
+    for token, block in layout_blocks.items():
+        # A Wikipedia layout table can sit inside a definition-list <dd>.
+        # markdownify prefixes that placeholder with ``:   ``; consume the
+        # marker together with the token so it does not survive as an empty row.
+        marker = re.compile(r'^:[ \t]*' + re.escape(token) + r'[ \t]*$', re.MULTILINE)
+        markdown, replaced = marker.subn(lambda _match: block, markdown)
+        if not replaced:
+            markdown = markdown.replace(token, block)
     markdown = normalize_definition_list_tables(markdown)
     markdown = ensure_table_separators(markdown)
 

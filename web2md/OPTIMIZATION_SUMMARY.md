@@ -33,6 +33,24 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+### 2026-08-19：Wikipedia 公式布局表格与消息框语义还原
+
+| 类别 | 内容 |
+|------|------|
+| 脚本改动 | `scripts/web2md.py` 新增 `flatten_wikipedia_layout_tables`：在 `markdownify` 前把 Wikipedia 公式排版表格替换为占位块，转换后还原成 `$$` / `aligned`；`ambox` 等消息框转引用块 |
+| 安全边界 | 显式 `role="presentation"` / `numblk` 公式表直接处理；无标记表必须同时满足无 `th`/`caption`、含空白占位格、每行有公式且其余内容仅为 Eq 编号或交换律/结合律/分配律注释。真实数据表、非 Wikipedia 表格和判据不足的表格保持原样 |
+| 结构修复 | 占位符位于定义列表 `<dd>` 时一并消费 markdownify 生成的 `:   ` 标记；只匹配水平空白，保留块后段落边界，避免公式注释与下文被段落合并器粘连；不再使用可见的空表头 HTML 注释 |
+| 测试与验证 | `test_sphinx_conversion.py` 新增公式布局、消息框、真实表格、非 Wikipedia 表格、无 `using` 的 commutativity 注释及定义列表段落边界回归；selftest 103/103 通过。通过配置代理真实抓取 Wikipedia LTI 页面，10/10 图片下载成功，阶段 A/B 后 `final_verify.py` 无 FAIL/REVIEW，仅保留 Authority control 真实表格 |
+
+**过程要点**：
+- 根因不是网页真的展示了数据表，而是 Wikipedia 用 HTML `<table>` 做无边框公式对齐，浏览器靠 CSS 隐藏边框；markdownify 不读取布局语义，机械生成了 Markdown 表头、分隔行和单元格。
+- 第一轮真实回归发现离散卷积注释只有 `commutativity`、没有 `using`，以及公式表嵌在 `<dd>` 内会残留 `:   `；两种结构均补为窄范围判据并加入回归测试。
+- 公式载荷仍沿用阶段 A 的 `fix_escapes.py` 清理 `\_` / `\*`，布局分类不承担公式内容改写，保持现有职责边界。
+
+**遗留事项更新**：
+- （原）数学等式被拆进 Wikipedia 表格后依赖 AI 逐页重建 → **可靠结构已自动处理**；语义不明或非 Wikipedia 表格继续保守保留并交 AI 复核。
+- （新增）其他站点若也使用布局表格，暂不复用 Wikipedia 判据；先收集真实样本，再按站点结构扩展，避免误伤数据表。
+
 ### 2026-08-11：安全配置、发布门禁与自定义站点能力补强
 
 | 类别 | 内容 |
@@ -360,4 +378,3 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 - `config.py` 的 `collect_children` 默认 false，需用户开启
 - `config.py` 的 `merge_paragraphs` 默认 false，靠切碎检测提示启用（2026-08-07）
 - 跨节点裸定界符的可靠子集已自动转换；跨非正文节点或边界不可靠时仍只报告 `REVIEW`（安全边界，2026-08-11）
-
