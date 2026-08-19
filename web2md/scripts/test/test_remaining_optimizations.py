@@ -408,6 +408,81 @@ class RenderedNavigationTests(unittest.TestCase):
         self.assertIn('REVIEW', '\n'.join(result['notes']))
 
 
+class SkillDocumentationRouteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.skill_root = Path(__file__).resolve().parents[2]
+        cls.skill_text = (cls.skill_root / 'SKILL.md').read_text(encoding='utf-8')
+
+    def test_entry_stays_compact_and_routes_references_directly(self):
+        self.assertLessEqual(len(self.skill_text.splitlines()), 240)
+        expected = (
+            'configuration-guide.md',
+            'children-collection-workflow.md',
+            'custom-site-rules.md',
+            'formula-conversion-rules.md',
+            'maintenance-rules.md',
+            'script-development-rules.md',
+        )
+        for name in expected:
+            with self.subTest(reference=name):
+                self.assertTrue((self.skill_root / 'references' / name).is_file())
+                self.assertIn(f'](references/{name})', self.skill_text)
+
+        standard = self.skill_root.parent / 'SKILL_MODIFICATION_STANDARD.md'
+        self.assertTrue(standard.is_file())
+        self.assertIn('](../SKILL_MODIFICATION_STANDARD.md)', self.skill_text)
+
+    def test_workflow_references_declare_read_conditions(self):
+        mandatory = (
+            'configuration-guide.md',
+            'children-collection-workflow.md',
+            'custom-site-rules.md',
+            'maintenance-rules.md',
+            'script-development-rules.md',
+        )
+        for name in mandatory:
+            with self.subTest(reference=name):
+                text = (self.skill_root / 'references' / name).read_text(encoding='utf-8')
+                self.assertIn('## 强制读取条件', text)
+                self.assertIn('必须', text)
+                self.assertIn('完整读取', text)
+
+        formula = (self.skill_root / 'references' / 'formula-conversion-rules.md').read_text(
+            encoding='utf-8'
+        )
+        self.assertIn('## 按索引读取条件', formula)
+        self.assertIn('必须读取对应章节', formula)
+
+    def test_long_references_have_contents(self):
+        for name in ('children-collection-workflow.md', 'formula-conversion-rules.md'):
+            with self.subTest(reference=name):
+                text = (self.skill_root / 'references' / name).read_text(encoding='utf-8')
+                self.assertGreater(len(text.splitlines()), 100)
+                self.assertIn('## 目录', text)
+
+    def test_entry_keeps_core_redlines(self):
+        required = (
+            '仅显式调用',
+            '配置同步失败必须停止',
+            '无法核实子页面不等于没有子页面',
+            '公式与代码保护载荷',
+            '脚本只执行机械转换，AI 助手审核全部结果',
+            '决定不修改',
+            '零 FAIL、零 REVIEW',
+            '禁止覆盖不同来源',
+            '未经用户明确要求',
+            '完整 `scripts/test/selftest.py`',
+        )
+        for redline in required:
+            with self.subTest(redline=redline):
+                self.assertIn(redline, self.skill_text)
+
+    def test_implicit_invocation_remains_disabled(self):
+        openai_yaml = (self.skill_root / 'agents' / 'openai.yaml').read_text(encoding='utf-8')
+        self.assertRegex(openai_yaml, r'(?m)^\s*allow_implicit_invocation:\s*false\s*$')
+
+
 class CrossNodeTexTests(unittest.TestCase):
     def test_comment_crossing_is_left_unchanged_for_review(self):
         soup = BeautifulSoup(

@@ -1,9 +1,10 @@
 # 脚本开发规则（脚本关键技术要点）
 
-> 按需读取：**修改或新增 `scripts/*.py` 之前必读本文件**（对齐既有防御机制与红线，
-> 避免破坏设计）；正常转换流程不读。
-> 更新约束：改动脚本后须同步本文件（防御性设计表按实际机制增删改）；
-> 修改 `scripts/*.py` 后必须跑 `scripts/test/selftest.py` 全绿才算完成。
+## 强制读取条件
+
+**修改或新增 `scripts/*.py` 之前必须完整读取本文件**，对齐既有防御机制与红线；
+正常转换流程不读取。改动脚本后必须按实际机制同步本文件，并运行
+`scripts/test/selftest.py`，全部用例通过才算完成。
 
 ## 防御性设计
 
@@ -17,6 +18,7 @@
 | 配置字面量解析 | `config_literal.py` / `load_config` / `check_config_sync.py` | AST 只允许一项普通 `web2md_config = {...}` 直接赋值，再用 `ast.literal_eval` 取值；`AnnAssign` 带注解赋值、导入、调用、属性访问、其他赋值和副作用语句在执行前拒绝。运行加载与同步门禁共用同一解析器，禁止重新引入 `exec` |
 | 配置同步门禁 | `check_config_sync.py` | 对比 `scripts/config.py` 与 `config.example.py` 的 `web2md_config` **键集合 + 值类型**；只比结构不比 `python_path` 值（占位符 vs 真实路径天然不同）；不一致退出码 1（缺失/多余/类型不匹配逐条列出），文件缺失/损坏退出码 2；`--config-text` 从 stdin 读取供向导写入后复核 |
 | 发布敏感检查 | `package_check.py` | `--root` 只读扫描待发布目录：先按路径拒绝 `config.py`、`.env*`、logs、缓存、Token 文件、符号链接及 junction/reparse point；禁用目录不进入，被拒文件不打开；再检查允许文本中的 Token 前后缀键（如 `api_token` / `auth_token` / `confluence_token`）的引号或无引号真实值及已知 Token 格式。0/1/2 分别为通过/发现禁项/无法完整读取 |
+| 文档路由回归 | `test_remaining_optimizations.py` | 固定检查 `SKILL.md` 不超过 240 行、一级参考均被入口直接引用、工作流参考声明强制读取条件、长参考带目录、核心红线保留且 `allow_implicit_invocation` 仍为 false，防止后续优化重新膨胀或削弱门禁 |
 | `is_wiki` 域名判断 | `html_to_markdown` | 语言栏/编辑链接清理、`[[edit]]` 移除仅对 `wikipedia.org` / `wikimedia.org` 生效 |
 | Wikipedia 布局表格分类 | `flatten_wikipedia_layout_tables` | 仅在 `is_wiki` 分支运行：`role="presentation"` / `numblk` 公式表直接展开；无标记表须同时满足无表头/caption、含空白占位格、每行有公式且其余仅为 Eq 编号或交换律/结合律/分配律注释，才转为 `$$`/`aligned`。`ambox` 等消息框转引用块；有 `th`/`caption` 或判据不足的语义表保持原样，禁止用空表头注释绕过验证 |
 | 定义列表表格去缩进 | `normalize_definition_list_tables` | 去掉 markdownify 的 `:   ` 与四空格嵌套，让 Typora 能解析表格 |

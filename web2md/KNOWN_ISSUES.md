@@ -25,6 +25,13 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-08-19] `fix_escapes` 全局散文替换的旧记录已失效（覆盖说明）
+
+- **现象**：本文件 2026-08-01 条目仍写着“保留代码外全局兜底”，与当前脚本、SKILL.md 和回归测试相冲突，可能让维护者误以为散文中的合法 `\_` / `\*` 仍会被替换。
+- **根因**：后续实现已经收紧为公式范围，但历史问题条目按“不删除旧条目”约定保留，缺少一条明确的覆盖说明。
+- **修复**：以本条覆盖 2026-08-01 条目中的当前行为描述。现行 `scripts/fix_escapes.py` 先掩码代码，只在已配对的 `$$...$$` 与长度受限 `$...$` 内替换 `\_` / `\*`；散文、代码及未配对 `$` 均保持不变。旧条目只作为当时问题的历史证据，不再作为现行规范。
+- **排查方法**：运行 `test_custom_site.FormulaAndVerifierRegressionTests.test_fixer_only_changes_math_not_prose_or_code` 与 `test_formula_integrity.FormulaIntegrityTests.test_fixer_ignores_code_and_prose_and_fixes_math`；两项通过即确认公式内会修复、散文与代码不动。
+
 ## [2026-08-19] Wikipedia 无边框公式布局被转换成 Markdown 表格并显示空表头注释（已修复）
 
 - **现象**：网页中连续显示的卷积公式、线性/时不变条件和 Eq 编号，在 Markdown 中被拆成多列表格；为满足空表头校验加入的 `<!-- intentionally blank header -->` 又被部分编辑器直接渲染成可见文字，内容看起来被割裂。Wikipedia 消息框也被误转为空表头表格。
