@@ -7,7 +7,7 @@ md2zh_pipeline 离线自测（不依赖网络/外部服务）
       max_block_chars 写入与现值保留）、只读发布检查、分块提取（标题区间优先 + PROTECT 保护）、
       段落级 unit（多行契约：合并/重排/空行拒绝）、summarize 摘要、逐块验证契约、
       glossary 跨文件复用、合并、确定性渲染（字节级一致）、verify/review 完成标记、
-      copy-assets、无覆盖归档。
+      copy-assets、无覆盖归档、skill 文档直接路由与核心红线。
 
 所有用例用 subprocess 黑盒跑 pipeline CLI，mock 掉网络与外部服务。
 """
@@ -24,6 +24,7 @@ PIPELINE = HERE / 'md2zh_pipeline.py'
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_config_sync import ConfigSyncTests
+from test_documentation_routes import SkillDocumentationRoutesTests
 from test_packaging import PackagingCheckTests
 
 SAMPLE = (
@@ -900,5 +901,6 @@ if __name__ == '__main__':
     suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestHelpers))
     suite.addTests(unittest.TestLoader().loadTestsFromTestCase(ConfigSyncTests))
     suite.addTests(unittest.TestLoader().loadTestsFromTestCase(PackagingCheckTests))
+    suite.addTests(unittest.TestLoader().loadTestsFromTestCase(SkillDocumentationRoutesTests))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
