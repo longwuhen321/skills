@@ -57,33 +57,45 @@ EMPTY_PAGE_STORAGE = '<p></p>'
 
 def resolve_import_source(md_file=None, manual=False, dir_path=None,
                           resume_file=None, config=None):
-    """解析单文件导入源；人工默认值只能由显式 ``--manual`` 启用。"""
+    """返回 (文件, 目录)；人工默认值只能由显式 ``--manual`` 启用。"""
     if not manual:
-        return md_file
+        return md_file, dir_path
     if md_file or dir_path or resume_file:
         raise ValueError('--manual 不能与 Markdown 路径、--dir 或 --resume 同时使用')
 
     cfg = load_config() if config is None else config
-    raw_path = cfg.get('manual_run_config', {}).get('md_import_file', '')
+    manual_cfg = cfg.get('manual_run_config', {})
+    mode = manual_cfg.get('md_import_mode', 'file')
+    if mode not in ('file', 'tree'):
+        raise ValueError('manual_run_config.md_import_mode 必须为 file 或 tree')
+    key = 'md_import_dir' if mode == 'tree' else 'md_import_file'
+    raw_path = manual_cfg.get(key, '')
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError(
-            'manual_run_config.md_import_file 为空；请先配置 Markdown 文件路径')
+            f'manual_run_config.{key} 为空；请先配置导入路径')
 
     try:
         path = Path(raw_path.strip()).expanduser().resolve()
-        is_file = path.is_file()
+        exists = path.is_dir() if mode == 'tree' else path.is_file()
     except (OSError, RuntimeError, ValueError) as exc:
         raise ValueError(
-            f'manual_run_config.md_import_file 无法解析: {raw_path!r}') from exc
+            f'manual_run_config.{key} 无法解析: {raw_path!r}') from exc
+    if mode == 'tree':
+        if not exists:
+            raise ValueError(f'manual_run_config.{key} 目录不存在或不是目录: {path}')
+        if not cfg.get('import_config', {}).get('tree_import', False):
+            raise ValueError('人工树导入未启用：请将 import_config.tree_import 设为 True')
+        print(f'ℹ️ 人工运行配置目录: {path}')
+        return None, str(path)
     if path.suffix.lower() != '.md':
         raise ValueError(
             f'manual_run_config.md_import_file 必须指向 .md 文件: {path}')
-    if not is_file:
+    if not exists:
         raise ValueError(
             f'manual_run_config.md_import_file 文件不存在: {path}')
 
     print(f'ℹ️ 人工运行配置文件: {path}')
-    return str(path)
+    return str(path), None
 
 
 class MarkdownImporter:
@@ -1683,7 +1695,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Markdown → Confluence 导入工具')
     parser.add_argument('md_file', nargs='?', help='Markdown 文件路径（与 --dir 二选一）')
     parser.add_argument('--manual', action='store_true',
-                        help='使用 manual_run_config.md_import_file（仅供人工运行）')
+                        help='按 manual_run_config.md_import_mode 选择文件或目录树（仅供人工运行）')
     parser.add_argument('--dir', default=None,
                         help='批量导入文件夹树（保留层级；需 config.py 的 import_config.tree_import 开启）')
     parser.add_argument('--resume', default=None, metavar='TREE_PLAN_JSON',
@@ -1721,7 +1733,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     try:
-        args.md_file = resolve_import_source(
+        args.md_file, args.dir = resolve_import_source(
             md_file=args.md_file, manual=args.manual,
             dir_path=args.dir, resume_file=args.resume)
     except ValueError as exc:

@@ -369,7 +369,8 @@ class TestManualImportSource(unittest.TestCase):
 
     def test_explicit_file_ignores_manual_config(self):
         with patch('md_import.load_config') as loader:
-            self.assertEqual(resolve_import_source(md_file='cli.md'), 'cli.md')
+            self.assertEqual(resolve_import_source(md_file='cli.md'), ('cli.md', None))
+            self.assertEqual(resolve_import_source(dir_path='tree'), (None, 'tree'))
         loader.assert_not_called()
 
     def test_manual_uses_existing_markdown_file(self):
@@ -377,7 +378,8 @@ class TestManualImportSource(unittest.TestCase):
             source = Path(tmp) / 'doc.md'
             source.write_text('# title\n', encoding='utf-8')
             cfg = {'manual_run_config': {'md_import_file': str(source)}}
-            resolved = resolve_import_source(manual=True, config=cfg)
+            resolved, directory = resolve_import_source(manual=True, config=cfg)
+            self.assertIsNone(directory)
         self.assertEqual(Path(resolved), source.resolve())
 
     def test_manual_rejects_conflicting_sources(self):
@@ -398,6 +400,72 @@ class TestManualImportSource(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(
                     ValueError, message):
                 resolve_import_source(manual=True, config=cfg)
+
+
+    def test_manual_tree_selects_directory_and_ignores_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = {'manual_run_config': {'md_import_mode': 'tree',
+                                         'md_import_dir': tmp,
+                                         'md_import_file': 'missing.md'},
+                   'import_config': {'tree_import': True}}
+            source, directory = resolve_import_source(manual=True, config=cfg)
+            self.assertIsNone(source)
+            self.assertEqual(Path(directory), Path(tmp).resolve())
+
+    def test_manual_tree_rejects_invalid_paths_and_disabled_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for path, enabled, message in (
+                    ('', True, '为空'), ('missing-dir', True, '目录不存在'),
+                    (__file__, True, '不是目录'), (tmp, False, 'tree_import')):
+                cfg = {'manual_run_config': {'md_import_mode': 'tree',
+                                             'md_import_dir': path},
+                       'import_config': {'tree_import': enabled}}
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, message):
+                    resolve_import_source(manual=True, config=cfg)
+
+    def test_manual_rejects_invalid_mode(self):
+        for mode in ('auto', '', None, True):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'md_import_mode'):
+                resolve_import_source(manual=True, config={
+                    'manual_run_config': {'md_import_mode': mode}})
+
+    def test_manual_file_mode_ignores_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'doc.md'
+            source.write_text('# title\n', encoding='utf-8')
+            cfg = {'manual_run_config': {'md_import_mode': 'file',
+                                         'md_import_file': str(source),
+                                         'md_import_dir': 'missing-dir'}}
+            self.assertEqual(resolve_import_source(manual=True, config=cfg),
+                             (str(source.resolve()), None))
+
+    def test_manual_tree_cli_dispatches_plan_and_execution(self):
+        import md_import
+        source = Path(md_import.__file__).read_text(encoding='utf-8')
+        entry = source[source.index('if __name__ == "__main__":'):]
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = {'manual_run_config': {'md_import_mode': 'tree',
+                                         'md_import_dir': tmp},
+                   'import_config': {'tree_import': True}}
+            for plan_only, success in ((True, True), (False, True), (False, False)):
+                importer_class = mock.MagicMock()
+                importer = importer_class.return_value.__enter__.return_value
+                importer.import_tree.return_value = success
+                namespace = dict(vars(md_import), __name__='__main__',
+                                 MarkdownImporter=importer_class)
+                argv = ['md_import.py', '--manual']
+                if plan_only:
+                    argv.append('--plan-only')
+                with self.subTest(plan_only=plan_only, success=success), \
+                        patch('md_import.load_config', return_value=cfg), \
+                        patch.object(sys, 'argv', argv), \
+                        self.assertRaises(SystemExit) as result:
+                    exec(compile(entry, md_import.__file__, 'exec'), namespace)
+                self.assertEqual(result.exception.code, 0 if success else 1)
+                importer.import_tree.assert_called_once_with(
+                    str(Path(tmp).resolve()), plan_only=plan_only,
+                    yes=False, resume_file=None)
+                importer.import_markdown.assert_not_called()
 
 
 class TestMdImport(unittest.TestCase):

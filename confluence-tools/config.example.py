@@ -48,6 +48,8 @@ common_config = {
 # ==================== 人工运行脚本配置 ====================
 manual_run_config = {
     # 仅供人工执行 md_import.py --manual 时读取。
+    "md_import_mode": "file",  # file：单文件；tree：目录树（需 tree_import=True）
+    "md_import_dir": "",  # tree 模式的根目录，建议填写绝对路径
     # 建议填写绝对路径；留空表示禁用人工默认文件。AI 助手应显式传入 Markdown 路径。
     "md_import_file": "",
 }

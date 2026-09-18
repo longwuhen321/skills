@@ -26,7 +26,7 @@ description: Confluence 工具集：导入 Markdown、升级数学公式、转�
 | 任务 | 操作前必须完整读取 |
 |---|---|
 | 首次配置、补齐或修改配置 | `references/configuration-guide.md` |
-| Markdown 单页、树导入或 `--resume` | `references/md-import-workflow.md` |
+| Markdown 单页、树导入或 `--resume` | `references/md-import-workflow.md` + `references/md-import-splitting-rules.md` |
 | Markdown 导入且最终 `preflight_review=true` | `references/md-import-workflow.md` + `references/md-import-preflight-rules.md` |
 | 数学公式升级或 `math_upgrade --confirm` | `references/math-upgrade-workflow.md` |
 | 目录宏转换或 `toc_upgrade --confirm` | `references/toc-upgrade-workflow.md` |
@@ -98,12 +98,14 @@ scripts/config_parser.py      scripts/debug_utils.py
 核心红线：
 
 - `--page-id` 精确定位；否则查询必须区分 `FOUND`、`NOT_FOUND`、`ERROR`。
-- `--manual` 仅供人工运行，读取 `manual_run_config.md_import_file`；与显式 Markdown 路径、
+- `--manual` 仅供人工运行，按 `manual_run_config.md_import_mode` 选择 `file`（`md_import_file`）或
+  `tree`（`md_import_dir`，需 `import_config.tree_import=true`）；与显式 Markdown 路径、
   `--dir`、`--resume` 互斥。AI 助手执行导入时始终显式传入文件或目录范围。
 - 只有 `NOT_FOUND` 可以新建；同名多候选、分页或 API 错误禁止猜测。
 - 409 默认拒绝覆盖；只有用户明确要求并传 `--force` 才从最新版本重试一次。
-- `preflight_review=true` 时先只读全量审核：全净直接上传原件；发现问题则在同级创建完整
-  `<原名>__修复` 副本，只修改副本。问题文件全部通过后再全量审核副本。
+- 助手导入前必须全量评估页面容量；格式 CLEAN 且无需拆分时才直传原件。需要修复或拆分时
+  使用同级完整 `<原名>__修复` 副本；处理全部受影响文件并全量复审后，按最终文件规划上传。
+- 容量评估与均衡拆分是助手工作流；现有脚本不自动拆分，格式三态和 CLI 参数保持不变。
 - 修复副本重名必须询问覆盖、另起名称或取消；`__修复` 只作本地标识，不改变页面标题。
 - `materialize_root_page=true` 时根文件夹必须成为页面；缺少同名 Markdown 时只创建空的
   Confluence 根页，不补写本地文件，根级其他 Markdown 作为其直接子页面。

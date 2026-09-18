@@ -56,7 +56,10 @@
 
 ### `manual_run_config`
 
-1. `md_import_file`：仅在人工显式执行 `md_import.py --manual` 时作为单文件导入源；
+1. `md_import_mode`：人工执行 `md_import.py --manual` 时选择 `file`（默认，单文件）或
+   `tree`（目录树）。树模式还需 `import_config.tree_import=true`。
+2. `md_import_dir`：`tree` 模式使用的根目录；建议填写绝对路径，留空时树模式报错。
+3. `md_import_file`：仅在人工显式执行 `md_import.py --manual` 且选择 `file` 时作为单文件导入源；
    建议填写绝对路径，留空表示禁用。AI 助手执行导入时显式传入文件或目录，不使用该默认值。
 
 ### `import_config`
@@ -116,6 +119,8 @@
 - 后续执行直接读取 `scripts/config.py`，不重复询问；只有用户主动要求时才用 CLI 覆盖。
 - 取值优先级：用户显式 CLI 参数 > `config.py` > 代码默认值。
 - `--manual` 必须显式启用，并与 Markdown 位置参数、`--dir`、`--resume` 互斥；
-  配置路径为空、不是 `.md` 或文件不存在时，在连接服务器前失败。
+  模式非法、所选路径为空或类型不匹配时，在连接服务器前失败；文件模式必须是已有 `.md`
+  文件，树模式必须是已有目录且已开启 `import_config.tree_import`。
+  `--manual --plan-only` 可预览树模式计划；不传 `--manual` 时不读取人工默认路径。
 - 401、403、连接超时或配置门禁失败时，停止页面操作并引导重新配置。
 - `config.py` 被 `.gitignore` 排除，git 无法恢复；丢失后必须重新运行配置向导。
