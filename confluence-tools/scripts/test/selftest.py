@@ -594,6 +594,96 @@ class TestMdImport(unittest.TestCase):
         self.assertIn('data:image/png;base64,AAAA', result)
         self.assertEqual(self.importer.failed_images, [])
         self.assertEqual(self.importer.data_images_skipped, 1)
+
+    def test_image_width_configuration_and_validation(self):
+        self.assertEqual(self.importer.image_width, 750)
+        for value in (0, 750, 1000):
+            with self.subTest(value=value), \
+                    patch.dict(MOCK_CFG['import_config'], image_width=value):
+                with MarkdownImporter(space_key='TEST') as importer:
+                    self.assertEqual(importer.image_width, value)
+        for value in (-1, True, False, '750', 750.0, None):
+            with self.subTest(value=value), \
+                    patch.dict(MOCK_CFG['import_config'], image_width=value), \
+                    patch('md_import.requests.Session') as session, \
+                    patch('md_import.os.makedirs') as makedirs:
+                with self.assertRaisesRegex(ValueError, 'image_width'):
+                    MarkdownImporter(space_key='TEST')
+                session.assert_not_called()
+                makedirs.assert_not_called()
+
+    def test_image_width_applies_to_markdown_and_html_images(self):
+        image = Path(self.tmp.name) / 'figure.png'
+        image.write_bytes(b'original image bytes')
+        md_path = str(Path(self.tmp.name) / 'page.md')
+        for width in (750, 1000):
+            self.importer.image_width = width
+            for source in ('![figure](figure.png)',
+                           '<img src="figure.png" />'):
+                with self.subTest(width=width, source=source), \
+                        patch.object(self.importer, '_upload_attachment',
+                                     return_value='/attachment') as upload:
+                    storage = self.importer._convert_md_to_storage(source)
+                    result = self.importer._convert_md_links(storage, md_path, '123')
+                    self.assertIn(f'ac:width="{width}"', result)
+                    self.assertNotIn('ac:height=', result)
+                    self.assertIn('ri:filename="figure.png"', result)
+                    upload.assert_called_once_with('123', str(image))
+        self.assertEqual(image.read_bytes(), b'original image bytes')
+
+    def test_image_width_preserves_explicit_source_dimensions(self):
+        image = Path(self.tmp.name) / 'figure.png'
+        image.write_bytes(b'original')
+        md_path = str(Path(self.tmp.name) / 'page.md')
+        cases = (
+            ('![figure](figure.png{width=320 height=160})', '320', '160'),
+            ('<img src="figure.png" width="320" height="160" />', '320', '160'),
+            ('<img width="320" src="figure.png" />', '320', None),
+            ('<img src="figure.png" height="160" />', None, '160'),
+            ('![figure](figure.png{height=160})', None, '160'),
+            ('<img src="figure.png" style="width: 320px; height: 160px;" />',
+             '320', '160'),
+            ('<img src="figure.png" width="320" style="width: 640px" />',
+             '320', None),
+        )
+        for source, width, height in cases:
+            with self.subTest(source=source), \
+                    patch.object(self.importer, '_upload_attachment',
+                                 return_value='/attachment'):
+                storage = self.importer._convert_md_to_storage(source)
+                result = self.importer._convert_md_links(storage, md_path, '123')
+                for key, value in (('width', width), ('height', height)):
+                    if value is None:
+                        self.assertNotIn(f'ac:{key}=', result)
+                    else:
+                        self.assertEqual(result.count(f'ac:{key}="{value}"'), 1)
+                self.assertNotIn('ac:width="750"', result)
+
+    def test_image_width_zero_disables_only_default_width(self):
+        self.importer.image_width = 0
+        image = Path(self.tmp.name) / 'figure.png'
+        image.write_bytes(b'original')
+        md_path = str(Path(self.tmp.name) / 'page.md')
+        with patch.object(self.importer, '_upload_attachment', return_value='/attachment'):
+            result = self.importer._convert_md_links(
+                '<img src="figure.png" />', md_path, '123')
+            self.assertNotIn('ac:width=', result)
+            result = self.importer._convert_md_links(
+                '<img src="figure.png" width="320" />', md_path, '123')
+            self.assertIn('ac:width="320"', result)
+
+    def test_image_width_leaves_external_images_code_and_macros_unchanged(self):
+        source = ('<img src="https://example.invalid/figure.png" />'
+                  '<img src="data:image/png;base64,AAAA" />'
+                  '<code>![figure](figure.png)</code>'
+                  '<ac:structured-macro ac:name="code">'
+                  '<ac:plain-text-body><![CDATA[![figure](figure.png)]]>'
+                  '</ac:plain-text-body></ac:structured-macro>')
+        with patch.object(self.importer, '_upload_attachment') as upload:
+            result = self.importer._convert_md_links(source, 'page.md', '123')
+            self.assertEqual(result, source)
+            upload.assert_not_called()
+
     def test_md_links_ignores_macro_cdata(self):
         # mathblock 宏 CDATA 内 LaTeX \right](0) 不应被图片正则误判（历史 bug：
         # <![CDATA[ 前缀含字面 ![，与 ]( 配对把 0 当图片路径）

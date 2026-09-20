@@ -76,6 +76,12 @@
 8. `toc_enabled`：是否按 `common_config.toc_target_macro` 自动插入目录宏，默认 `true`。
 9. `toc_min_headings`：H2～H6 达到多少个时插入目录宏，默认 `4`。
 10. `preflight_review`：上传前只读审核原件；有问题时创建并验证同级完整修复副本，默认 `true`。
+11. `image_width`：本地图片附件的默认显示宽度，单位 px，默认 `750`；只接受非负整数，
+    `0` 表示不统一设置。单页与树导入共用，非法值在创建网络会话前拒绝。
+    源图片路径中的 `{width=... height=...}` 参数、HTML `width`/`height` 属性及
+    `style="width: ...px; height: ...px"` 像素样式优先；任一维度已指定时不补默认宽度。
+    无源尺寸时只设置宽度，高度按比例缩放；不重采样原图，不处理外链或 data URI 图片。
+    修改配置只影响后续导入，不自动修改已有页面；已有页面的尺寸调整需指定范围。
 
 ### `upgrade_config`
 

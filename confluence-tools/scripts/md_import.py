@@ -34,6 +34,7 @@ if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 from urllib.parse import unquote
 import markdown2
+from bs4 import BeautifulSoup
 
 from common import (SKILL_ROOT, build_block_template, build_toc_macro,
                     collect_space_page_records, compile_inline_math_pattern,
@@ -108,6 +109,10 @@ class MarkdownImporter:
         import_cfg = cfg['import_config']
         toc_cfg = cfg['toc_upgrade_config']
         debug_cfg = cfg['debug_config']
+
+        self.image_width = import_cfg.get('image_width', 750)
+        if type(self.image_width) is not int or self.image_width < 0:
+            raise ValueError('import_config.image_width 必须为非负整数（0 表示不统一设置）')
 
         self.base_url = common['confluence_url'].rstrip('/')
         self.heading_math_mode = get_heading_math_mode(common)
@@ -860,7 +865,7 @@ class MarkdownImporter:
             else:
                 return match.group(0)
 
-            size_params = ""
+            size_attrs = {}
             size_match = re.search(r'{([^}]*)}', img_path)
             if size_match:
                 params = size_match.group(1)
@@ -868,7 +873,25 @@ class MarkdownImporter:
                 for param in params.split():
                     if '=' in param:
                         key, value = param.split('=')
-                        size_params += f' ac:{key}="{value}"'
+                        size_attrs[key] = value
+
+            # 源尺寸优先：路径参数、HTML 属性及常见像素样式。
+            if match.group(5):
+                img = BeautifulSoup(match.group(0), 'html.parser').find('img')
+                styles = dict(re.findall(
+                    r'(?:^|;)\s*(width|height)\s*:\s*(\d+)(?:px)?\s*(?=;|$)',
+                    img.get('style', ''), re.IGNORECASE))
+                styles = {key.lower(): value for key, value in styles.items()}
+                for key in ('width', 'height'):
+                    value = img.get(key, styles.get(key))
+                    if value is not None:
+                        size_attrs.setdefault(key, value)
+            # 已有固定高度时也不补宽度，避免改变源图的宽高比例。
+            if self.image_width and not {'width', 'height'}.intersection(size_attrs):
+                size_attrs['width'] = str(self.image_width)
+            size_params = ''.join(
+                f' ac:{key}="{html.escape(str(value), quote=True)}"'
+                for key, value in size_attrs.items())
 
             if not img_path.startswith(('http', '//')):
                 # data: URI（base64 内嵌图片）：不做本地文件处理，保留原始引用
