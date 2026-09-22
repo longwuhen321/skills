@@ -15,6 +15,7 @@
 
 import os
 import re
+import html
 import hashlib
 import sys
 import tempfile
@@ -508,6 +509,94 @@ class TestMdImport(unittest.TestCase):
         self.assertIn('LATEX_BLOCK_', protected)
         restored = self.importer._restore_math_blocks(protected, blocks)
         self.assertEqual(restored, md)
+
+    def test_code_collapse_configuration_and_validation(self):
+        self.assertEqual(self.importer.code_collapse_threshold, 10)
+        for threshold, expected in ((0, 'true'), (1, 'true'), (3, 'false'), (20, 'false')):
+            with self.subTest(threshold=threshold), \
+                    patch.dict(MOCK_CFG['import_config'], code_collapse_threshold=threshold):
+                with MarkdownImporter(space_key='TEST') as importer:
+                    result = importer._convert_code_blocks('<pre><code>a\nb\nc</code></pre>')
+                    self.assertIn(f'ac:name="collapse">{expected}<', result)
+        for value in (-1, True, False, '10', 10.0, None):
+            with self.subTest(value=value), \
+                    patch.dict(MOCK_CFG['import_config'], code_collapse_threshold=value), \
+                    patch('md_import.requests.Session') as session, \
+                    patch('md_import.os.makedirs') as makedirs, \
+                    patch('md_import.cleanup_debug') as cleanup:
+                with self.assertRaisesRegex(ValueError, 'code_collapse_threshold'):
+                    MarkdownImporter(space_key='TEST')
+                session.assert_not_called()
+                makedirs.assert_not_called()
+                cleanup.assert_not_called()
+
+    def test_code_collapse_markdown_boundaries(self):
+        for line_count, expected in ((1, 'false'), (10, 'false'), (11, 'true')):
+            for language in ('', 'python'):
+                with self.subTest(lines=line_count, language=language):
+                    code = '\n'.join('print(1)' for _ in range(line_count))
+                    result = self.importer._convert_md_to_storage(
+                        f'```{language}\n{code}\n```\n')
+                    self.assertEqual(result.count('ac:name="code"'), 1)
+                    self.assertEqual(result.count('ac:name="collapse"'), 1)
+                    self.assertIn(f'ac:name="collapse">{expected}<', result)
+                    self.assertIn('ac:name="theme">Confluence<', result)
+                    self.assertIn('ac:name="linenumbers">false<', result)
+
+    def test_code_collapse_counts_blank_lines_without_changing_payload(self):
+        self.importer.code_collapse_threshold = 3
+        cases = (
+            ('', 'false'),
+            (' \n\t\n ', 'false'),
+            ('\n \t\na\nb\nc\n \t\n', 'false'),
+            ('\n \t\na\n\nb\nc\n \t\n', 'true'),
+            ('a\n# comment\nb\nc', 'true'),
+            ('x' * 2000, 'false'),
+        )
+        for code, expected in cases:
+            for newline in ('\n', '\r\n', '\r'):
+                with self.subTest(code=code[:40], newline=repr(newline)):
+                    payload = code.replace('\n', newline)
+                    result = self.importer._convert_code_blocks(
+                        f'<pre><code>{html.escape(payload)}</code></pre>')
+                    self.assertIn(f'ac:name="collapse">{expected}<', result)
+                    self.assertIn(f'<![CDATA[{payload}]]>', result)
+        self.importer.code_collapse_threshold = 0
+        result = self.importer._convert_code_blocks('<pre><code> \n\t</code></pre>')
+        self.assertIn('ac:name="collapse">false<', result)
+
+    def test_code_collapse_counts_highlighted_text_and_entities(self):
+        self.importer.code_collapse_threshold = 2
+        highlighted = (
+            '<span class="w"> \n</span><span class="n">&lt;span&gt;</span>\n'
+            '<span class="n">second</span><span class="w">\n \t</span>')
+        for content, expected in ((highlighted, 'false'),
+                                  (highlighted + '&#10;third', 'true')):
+            with self.subTest(expected=expected):
+                result = self.importer._convert_code_blocks(
+                    f'<pre><code class="language-python">{content}</code></pre>')
+                self.assertIn(f'ac:name="collapse">{expected}<', result)
+                self.assertIn('ac:name="language">python<', result)
+                self.assertIn(f'<![CDATA[{html.unescape(content)}]]>', result)
+
+    def test_code_collapse_leaves_inline_code_and_existing_macros_unchanged(self):
+        existing = (
+            '<p><code>inline</code></p>'
+            '<ac:structured-macro ac:name="code">'
+            '<ac:parameter ac:name="title">Original</ac:parameter>'
+            '<ac:parameter ac:name="collapse">true</ac:parameter>'
+            '<ac:plain-text-body><![CDATA[x]]></ac:plain-text-body>'
+            '</ac:structured-macro>'
+            '<ac:structured-macro ac:name="mathinline">'
+            '<ac:parameter ac:name="body">x</ac:parameter></ac:structured-macro>'
+            '<ac:structured-macro ac:name="mathblock">'
+            '<ac:plain-text-body><![CDATA[x]]></ac:plain-text-body>'
+            '</ac:structured-macro>')
+        self.assertEqual(self.importer._convert_code_blocks(existing), existing)
+        result = self.importer._convert_code_blocks(existing + '<pre><code>x</code></pre>')
+        self.assertTrue(result.startswith(existing))
+        self.assertEqual(result.count('ac:name="collapse">true<'), 1)
+        self.assertEqual(result.count('ac:name="collapse">false<'), 1)
 
     def test_symmetric_spaced_inline_math_is_protected(self):
         md = 'table $ \\boldsymbol{x}_{n} $ and tight $y$'

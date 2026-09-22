@@ -115,6 +115,8 @@ scripts/config_parser.py      scripts/debug_utils.py
 - 页面、附件或树节点任一失败，整体命令返回非零。
 - 本地图片附件默认显示宽度由 `import_config.image_width` 控制（默认 750 px，0 关闭）；
   源文档已指定尺寸时优先保留。仅影响后续导入的显示尺寸，不改原图或自动回溯已有页面。
+- 导入生成的代码宏按 `import_config.code_collapse_threshold`（默认 10）控制折叠：
+  实际代码行数大于阈值时折叠，否则展开；计数规则见配置指南。不自动修改已有页面。
 
 ### 数学公式升级
 

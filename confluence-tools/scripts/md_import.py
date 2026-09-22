@@ -114,6 +114,10 @@ class MarkdownImporter:
         if type(self.image_width) is not int or self.image_width < 0:
             raise ValueError('import_config.image_width 必须为非负整数（0 表示不统一设置）')
 
+        self.code_collapse_threshold = import_cfg.get('code_collapse_threshold', 10)
+        if type(self.code_collapse_threshold) is not int or self.code_collapse_threshold < 0:
+            raise ValueError('import_config.code_collapse_threshold 必须为非负整数')
+
         self.base_url = common['confluence_url'].rstrip('/')
         self.heading_math_mode = get_heading_math_mode(common)
         self.space_key = space_key or import_cfg.get('space', '')
@@ -816,6 +820,12 @@ class MarkdownImporter:
         def replace_code(match):
             lang = match.group(1)
             code_content = html.unescape(match.group(2))
+            # 仅为计数提取代码文本，排除高亮标签；不修剪或重写代码正文。
+            code_text = BeautifulSoup(match.group(2), 'html.parser').get_text()
+            lines = code_text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+            nonblank = [i for i, line in enumerate(lines) if line.strip()]
+            line_count = nonblank[-1] - nonblank[0] + 1 if nonblank else 0
+            collapse = 'true' if line_count > self.code_collapse_threshold else 'false'
             confluence_lang = language_map.get(lang.lower(), 'none') if lang else 'none'
             code_content = code_content.replace('\\', '&#92;').replace(']]>', ']]]]><![CDATA[>')
             return (
@@ -823,6 +833,7 @@ class MarkdownImporter:
                 f'<ac:parameter ac:name="language">{confluence_lang}</ac:parameter>'
                 f'<ac:parameter ac:name="theme">Confluence</ac:parameter>'
                 f'<ac:parameter ac:name="linenumbers">false</ac:parameter>'
+                f'<ac:parameter ac:name="collapse">{collapse}</ac:parameter>'
                 f'<ac:plain-text-body><![CDATA[{code_content}]]></ac:plain-text-body>'
                 f'</ac:structured-macro>'
             )
