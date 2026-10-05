@@ -43,6 +43,7 @@ from common import (SKILL_ROOT, build_block_template, build_toc_macro,
                     normalize_heading_inline_math, request_with_retry,
                     validate_toc_macro_parameters)
 from debug_utils import cleanup_debug
+from math_compat import MathCompatibilityError, normalize_math_storage
 from md_preflight import (PreflightRun, validate_storage, apply_review_fixes,
                           block_review, REVIEW_CLEAN, REVIEW_FIXABLE,
                           REVIEW_BLOCKED)
@@ -254,7 +255,8 @@ class MarkdownImporter:
         run = PreflightRun(Path(SKILL_ROOT) / 'logs')
         results = {}
         for path in paths:
-            result = run.review(path, phase=phase)
+            result = run.review(path, phase=phase,
+                                heading_math_mode=self.heading_math_mode)
             if result['passed']:
                 try:
                     html_content = self._convert_md_to_storage(
@@ -536,12 +538,17 @@ class MarkdownImporter:
         source_path = str(Path(md_file_path).resolve())
         if not self.preflight_review:
             print('⚠️ 上传前 Markdown 预审已关闭，直接使用源文件。')
-            with open(source_path, 'r', encoding='utf-8') as stream:
-                html_content = self._convert_md_to_storage(stream.read())
+            try:
+                with open(source_path, 'r', encoding='utf-8') as stream:
+                    html_content = self._convert_md_to_storage(stream.read())
+            except MathCompatibilityError as exc:
+                print(f'❌ 公式兼容检查失败: {source_path}: {exc}')
+                return None
             self._prepared_storage[source_path] = html_content
             return html_content
 
-        result = self._ensure_preflight_run().review(source_path)
+        result = self._ensure_preflight_run().review(
+            source_path, heading_math_mode=self.heading_math_mode)
         if result['status'] != REVIEW_CLEAN:
             print(f"❌ Markdown 预审失败: {result['review_path']}")
             for issue in result['report']['issues']:
@@ -549,7 +556,13 @@ class MarkdownImporter:
                     print(f"  - {issue['rule_id']}@{issue['line']}:{issue['column']} "
                           f"{issue['message']}")
             return None
-        html_content = self._convert_md_to_storage(result['candidate_text'])
+        try:
+            html_content = self._convert_md_to_storage(result['candidate_text'])
+        except MathCompatibilityError as exc:
+            block_review(result, 'MATH_COMPAT_REVIEW_REQUIRED', str(exc))
+            self._preflight_run.refresh(result)
+            print(f"❌ 公式兼容检查失败: {result['review_path']}: {exc}")
+            return None
         passed, errors = validate_storage(
             result, html_content, self.heading_math_mode)
         self._preflight_run.refresh(result)
@@ -1144,6 +1157,12 @@ class MarkdownImporter:
         # 字面 $...$，正文仍保留 mathinline 宏。
         html_content, _ = normalize_heading_inline_math(
             html_content, self.heading_math_mode)
+        html_content, compatibility = normalize_math_storage(html_content)
+        if not compatibility['passed']:
+            details = '; '.join(
+                f"公式 {item['formula']} offset {item['offset']}: {item['message']}"
+                for item in compatibility['issues'])
+            raise MathCompatibilityError(details)
 
         # Confluence storage XHTML requires void elements to be self-closing.
         html_content = re.sub(

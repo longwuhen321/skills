@@ -67,12 +67,15 @@
 | 导入原件直传、完整修复副本、两级复审和哈希门禁 | `TestMdImport`、`TestMdPreflight` |
 | 树计划唯一 ID 和断点恢复 | `TestTreePlanAndResume` |
 | 数学零残留与过期确认 | `TestMathSafety` |
+| 共享公式兼容、原件保护、特殊矩阵阻断与重复执行 | `TestMathCompatibilityRules`、`TestMathCompatibilityIntegration` |
 | 目录宏转换矩阵和参数校验 | `TestTocUpgrade` |
 | 导出分页、附件与安全路径 | `TestExportSafety` |
 | 四入口 UTF-8 help | `TestCliSurface` |
 | 文档强制路由和引用完整性 | `TestSkillDocumentationRoutes` |
 
 测试必须把 `SKILL_ROOT` 和日志目录指向临时目录，不读写真实 `logs/`。
+公式兼容维护必须区分已知规则自测、真实渲染器解析与页面效果检查；记录实际完成层次，
+未执行的层次不能写成通过。基线以 `math-compatibility-rules.md` 为准，不随意推广个例矩阵修复。
 
 ## 真实环境验证清理
 
@@ -96,6 +99,7 @@ confluence-tools/
 │   ├── md-import-workflow.md
 │   ├── md-import-preflight-rules.md
 │   ├── math-upgrade-workflow.md
+│   ├── math-compatibility-rules.md
 │   ├── toc-upgrade-workflow.md
 │   ├── md-export-workflow.md
 │   ├── maintenance-rules.md
@@ -106,6 +110,7 @@ confluence-tools/
 │   ├── md_import.py
 │   ├── md_preflight.py
 │   ├── math_upgrade.py
+│   ├── math_compat.py
 │   ├── toc_upgrade.py
 │   ├── md_export.py
 │   └── test/

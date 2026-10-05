@@ -12,6 +12,7 @@ from urllib.parse import unquote
 
 from common import (check_xhtml_balance, compile_inline_math_pattern,
                     inline_math_content)
+from math_compat import PROFILE, assess_formula, normalize_math_storage
 
 
 CODE_RE = re.compile(
@@ -176,7 +177,8 @@ def _formula_matches(segment):
         cursor = match.end()
 
 
-def _process_text_segment(source, segment, base_offset, counts, fixes, issues):
+def _process_text_segment(source, segment, base_offset, counts, fixes, issues,
+                          compatibility, heading_math_mode):
     candidate = []
     residue = []
     cursor = 0
@@ -191,7 +193,10 @@ def _process_text_segment(source, segment, base_offset, counts, fixes, issues):
                 content = (match.group('left_content')
                            if match.group('left') is not None
                            else match.group('right_content'))
-            content_offset = base_offset + match.start() + 1
+            group = (('spaced' if match.group('spaced') is not None else 'tight')
+                     if kind == 'inline' else
+                     ('left_content' if match.group('left') is not None else 'right_content'))
+            content_offset = base_offset + match.start(group)
             canonical = '$' + _sanitize_formula(content, fixes) + '$'
             counts['inline'] += 1
             if _is_markdown_heading(source, base_offset + match.start()):
@@ -219,6 +224,20 @@ def _process_text_segment(source, segment, base_offset, counts, fixes, issues):
                 canonical = match.group(0).replace(content, repaired, 1)
                 counts['latex_fence'] += 1
         _validate_formula(source, content, content_offset, kind, issues)
+        heading_literal = (heading_math_mode == 'literal'
+                           and kind in ('inline', 'inline_asymmetric')
+                           and _is_markdown_heading(source, base_offset + match.start()))
+        if not heading_literal:
+            original_content = (match.group(group)
+                                if kind in ('inline', 'inline_asymmetric')
+                                else match.group(1))
+            assessed = assess_formula(original_content)
+            for key in ('changes', 'issues'):
+                for item in assessed[key]:
+                    located = dict(item)
+                    located['line'], located['column'] = _line_col(
+                        source, content_offset + item['offset'])
+                    compatibility[key].append(located)
         candidate.append(canonical)
         residue.append(''.join('\n' if c == '\n' else ' '
                                for c in match.group(0)))
@@ -228,13 +247,15 @@ def _process_text_segment(source, segment, base_offset, counts, fixes, issues):
     return ''.join(candidate), ''.join(residue)
 
 
-def _candidate_and_residue(source, counts, fixes, issues):
+def _candidate_and_residue(source, counts, fixes, issues, compatibility,
+                           heading_math_mode):
     candidate = []
     residue = []
     cursor = 0
     for code in CODE_RE.finditer(source):
         processed, remaining = _process_text_segment(
-            source, source[cursor:code.start()], cursor, counts, fixes, issues)
+            source, source[cursor:code.start()], cursor, counts, fixes, issues,
+            compatibility, heading_math_mode)
         candidate.append(processed)
         residue.append(remaining)
         candidate.append(code.group(0))
@@ -242,7 +263,8 @@ def _candidate_and_residue(source, counts, fixes, issues):
                                for c in code.group(0)))
         cursor = code.end()
     processed, remaining = _process_text_segment(
-        source, source[cursor:], cursor, counts, fixes, issues)
+        source, source[cursor:], cursor, counts, fixes, issues,
+        compatibility, heading_math_mode)
     candidate.append(processed)
     residue.append(remaining)
     return ''.join(candidate), ''.join(residue)
@@ -284,7 +306,7 @@ def _check_attachments(source_path, candidate, issues):
     return attachments
 
 
-def review_markdown(source_path, artifact_dir):
+def review_markdown(source_path, artifact_dir, heading_math_mode='literal'):
     source_path = Path(source_path).resolve()
     raw = source_path.read_bytes()
     issues = []
@@ -303,8 +325,10 @@ def review_markdown(source_path, artifact_dir):
 
     counts = {'inline': 0, 'heading_inline': 0, 'block': 0,
               'latex_fence': 0}
+    compatibility = {'profile': PROFILE, 'changes': [], 'issues': [],
+                     'renderer_validation': 'not_run'}
     candidate, residue = _candidate_and_residue(
-        source, counts, fixes, issues)
+        source, counts, fixes, issues, compatibility, heading_math_mode)
     _check_residual_dollars(source, residue, issues)
     attachments = _check_attachments(source_path, candidate, issues)
 
@@ -318,14 +342,22 @@ def review_markdown(source_path, artifact_dir):
         status = REVIEW_FIXABLE
     else:
         status = REVIEW_CLEAN
+    format_status = status
+    compatibility['passed'] = not compatibility['issues']
+    issues.extend(compatibility['issues'])
+    if compatibility['issues']:
+        has_errors = True
+        status = REVIEW_BLOCKED
     report = {
         'schema_version': 2,
         'source_path': str(source_path),
         'source_sha256': _sha256_bytes(raw),
         'candidate_sha256': _sha256_bytes(candidate_bytes),
         'status': status,
+        'format_status': format_status,
         'passed': not has_errors,
         'formula_counts': counts,
+        'math_compatibility': compatibility,
         'fixes': fixes,
         'issues': issues,
         'attachments': attachments,
@@ -346,6 +378,12 @@ def review_markdown(source_path, artifact_dir):
 def validate_storage(result, storage_html, heading_math_mode):
     checks = []
     errors = []
+    normalized, compatibility = normalize_math_storage(storage_html)
+    compatible = compatibility['passed'] and normalized == storage_html
+    checks.append({'check': 'known_math_compatibility', 'passed': compatible,
+                   'detail': compatibility})
+    if not compatible:
+        errors.append('数学宏仍需兼容转换或人工复核；此检查不等同于渲染器验证')
     balanced, description = check_xhtml_balance(storage_html)
     checks.append({'check': 'xhtml_balance', 'passed': balanced,
                    'detail': description})
@@ -478,9 +516,9 @@ class PreflightRun:
         }
         _atomic_write_json(self.run_dir / 'manifest.json', payload)
 
-    def review(self, source_path, phase='full'):
+    def review(self, source_path, phase='full', heading_math_mode='literal'):
         page_dir = self.run_dir / 'pages' / f'{len(self.entries) + 1:04d}'
-        result = review_markdown(source_path, page_dir)
+        result = review_markdown(source_path, page_dir, heading_math_mode)
         self.entries.append({
             'source_path': str(result['source_path']),
             'review_path': str(result['review_path']),

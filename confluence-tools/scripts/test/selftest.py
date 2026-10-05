@@ -35,6 +35,7 @@ from md_import import MarkdownImporter, resolve_import_source
 from md_preflight import (PreflightRun, review_markdown, validate_storage,
                           REVIEW_CLEAN, REVIEW_FIXABLE, REVIEW_BLOCKED)
 from math_upgrade import ConfluenceMathUpdater
+from math_compat import assess_formula, normalize_math_storage, MathCompatibilityError
 from toc_upgrade import (ConfluenceTocUpdater, MacroConversionError,
                          normalize_toc_macros, validate_macro_parameters)
 from md_export import ConfluenceExporter, main as export_main
@@ -1750,7 +1751,8 @@ class TestMathUpgrade(unittest.TestCase):
 
         second, second_stats = self.updater.convert_math(after)
         self.assertEqual(second, after)
-        self.assertEqual(sum(second_stats.values()), 0)
+        self.assertEqual(sum(v for v in second_stats.values() if isinstance(v, int)), 0)
+        self.assertEqual(second_stats['math_compatibility']['changed_formulas'], 0)
 
     def test_heading_mathinline_mode_converts_literal_and_legacy_macro(self):
         cfg = dict(MOCK_CFG)
@@ -1774,7 +1776,8 @@ class TestMathUpgrade(unittest.TestCase):
 
         second, second_stats = updater.convert_math(after)
         self.assertEqual(second, after)
-        self.assertEqual(sum(second_stats.values()), 0)
+        self.assertEqual(sum(v for v in second_stats.values() if isinstance(v, int)), 0)
+        self.assertEqual(second_stats['math_compatibility']['changed_formulas'], 0)
 
     def test_invalid_heading_math_mode_is_rejected_by_updater(self):
         cfg = dict(MOCK_CFG)
@@ -2317,6 +2320,294 @@ class TestMdExport(unittest.TestCase):
             [('6', 'A/B'), ('7', 'AB')], Path(self.tmp.name))
         self.assertEqual(plans, {'6': '6_AB', '7': '7_AB'})
         self.assertEqual(self.exporter.name_conflicts[0]['page_ids'], ('6', '7'))
+
+
+class TestMathCompatibilityIntegration(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for module in ('md_import', 'math_upgrade'):
+            self.enterContext(patch(module + '.load_config', return_value=MOCK_CFG))
+            self.enterContext(patch(module + '.SKILL_ROOT', self.tmp.name))
+        self.importer = MarkdownImporter()
+        self.updater = ConfluenceMathUpdater()
+        self.addCleanup(self.importer.close)
+        self.addCleanup(self.updater.close)
+
+    def test_import_normalizes_formula_payload_without_changing_source(self):
+        source = r'$\dfrac{1}{2}+\operatorname{rank}A$'
+        storage = self.importer._convert_md_to_storage(source)
+        self.assertNotIn(r'\dfrac', storage)
+        self.assertIn(r'{\displaystyle\frac{1}{2}}', storage)
+        self.assertIn(r'\mathop{\mathrm{rank}}\nolimits A', storage)
+        self.assertEqual(source, r'$\dfrac{1}{2}+\operatorname{rank}A$')
+
+    def test_upgrade_repairs_existing_native_macro_and_is_idempotent(self):
+        source = build_block_template('left').format(content=r'\dfrac{a}{b}')
+        after, stats = self.updater.convert_math(source)
+        self.assertNotIn(r'\dfrac', after)
+        self.assertTrue(self.updater.verify(source, after, stats)[0])
+        again, _stats = self.updater.convert_math(after)
+        self.assertEqual(again, after)
+
+    def test_preflight_reports_special_matrix_without_rewriting_markdown(self):
+        source = Path(self.tmp.name) / 'matrix.md'
+        content = 'Matrix\n\n$$\\begin{array}{cc}\n\\multicolumn{2}{c}{x}\\\\\ny&z\\end{array}$$\n'
+        source.write_bytes(content.encode('utf-8'))
+        result = review_markdown(source, Path(self.tmp.name) / 'review')
+        self.assertFalse(result['passed'])
+        self.assertEqual(result['candidate_text'], content)
+        self.assertEqual(source.read_text(encoding='utf-8'), content)
+        issue = next(i for i in result['report']['issues']
+                     if i['rule_id'] == 'MATH_COMPAT_REVIEW_REQUIRED')
+        self.assertEqual((issue['line'], issue['column']), (4, 1))
+
+    def test_safe_compatibility_does_not_trigger_a_repair_copy(self):
+        source = Path(self.tmp.name) / 'clean.md'
+        content = br'$\dfrac{1}{2}+\geqslant x$'
+        source.write_bytes(content)
+        self.importer.preflight_review = True
+        prepared = self.importer._prepare_upload_target(source)
+        self.assertEqual(Path(prepared[0]), source)
+        self.assertEqual(source.read_bytes(), content)
+        self.assertFalse((source.parent / 'clean__修复.md').exists())
+        review = review_markdown(source, source.parent / 'review')
+        self.assertEqual(review['status'], REVIEW_CLEAN)
+        self.assertEqual(review['report']['format_status'], REVIEW_CLEAN)
+        self.assertTrue(review['report']['math_compatibility']['changes'])
+        self.assertEqual(review['report']['math_compatibility']['renderer_validation'], 'not_run')
+
+    def test_literal_heading_and_code_are_not_formula_payloads(self):
+        source = '# Title $\\dfrac12$\n\n`$\\dfrac12$`\n\n$\\dfrac12$'
+        storage = self.importer._convert_md_to_storage(source)
+        self.assertIn(r'$\dfrac12$', storage)
+        self.assertEqual(storage.count(r'{\displaystyle\frac12}'), 1)
+        self.importer.heading_math_mode = 'mathinline'
+        storage = self.importer._convert_md_to_storage(source)
+        self.assertEqual(storage.count(r'{\displaystyle\frac12}'), 2)
+
+    def test_preflight_heading_mode_matches_conversion(self):
+        source = Path(self.tmp.name) / 'heading.md'
+        source.write_bytes(br'# Title $\wideparen{a+b}$')
+        literal = review_markdown(source, source.parent / 'literal')
+        self.assertTrue(literal['passed'])
+        native = review_markdown(source, source.parent / 'native', 'mathinline')
+        self.assertFalse(native['passed'])
+        self.importer.heading_math_mode = 'mathinline'
+        with self.assertRaises(MathCompatibilityError):
+            self.importer._convert_md_to_storage(source.read_text(encoding='utf-8'))
+
+    def test_preflight_reports_original_column_after_spaced_delimiter(self):
+        source = Path(self.tmp.name) / 'spaced.md'
+        source.write_bytes(b'Example\n\ntext $  \\cline{1-2} $')
+        result = review_markdown(source, source.parent / 'review')
+        issue = result['report']['math_compatibility']['issues'][0]
+        self.assertEqual((issue['line'], issue['column']), (3, 9))
+
+    def test_storage_validation_rejects_unconverted_known_command(self):
+        source = Path(self.tmp.name) / 'clean.md'
+        source.write_bytes(br'$$\dfrac12$$')
+        result = review_markdown(source, source.parent / 'review')
+        old = build_block_template('left').format(content=r'\dfrac12')
+        self.assertFalse(validate_storage(result, old, 'literal')[0])
+        result = review_markdown(source, source.parent / 'review')
+        fixed, _ = normalize_math_storage(old)
+        self.assertTrue(validate_storage(result, fixed, 'literal')[0])
+
+    def test_compatibility_location_uses_source_before_emphasis_repair(self):
+        source = Path(self.tmp.name) / 'emphasis.md'
+        content = r'$a<em>b</em>+\cline{1-2}$'
+        source.write_bytes(content.encode('utf-8'))
+        result = review_markdown(source, source.parent / 'review')
+        issue = result['report']['math_compatibility']['issues'][0]
+        self.assertEqual((issue['line'], issue['column']),
+                         (1, content.index(r'\cline') + 1))
+        self.assertEqual(source.read_text(encoding='utf-8'), content)
+
+    def test_single_import_blocks_before_network_when_preflight_is_off(self):
+        source = Path(self.tmp.name) / 'bad.md'
+        source.write_bytes(br'$$\multicolumn{2}{c}{x}$$')
+        with patch.object(self.importer, '_find_page_by_title') as lookup, \
+             patch.object(self.importer, '_create_page') as create, \
+             patch.object(self.importer, '_update_page') as update:
+            self.assertFalse(self.importer.import_markdown(source))
+        lookup.assert_not_called()
+        create.assert_not_called()
+        update.assert_not_called()
+
+    def test_tree_preconversion_blocks_all_writes_when_child_is_unsupported(self):
+        root = Path(self.tmp.name) / 'Book'
+        child = root / 'Child'
+        child.mkdir(parents=True)
+        (root / 'Book.md').write_bytes(br'$$\dfrac12$$')
+        (child / 'Child.md').write_bytes(br'$$\cline{1-2}$$')
+        self.importer.tree_import = True
+        self.importer._page_records = []
+        with patch.object(self.importer, '_execute_plan') as execute:
+            self.assertFalse(self.importer.import_tree(root, yes=True))
+        execute.assert_not_called()
+
+    def test_native_upgrade_updates_once_and_then_skips(self):
+        before = build_block_template('left').format(content=r'\operatorname{rank}A')
+        page = {'page_id': '7', 'title': 'T', 'version': 4,
+                'space_key': 'TEST', 'storage': before}
+        with patch.object(self.updater, 'fetch_page', return_value=page), \
+             patch.object(self.updater, 'update_page', return_value=5) as update:
+            self.assertTrue(self.updater.process_single('7')[0])
+            page.update(storage=update.call_args.args[1], version=5)
+            self.assertTrue(self.updater.process_single('7')[0])
+        self.assertEqual(update.call_count, 1)
+
+    def test_unsupported_native_macro_cannot_skip_verification(self):
+        before = build_block_template('left').format(content=r'\cline{1-2}')
+        page = {'page_id': '7', 'title': 'T', 'version': 4, 'storage': before}
+        with patch.object(self.updater, 'fetch_page', return_value=page), \
+             patch.object(self.updater, 'update_page') as update:
+            passed, report = self.updater.process_single('7')
+        self.assertFalse(passed)
+        self.assertIn('人工复核', report)
+        update.assert_not_called()
+
+    def test_confirmation_rejects_unconverted_debug_candidate(self):
+        before = build_block_template('left').format(content=r'\dfrac12')
+        page = {'page_id': '7', 'title': 'T', 'version': 4, 'storage': before}
+        after, stats = self.updater.convert_math(before)
+        folder = self.updater.save_debug(page, before, after, stats)
+        (Path(folder) / 'after.html').write_bytes(before.encode('utf-8'))
+        with patch.object(self.updater, 'fetch_page', return_value=page), \
+             patch.object(self.updater, 'update_page') as update:
+            self.assertFalse(self.updater.confirm_update(folder))
+        update.assert_not_called()
+
+
+class TestMathCompatibilityRules(unittest.TestCase):
+
+    def test_rule_document_is_directly_routed_for_import_upgrade_and_maintenance(self):
+        root = Path(__file__).resolve().parents[2]
+        entry = (root / 'SKILL.md').read_text(encoding='utf-8')
+        rule_path = 'references/math-compatibility-rules.md'
+        row = next(line for line in entry.splitlines() if rule_path in line)
+        for required in ('Markdown 导入', '公式升级', '维护', '不受预审开关影响'):
+            self.assertIn(required, row)
+        rules = (root / rule_path).read_text(encoding='utf-8')
+        self.assertIn('强制读取条件', rules)
+        self.assertIn('完整读取', rules)
+        self.assertIn('renderer_validation=not_run', rules)
+
+    def test_nested_and_unbraced_fractions_keep_scope(self):
+        cases = {
+            r'\dfrac{1}{\dfrac23}+x': r'{\displaystyle\frac{1}{{\displaystyle\frac23}}}+x',
+            r'\dfrac\alpha\beta+x': r'{\displaystyle\frac\alpha\beta}+x',
+            r'\dfrac ab+x': r'{\displaystyle\frac ab}+x',
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                result = assess_formula(source)
+                self.assertEqual(result['text'], expected)
+                self.assertFalse(result['issues'])
+
+    def test_operator_boundary_star_and_accent(self):
+        cases = {
+            r'\operatorname{rank}A': r'\mathop{\mathrm{rank}}\nolimits A',
+            r'\operatorname*{argmax}_{x}': r'\mathop{\mathrm{argmax}} _{x}',
+            r'\operatorname{B\acute{e}zier}': r'\mathop{\mathrm{B\acute{e}zier}}\nolimits ',
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(assess_formula(source)['text'], expected)
+
+    def test_complex_operator_and_explicit_limits_keep_ams_semantics(self):
+        for source in (r'\operatorname{a-b}', r'\operatorname{rank}\limits_A',
+                       r'\operatorname*{foo}\nolimits_A'):
+            with self.subTest(source=source):
+                self.assertEqual(assess_formula(source)['text'], r'\require{AMSmath} ' + source)
+
+    def test_extensions_are_explicit_and_idempotent(self):
+        source = r'\lVert x\rVert+\geqslant y+\oiint x+\vline+\cancel{x}'
+        fixed = assess_formula(source)['text']
+        for name in ('AMSmath', 'AMSsymbols', 'mediawiki-texvc', 'cancel'):
+            self.assertEqual(fixed.count(r'\require{' + name + '}'), 1)
+        self.assertEqual(assess_formula(fixed)['text'], fixed)
+        present = r'\require {AMSmath}\lVert x\rVert'
+        self.assertEqual(assess_formula(present)['text'], present)
+
+    def test_comments_escapes_and_command_prefixes_are_not_rewritten(self):
+        source = '% \\dfrac12 \\multicolumn{x}\n' + r'\\dfrac12+\dfracfoo+\% x'
+        result = assess_formula(source)
+        self.assertEqual(result['text'], source)
+        self.assertFalse(result['issues'])
+        source = '% \\require{AMSsymbols}\n\\geqslant'
+        self.assertTrue(assess_formula(source)['text'].startswith(r'\require{AMSsymbols}'))
+
+    def test_comments_between_fraction_arguments_are_retained(self):
+        source = '\\dfrac% comment\n{a}% comment\n{b}+x'
+        self.assertEqual(assess_formula(source)['text'],
+                         '{\\displaystyle\\frac% comment\n{a}% comment\n{b}}+x')
+
+    def test_known_symbol_replacements_preserve_meaning(self):
+        result = assess_formula(r'\wideparen{AOB}+\iddots')
+        self.assertEqual(result['text'],
+                         r'\overset{\mmlToken{mo}[stretchy=true]{⏜}}{AOB}+\mathinner{⋰}')
+        self.assertFalse(result['issues'])
+
+    def test_special_structures_malformed_arguments_and_custom_macros_block(self):
+        for source in (r'\multicolumn{2}{c}{x}', r'\cline{1-2}', r'\dfrac{a}',
+                       r'\wideparen{a+b}', r'\def\dfrac{foo}\dfrac12',
+                       r'\newcommand{\foo}{x}\dfrac12'):
+            with self.subTest(source=source):
+                result = assess_formula(source)
+                self.assertTrue(result['issues'])
+                self.assertEqual(result['text'], source)
+                self.assertFalse(result['changes'])
+
+    def test_unknown_command_is_not_guessed_or_claimed_rendered(self):
+        result = assess_formula(r'\applicationSpecific{x}')
+        self.assertEqual(result['text'], r'\applicationSpecific{x}')
+        self.assertEqual(result['renderer_validation'], 'not_run')
+
+    def test_storage_edits_only_math_payload_even_inside_expand(self):
+        macro = ('<ac:structured-macro ac:name="mathinline" ac:macro-id="stable">'
+                 '<ac:parameter ac:name="body">\\dfrac{a&amp;b}{c&lt;d}</ac:parameter>'
+                 '</ac:structured-macro>')
+        prefix = ('<p>原文 $\\dfrac12$ &amp; &lt;keep&gt;</p>'
+                  '<ac:structured-macro ac:name="expand"><ac:rich-text-body>')
+        suffix = '</ac:rich-text-body></ac:structured-macro><hr/>'
+        source = prefix + macro + suffix
+        fixed, report = normalize_math_storage(source)
+        expected = source.replace(r'\dfrac{a&amp;b}{c&lt;d}',
+                                  r'{\displaystyle\frac{a&amp;b}{c&lt;d}}')
+        self.assertEqual(fixed, expected)
+        self.assertEqual(report['changed_formulas'], 1)
+        self.assertEqual(normalize_math_storage(fixed)[0], fixed)
+
+    def test_code_comments_and_cdata_are_not_interpreted_as_macro_markup(self):
+        fake = build_block_template('left').format(content=r'\dfrac12')
+        source = ('<!-- ' + fake + ' -->' + '<pre>' + fake + '</pre>'
+                  '<code>' + fake + '</code><ac:structured-macro ac:name="code">'
+                  '<ac:plain-text-body><![CDATA[' + fake.replace(']]>', ']]]]><![CDATA[>')
+                  + ']]></ac:plain-text-body></ac:structured-macro>')
+        fixed, report = normalize_math_storage(source)
+        self.assertEqual(fixed, source)
+        self.assertEqual(report['formulas'], 0)
+
+    def test_cdata_is_decoded_once_and_escaped_safely(self):
+        macro = ('<ac:structured-macro ac:name="mathblock">'
+                 '<ac:plain-text-body><![CDATA[\\dfrac12+&amp;+]]]]><![CDATA[>]]>'
+                 '</ac:plain-text-body></ac:structured-macro>')
+        fixed, report = normalize_math_storage(macro)
+        self.assertIn(r'{\displaystyle\frac12}+&amp;+', fixed)
+        self.assertIn(']]]]><![CDATA[>', fixed)
+        self.assertTrue(report['passed'])
+        self.assertEqual(normalize_math_storage(fixed)[0], fixed)
+
+    def test_invalid_math_body_markup_blocks_without_loss(self):
+        macro = ('<ac:structured-macro ac:name="mathinline">'
+                 '<ac:parameter ac:name="body"><em>x</em></ac:parameter>'
+                 '</ac:structured-macro>')
+        fixed, report = normalize_math_storage(macro)
+        self.assertEqual(fixed, macro)
+        self.assertFalse(report['passed'])
 
 
 if __name__ == '__main__':

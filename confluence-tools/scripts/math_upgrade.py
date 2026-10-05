@@ -22,6 +22,7 @@ import time
 import argparse
 import datetime
 import hashlib
+import json
 
 from dependency_check import require_dependencies
 require_dependencies()
@@ -41,6 +42,7 @@ from common import (SKILL_ROOT, load_config, request_with_retry,
                     compile_inline_math_pattern, inline_math_content,
                     check_xhtml_balance)
 from debug_utils import cleanup_debug
+from math_compat import normalize_math_storage
 
 
 def _sanitize_latex(s: str) -> str:
@@ -258,7 +260,9 @@ class ConfluenceMathUpdater:
                     if k in s:
                         stats[k] += s[k]
 
-        return ''.join(result_parts), stats
+        converted, compatibility = normalize_math_storage(''.join(result_parts))
+        stats['math_compatibility'] = compatibility
+        return converted, stats
 
     def save_debug(self, page_info, before, after, stats):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -284,6 +288,8 @@ class ConfluenceMathUpdater:
                     f"{stats.get('heading_math_changed', 0)} 处\n")
             f.write(f"mathblock 对齐调整 (→ left): {stats.get('realigned', 0)} 处\n")
             f.write(f"剥离 mathjax span 壳: {stats.get('span_removed', 0)} 处\n")
+        with open(os.path.join(folder, 'math_compatibility.json'), 'w', encoding='utf-8') as f:
+            json.dump(stats.get('math_compatibility', {}), f, ensure_ascii=False, indent=2)
         print(f"调试文件已保存: {folder}")
         return folder
 
@@ -294,6 +300,17 @@ class ConfluenceMathUpdater:
     def verify(self, before, after, stats):
         report = []
         passed = True
+        normalized, compatibility = normalize_math_storage(after)
+        compatible = compatibility['passed'] and normalized == after
+        report.append(f"已知公式兼容规则: {'通过' if compatible else '未通过'}"
+                      '（未执行渲染器验证）')
+        if not compatible:
+            passed = False
+            report.extend(
+                f"  公式 {item['formula']} offset {item['offset']}: {item['message']}"
+                for item in compatibility['issues'])
+            if normalized != after:
+                report.append('  仍有待执行的公式兼容转换')
         balanced, balance_report = self._check_xhtml_balance(after)
         report.append(f"XHTML 标签配对: {balance_report}")
         if not balanced:
@@ -381,9 +398,11 @@ class ConfluenceMathUpdater:
         old_up = stats.get('old_macro_upgraded', 0)
         heading_changed = stats.get(
             'heading_math_changed', stats.get('heading_inline_restored', 0))
-        total_changes = total + old_up + realigned + heading_changed
+        compatibility = stats.get('math_compatibility', {})
+        compat_changed = compatibility.get('changed_formulas', 0)
+        total_changes = total + old_up + realigned + heading_changed + compat_changed
 
-        if total_changes == 0:
+        if total_changes == 0 and not compatibility.get('issues'):
             return True, f"{indent}  {page_info['title']} (v{page_info['version']}) — 无需转换"
 
         self.save_debug(page_info, before, after, stats)
@@ -406,7 +425,8 @@ class ConfluenceMathUpdater:
                 return False, f"{indent}❌ {page_info['title']}: PUT 失败 — {err_msg}"
             return True, (f"{indent}  {page_info['title']} (v{new_version}) "
                           f"— inline:{stats['inline']} block:{stats['block']} "
-                          f"heading:{heading_changed} old:{old_up} realigned:{realigned}")
+                          f"heading:{heading_changed} old:{old_up} realigned:{realigned} "
+                          f"compat:{compat_changed}")
 
         return True, f"{indent}  {page_info['title']} — 转换 {total_changes} 处 (未自动更新)"
 
@@ -454,6 +474,13 @@ class ConfluenceMathUpdater:
             print(f"❌ 页面自转换后已变化（源 v{source_version}，当前 v{page_info['version']}）；"
                   "拒绝提交过期结果，请重新生成转换结果。")
             return False
+        normalized, compatibility = normalize_math_storage(after)
+        if not compatibility['passed'] or normalized != after:
+            print('❌ 待确认正文未通过公式兼容检查；请重新生成转换结果并复核')
+            return False
+        if after == page_info['storage']:
+            print('✓ 正文未变化，无需更新')
+            return True
         new_version = self.update_page(page_info, after)
         print(f"  ✅ 页面已更新: v{page_info['version']} → v{new_version}")
         print(f"  链接: {self.base_url}/spaces/{page_info['space_key']}/pages/{page_id}")

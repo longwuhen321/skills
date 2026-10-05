@@ -25,6 +25,21 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-09-22] 合法 LaTeX 在目标数学宏中报未定义命令，已有原生宏未检查兼容性
+
+- **现象**：`mathblock` / `mathinline` 报 `Undefined control sequence`，典型命令为
+  `\dfrac`、`\operatorname`；格式检查或 API 更新成功后，仍可能存在扩展和特殊矩阵问题。
+- **根因**：Markdown 格式有效不代表目标 MathJax 2.7.9 的扩展已加载；导入原样写入命令，
+  旧公式升级流程又跳过已有原生宏正文，缺少三个入口共用的兼容规则。
+- **修复**：新增 `scripts/math_compat.py` 与 `references/math-compatibility-rules.md`。
+  在生成 storage 时处理分式、算子、圆弧、反向省略号及已知扩展依赖；保留合法源文件。
+  预审单独报告格式与兼容性；升级覆盖已有原生宏，确认候选也复查。`multicolumn`、
+  `cline` 和自定义宏等阻断并报告人工复核位置，不推广历史个例矩阵改写。
+- **排查方法**：查看 `review.json` 的 `format_status` / `math_compatibility` 或升级 debug
+  的 `math_compatibility.json`；再按公式位置核对原文和目标渲染器条件。
+  离线用例见 `TestMathCompatibilityRules` / `TestMathCompatibilityIntegration`，覆盖
+  三入口、代码保护、参数作用域、扩展幂等及写入前阻断。静态通过不表示实际渲染完成。
+
 ## [2026-08-13] md_export：HTML 表格包裹代码块导致 Typora 标签泄漏与 Shell 变量误渲染
 
 - **现象**：导出单列表格内的多个 Confluence `code` 宏后，Typora 直接显示 `</code></pre></td>` 等 HTML 标签，代码行列错乱；`$FRC`、`$PARAM_FILE` 和 `#` 等 Shell 内容脱离代码块后被误作数学公式或 Markdown 语法。

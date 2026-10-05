@@ -28,6 +28,7 @@ description: Confluence 工具集：导入 Markdown、升级数学公式、转�
 | 首次配置、补齐或修改配置 | `references/configuration-guide.md` |
 | Markdown 单页、树导入或 `--resume` | `references/md-import-workflow.md` + `references/md-import-splitting-rules.md` |
 | Markdown 导入且最终 `preflight_review=true` | `references/md-import-workflow.md` + `references/md-import-preflight-rules.md` |
+| 任意 Markdown 导入、公式升级/确认或公式兼容逻辑维护 | 对应主流程全部 + `references/math-compatibility-rules.md`（不受预审开关影响） |
 | 数学公式升级或 `math_upgrade --confirm` | `references/math-upgrade-workflow.md` |
 | 目录宏转换或 `toc_upgrade --confirm` | `references/toc-upgrade-workflow.md` |
 | Markdown 导出 | `references/md-export-workflow.md` |
@@ -55,6 +56,7 @@ scripts/md_import.py          scripts/md_preflight.py
 scripts/math_upgrade.py       scripts/toc_upgrade.py
 scripts/md_export.py          scripts/common.py
 scripts/config_parser.py      scripts/debug_utils.py
+scripts/math_compat.py
 ```
 
 缺失或损坏时不要直接重写；先报告，用户确认后才按 git 状态恢复跟踪版本。
@@ -117,6 +119,8 @@ scripts/config_parser.py      scripts/debug_utils.py
   源文档已指定尺寸时优先保留。仅影响后续导入的显示尺寸，不改原图或自动回溯已有页面。
 - 导入生成的代码宏按 `import_config.code_collapse_threshold`（默认 10）控制折叠：
   实际代码行数大于阈值时折叠，否则展开；计数规则见配置指南。不自动修改已有页面。
+- 公式兼容由共享模块处理，合法源 Markdown 保持不变；格式与兼容检查分别报告。
+  特殊矩阵等需人工复核，预审关闭时也不能绕过转换阶段的兼容门禁。
 
 ### 数学公式升级
 
@@ -132,6 +136,7 @@ scripts/config_parser.py      scripts/debug_utils.py
 - 转换幂等；无变化不 PUT、不增加版本。
 - `--confirm` 重新拉取页面，源版本或正文 SHA256 变化时拒绝提交旧结果，不提供强制绕过。
 - `left` 插入或替换唯一 alignment；`center` 删除已有 alignment。
+- 已有原生数学宏也检查兼容性；`--confirm` 复查候选。已知规则通过不等于实际渲染通过。
 
 ### 目录宏双向转换
 
