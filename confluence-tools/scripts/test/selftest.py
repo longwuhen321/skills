@@ -2343,6 +2343,43 @@ class TestMathCompatibilityIntegration(unittest.TestCase):
         self.assertIn(r'\mathop{\mathrm{rank}}\nolimits A', storage)
         self.assertEqual(source, r'$\dfrac{1}{2}+\operatorname{rank}A$')
 
+
+    def test_matrix_brace_preflight_import_upgrade_share_rule_without_source_edits(self):
+        tex = r'\left\{\begin{matrix}a\\b\end{matrix}\right.'
+        fixed_tex = r'\left\lbrace\begin{matrix}a\\b\end{matrix}\right.'
+        source = Path(self.tmp.name) / 'matrix-brace.md'
+        content = ('# T\n\n$$\n' + tex + '\n$$\n').encode('utf-8')
+        source.write_bytes(content)
+        review = review_markdown(source, source.parent / 'review')
+        self.assertEqual(review['status'], REVIEW_CLEAN)
+        self.assertEqual(review['candidate_bytes'], content)
+        self.assertTrue(review['report']['math_compatibility']['changes'])
+        storage = self.importer._convert_md_to_storage(content.decode('utf-8'))
+        self.assertIn(fixed_tex, storage)
+        self.assertNotIn(tex, storage)
+        self.importer.preflight_review = True
+        prepared = self.importer._prepare_upload_target(source)
+        self.assertEqual(Path(prepared[0]), source)
+        self.assertEqual(source.read_bytes(), content)
+        self.assertFalse((source.parent / 'matrix-brace__修复.md').exists())
+        native = build_block_template('left').format(content=tex)
+        after, stats = self.updater.convert_math(native)
+        self.assertIn(fixed_tex, after)
+        self.assertTrue(self.updater.verify(native, after, stats)[0])
+        self.assertEqual(self.updater.convert_math(after)[0], after)
+
+    def test_matrix_brace_storage_validation_rejects_unconverted_payload(self):
+        tex = r'\left\{\begin{matrix}a\\b\end{matrix}\right.'
+        source = Path(self.tmp.name) / 'matrix-brace.md'
+        source.write_bytes(('$$' + tex + '$$').encode('utf-8'))
+        review = review_markdown(source, source.parent / 'review')
+        native = build_block_template('left').format(content=tex)
+        self.assertFalse(validate_storage(review, native, 'literal')[0])
+        review = review_markdown(source, source.parent / 'review')
+        fixed, report = normalize_math_storage(native)
+        self.assertTrue(report['passed'])
+        self.assertTrue(validate_storage(review, fixed, 'literal')[0])
+
     def test_upgrade_repairs_existing_native_macro_and_is_idempotent(self):
         source = build_block_template('left').format(content=r'\dfrac{a}{b}')
         after, stats = self.updater.convert_math(source)
@@ -2494,6 +2531,102 @@ class TestMathCompatibilityRules(unittest.TestCase):
         self.assertIn('强制读取条件', rules)
         self.assertIn('完整读取', rules)
         self.assertIn('renderer_validation=not_run', rules)
+
+
+    def test_matrix_brace_workaround_preserves_real_coefficient_formula(self):
+        source = (
+            r'\left\{\begin{matrix}\overline{C}_n^m\\\overline{S}_n^m\end{matrix}\right.'
+            + '\n' + r'=\sqrt{\frac{(1+\delta_m)(n+m)!}{2(2n+1)(n-m)!}}'
+            + '\n' + r'\left\{\begin{matrix}C_n^m\\S_n^m\end{matrix}\right.')
+        expected = (
+            r'\left\lbrace\begin{matrix}\overline{C}_n^m\\\overline{S}_n^m\end{matrix}\right.'
+            + '\n' + r'=\sqrt{\frac{(1+\delta_m)(n+m)!}{2(2n+1)(n-m)!}}'
+            + '\n' + r'\left\lbrace\begin{matrix}C_n^m\\S_n^m\end{matrix}\right.')
+        result = assess_formula(source)
+        self.assertEqual(result['text'], expected)
+        self.assertFalse(result['issues'])
+        self.assertEqual([c['rule_id'] for c in result['changes']],
+                         ['MATH_COMPAT_MATRIX_LBRACE'] * 2)
+        self.assertEqual([c['offset'] for c in result['changes']],
+                         [0, source.rindex(r'\left')])
+        again = assess_formula(expected)
+        self.assertEqual(again['text'], expected)
+        self.assertFalse(again['changes'])
+        self.assertEqual(again['renderer_validation'], 'not_run')
+
+    def test_matrix_brace_matches_nested_environment_scope(self):
+        cases = {
+            r'\left\{\begin{matrix}\left\{\begin{matrix}a\\b\end{matrix}\right.\\c\end{matrix}\right.':
+                r'\left\lbrace\begin{matrix}\left\lbrace\begin{matrix}a\\b\end{matrix}\right.\\c\end{matrix}\right.',
+            r'\left\{\begin{matrix}\begin{array}{c}a\\b\end{array}\\c\end{matrix}\right.':
+                r'\left\lbrace\begin{matrix}\begin{array}{c}a\\b\end{array}\\c\end{matrix}\right.',
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(assess_formula(source)['text'], expected)
+
+    def test_matrix_brace_leaves_other_delimiters_and_environments_unchanged(self):
+        for source in (
+                r'\left\{x\right.',
+                r'\left\{\begin{matrix}a\\b\end{matrix}\right\}',
+                r'\left\{\begin{array}{c}a\\b\end{array}\right.',
+                r'\left\lbrace\begin{matrix}a\\b\end{matrix}\right.',
+                r'\leftover\{\begin{matrix}a\\b\end{matrix}\right.'):
+            with self.subTest(source=source):
+                result = assess_formula(source)
+                self.assertEqual(result['text'], source)
+                self.assertFalse(result['changes'])
+
+    def test_matrix_brace_skips_comments_and_escaped_controls(self):
+        literal = r'\left\{\begin{matrix}a\\b\end{matrix}\right.'
+        prefix = '% ' + literal + '\n' + r'\\left\{\begin{matrix}a\\b\end{matrix}\right.' + '\n'
+        active = ('\\left % keep\n\\{\\begin{matrix}a% \\end{matrix}\\right.\n'
+                  '\\\\b\\end{matrix}\\right.')
+        expected = ('\\left % keep\n\\lbrace\\begin{matrix}a% \\end{matrix}\\right.\n'
+                    '\\\\b\\end{matrix}\\right.')
+        self.assertEqual(assess_formula(prefix + active)['text'], prefix + expected)
+
+    def test_matrix_brace_nested_in_fraction_keeps_displaystyle_scope(self):
+        source = r'\dfrac{\left\{\begin{matrix}a\\b\end{matrix}\right.}{c}+d'
+        expected = r'{\displaystyle\frac{\left\lbrace\begin{matrix}a\\b\end{matrix}\right.}{c}}+d'
+        self.assertEqual(assess_formula(source)['text'], expected)
+
+    def test_matrix_brace_unresolved_structures_keep_whole_formula(self):
+        for source in (
+                r'\left\{\begin{matrix}a\\b',
+                r'\left\{\begin{matrix}a\\b\end{pmatrix}\right.',
+                r'\left\{\begin{matrix}\multicolumn{2}{c}{a}\end{matrix}\right.',
+                r'\def\lbrace{x}\left\{\begin{matrix}a\end{matrix}\right.'):
+            with self.subTest(source=source):
+                result = assess_formula(source)
+                self.assertTrue(result['issues'])
+                self.assertEqual(result['text'], source)
+                self.assertFalse(result['changes'])
+
+    def test_matrix_brace_storage_changes_only_native_math_payloads(self):
+        tex = r'\left\{\begin{matrix}a\\b\end{matrix}\right.'
+        fixed_tex = r'\left\lbrace\begin{matrix}a\\b\end{matrix}\right.'
+        block = ('<ac:structured-macro ac:name="mathblock" ac:macro-id="stable-block">'
+                 '<ac:parameter ac:name="alignment">left</ac:parameter>'
+                 '<ac:plain-text-body><![CDATA[' + tex + ']]></ac:plain-text-body>'
+                 '</ac:structured-macro>')
+        inline = ('<ac:structured-macro ac:name="mathinline" ac:macro-id="stable-inline">'
+                  '<ac:parameter ac:name="body">' + tex + '</ac:parameter>'
+                  '</ac:structured-macro>')
+        prefix = ('<p>' + tex + '</p><!-- ' + block + ' -->'
+                  '<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA['
+                  + block.replace(']]>', ']]]]><![CDATA[>')
+                  + ']]></ac:plain-text-body></ac:structured-macro>'
+                  '<ac:structured-macro ac:name="expand"><ac:rich-text-body>')
+        suffix = '</ac:rich-text-body></ac:structured-macro><hr/>'
+        source = prefix + block + inline + suffix
+        fixed, report = normalize_math_storage(source)
+        self.assertEqual(fixed, prefix + block.replace(tex, fixed_tex)
+                         + inline.replace(tex, fixed_tex) + suffix)
+        self.assertEqual(report['formulas'], 2)
+        self.assertEqual(report['changed_formulas'], 2)
+        self.assertTrue(report['passed'])
+        self.assertEqual(normalize_math_storage(fixed)[0], fixed)
 
     def test_nested_and_unbraced_fractions_keep_scope(self):
         cases = {

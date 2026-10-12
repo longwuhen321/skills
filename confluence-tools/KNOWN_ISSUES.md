@@ -25,6 +25,24 @@ Windows: Get-Date -Format "yyyy-MM-dd"；Linux/macOS: date +%F
 追加模板结束——复制时删除上方/下方的分隔注释与本说明，只保留替换后的正式条目
 ============================================================================ -->
 
+## [2026-10-12] 数学插件改写大括号矩阵后残留孤立的右定界符
+
+- **现象**：合法的 `\left\{\begin{matrix}...\end{matrix}\right.` 在原生数学宏中报
+  `Missing \left or extra \right`；原稿、storage 和 API HTML 的表面回读均可通过。
+- **根因**：数学插件 `com.tensixtwo.conf.latexmath` 5.1.16 在生成最终 TeX 时将左大括号
+  与矩阵改为 `cases`，却留下 `\right.`；实际错误在客户端解析该输入时出现。
+- **修复**：`scripts/math_compat.py` 增加 `MATH_COMPAT_MATRIX_LBRACE`，仅识别左大括号、
+  正确配对的 `matrix` 和隐形右定界符，将该左定界符改为等价 `\left\lbrace`。
+  支持同一公式多个命中和嵌套环境，保留注释、转义、宏身份及其他内容；不处理普通集合、
+  正常闭合定界符、`array` 等其他环境。预审、导入、升级继续共用该模块，无新配置或参数。
+- **排查方法**：从 `body.view` 的 `script[data-latex-markup]` 提取最终 TeX，与宏正文对照；
+  用不保存页面的转换接口核对候选，不能只搜索 API HTML 中的错误提示文字。
+  数量配对仅为筛查，还需核对定界符和环境的实际作用域。
+- **验证范围**：原基线 270 项自测通过，新增 9 项回归覆盖真实系数公式、多个命中、嵌套
+  环境、幂等、注释与代码保护、三个共享入口及写入前校验。合法源文件、CLI、配置和
+  非数学内容保持原契约；已知规则与插件转换检查不等于浏览器显示或公网性能验证，
+  未运行目标渲染器时仍记录 `renderer_validation=not_run`。
+
 ## [2026-09-22] 合法 LaTeX 在目标数学宏中报未定义命令，已有原生宏未检查兼容性
 
 - **现象**：`mathblock` / `mathinline` 报 `Undefined control sequence`，典型命令为

@@ -71,6 +71,40 @@ def _argument(tex, cursor, end):
     raise ValueError('公式命令参数的花括号未闭合')
 
 
+def _matrix_brace(tex, cursor, end):
+    """Locate only a left brace enclosing matrix with an invisible right side."""
+    brace = _skip_space(tex, cursor, end)
+    if tex[brace:brace + 2] != r'\{':
+        return None
+    opening = _TOKEN.match(tex, _skip_space(tex, brace + 2, end), end)
+    if not opening or opening.group() != r'\begin':
+        return None
+    a, b = _argument(tex, opening.end(), end)
+    if tex[a:b] != '{matrix}':
+        return None
+    environments = ['{matrix}']
+    for token in _TOKEN.finditer(tex, b, end):
+        if token.group() not in (r'\begin', r'\end'):
+            continue
+        a, finish = _argument(tex, token.end(), end)
+        environment = tex[a:finish]
+        if token.group() == r'\begin':
+            environments.append(environment)
+        elif environments[-1] != environment:
+            raise ValueError('左大括号内的矩阵环境未正确配对')
+        else:
+            environments.pop()
+            if environments:
+                continue
+            right = _TOKEN.match(tex, _skip_space(tex, finish, end), end)
+            if right and right.group() == r'\right':
+                delimiter = _skip_space(tex, right.end(), end)
+                if delimiter < end and tex[delimiter] == '.':
+                    return brace
+            return None
+    raise ValueError('左大括号内的矩阵环境未闭合')
+
+
 def assess_formula(tex):
     """Return a candidate and located known-rule diagnostics; never write files.
 
@@ -99,11 +133,17 @@ def assess_formula(tex):
             if token.start() < cursor or not token.group().startswith('\\'):
                 continue
             name = token.group()[1:]
-            if name not in ('dfrac', 'operatorname', 'wideparen', 'iddots'):
+            if name not in ('dfrac', 'operatorname', 'wideparen', 'iddots', 'left'):
                 continue
             replacement, finish = token.group(), token.end()
             try:
-                if name == 'dfrac':
+                if name == 'left':
+                    brace = _matrix_brace(tex, finish, end)
+                    if brace is None:
+                        continue
+                    replacement = tex[token.start():brace] + r'\lbrace'
+                    finish = brace + 2
+                elif name == 'dfrac':
                     a, b = _argument(tex, finish, end)
                     c, d = _argument(tex, b, end)
                     replacement = (r'{\displaystyle\frac' + tex[finish:a]
@@ -138,7 +178,8 @@ def assess_formula(tex):
                     finish = b
                 else:
                     replacement = r'\mathinner{⋰}'
-                changed('MATH_COMPAT_' + name.upper(), token.start(),
+                changed('MATH_COMPAT_MATRIX_LBRACE' if name == 'left'
+                        else 'MATH_COMPAT_' + name.upper(), token.start(),
                         '\\' + name + ' 转为已验证的兼容写法')
             except ValueError as exc:
                 issue(token.start(), str(exc) + ': \\' + name)
