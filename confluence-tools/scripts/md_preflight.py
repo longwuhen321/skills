@@ -7,8 +7,12 @@ import os
 import re
 import secrets
 import shutil
+from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote
+
+import markdown2
+from bs4 import BeautifulSoup
 
 from common import (check_xhtml_balance, compile_inline_math_pattern,
                     inline_math_content)
@@ -306,6 +310,106 @@ def _check_attachments(source_path, candidate, issues):
     return attachments
 
 
+class _FootnoteMarkdown(markdown2.Markdown):
+    """沿用转换库的定义解析，同时记录会被字典覆盖的重复定义。"""
+
+    def __init__(self):
+        super().__init__(extras=['tables', 'fenced-code-blocks',
+                                 'cuddled-lists', 'footnotes'])
+        self.definition_labels = []
+        self.unresolved_references = []
+
+    def _extract_footnote_def_sub(self, match):
+        self.definition_labels.append(match.group(1))
+        return super()._extract_footnote_def_sub(match)
+
+    def postprocess(self, text):
+        # 在库恢复转义字符之前检查，避免把字面 \[^...] 误作缺失引用。
+        soup = BeautifulSoup(text, 'html.parser')
+        for code in soup.find_all(['code', 'pre']):
+            code.decompose()
+        self.unresolved_references = re.findall(r'\[\^([^\]\n]+)\]', soup.get_text())
+        return super().postprocess(text)
+
+
+def _footnote_snapshot(storage, math_marker=''):
+    """核对脚注目标、引用次数及可见正文；数学宏另由公式门禁核对。"""
+    soup = BeautifulSoup(storage, 'html.parser')
+    references = Counter(link.get('href') for link in
+                         soup.select('sup.footnote-ref a'))
+    bodies = []
+    for note in soup.select('div.footnotes > ol > li'):
+        identity = note.get('id')
+        for link in note.select('a.footnoteBackLink, sup.footnote-ref'):
+            link.decompose()
+        for macro in note.find_all('ac:structured-macro'):
+            name = macro.get('ac:name')
+            if name in ('mathinline', 'mathblock'):
+                macro.decompose()
+            elif name == 'code':
+                body = macro.find('ac:plain-text-body')
+                code = soup.new_tag('code')
+                code.string = body.get_text() if body else ''
+                macro.replace_with(code)
+        # 预期 HTML 尚未应用 ==高亮==，只去除非代码文字中的标记。
+        for text in list(note.find_all(string=True)):
+            if not text.find_parent(['code', 'pre']):
+                text.replace_with(re.sub(r'==([^\n]*?)==', r'\1', str(text)))
+        visible = note.get_text()
+        if math_marker:
+            visible = visible.replace(math_marker, '')
+        bodies.append({'id': identity, 'text': ''.join(visible.split())})
+    return {'definitions': bodies, 'references': dict(references)}
+
+
+def _review_footnotes(source, issues):
+    if '[^' not in source:
+        return {'definitions': [], 'references': {}}
+    # 数学内容不参与脚注语法或普通正文比较，代码由 Markdown 库自身保护。
+    marker = '\ue000'
+    while marker in source:
+        marker = chr(ord(marker) + 1)
+    masked = list(source)
+    cursor = 0
+    for code in list(CODE_RE.finditer(source)) + [None]:
+        end = code.start() if code else len(source)
+        for _kind, match in _formula_matches(source[cursor:end]):
+            start, stop = cursor + match.start(), cursor + match.end()
+            masked[start:stop] = [marker] + [
+                '\n' if char == '\n' else ' ' for char in source[start + 1:stop]]
+        cursor = code.end() if code else end
+    masked = ''.join(masked)
+    parser = _FootnoteMarkdown()
+    rendered = parser.convert(masked)
+    snapshot = _footnote_snapshot(rendered, marker)
+    emitted = {item['id'] for item in snapshot['definitions']}
+    seen = set()
+    for label in parser.definition_labels:
+        identity = re.sub(r'\W', '-', label)
+        definition = re.search(r'(?m)^ {0,3}\[\^' + re.escape(label) + r'\]:', source)
+        offset = definition.start() if definition else 0
+        if identity in seen:
+            issues.append(_issue('FOOTNOTE_DEFINITION_DUPLICATE', 'error', source,
+                                 offset, f'脚注定义重复或规范化 ID 冲突: {label}'))
+        seen.add(identity)
+        if 'fn-' + identity not in emitted:
+            issues.append(_issue('FOOTNOTE_DEFINITION_UNUSED', 'error', source,
+                                 offset, f'脚注未被正文引用，转换会丢弃定义: {label}'))
+        if definition:
+            lines = source[definition.end():].splitlines()
+            first = lines[0] if lines else ''
+            following = next((line for line in lines[1:] if line.strip()), '')
+            if not first.strip() and not (
+                    following.startswith(('    ', '\t')) and following.strip()):
+                issues.append(_issue('FOOTNOTE_DEFINITION_EMPTY', 'error', source,
+                                     offset, f'脚注定义为空或正文缺少缩进: {label}'))
+    for label in parser.unresolved_references:
+        offset = max(0, source.find('[^' + label + ']'))
+        issues.append(_issue('FOOTNOTE_DEFINITION_MISSING', 'error', source,
+                             offset, f'脚注引用未能解析到定义: {label}'))
+    return snapshot
+
+
 def review_markdown(source_path, artifact_dir, heading_math_mode='literal'):
     source_path = Path(source_path).resolve()
     raw = source_path.read_bytes()
@@ -331,6 +435,7 @@ def review_markdown(source_path, artifact_dir, heading_math_mode='literal'):
         source, counts, fixes, issues, compatibility, heading_math_mode)
     _check_residual_dollars(source, residue, issues)
     attachments = _check_attachments(source_path, candidate, issues)
+    footnotes = _review_footnotes(source, issues)
 
     artifact_dir = Path(artifact_dir)
     review_path = artifact_dir / 'review.json'
@@ -361,6 +466,7 @@ def review_markdown(source_path, artifact_dir, heading_math_mode='literal'):
         'fixes': fixes,
         'issues': issues,
         'attachments': attachments,
+        'footnotes': footnotes,
         'storage_validation': None,
     }
     _atomic_write_json(review_path, report)
@@ -378,6 +484,14 @@ def review_markdown(source_path, artifact_dir, heading_math_mode='literal'):
 def validate_storage(result, storage_html, heading_math_mode):
     checks = []
     errors = []
+    footnotes = result['report'].get('footnotes')
+    if footnotes and (footnotes['definitions'] or footnotes['references']):
+        actual = _footnote_snapshot(storage_html)
+        preserved = actual == footnotes
+        checks.append({'check': 'footnote_integrity', 'passed': preserved,
+                       'detail': {'expected': footnotes, 'actual': actual}})
+        if not preserved:
+            errors.append('脚注引用、目标或正文与源文档不一致')
     normalized, compatibility = normalize_math_storage(storage_html)
     compatible = compatibility['passed'] and normalized == storage_html
     checks.append({'check': 'known_math_compatibility', 'passed': compatible,

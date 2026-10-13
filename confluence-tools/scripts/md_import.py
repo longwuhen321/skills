@@ -855,11 +855,13 @@ class MarkdownImporter:
 
     def _convert_highlight_marks(self, html_content):
         """将==highlight==语法转换为加粗"""
-        parts = re.split(r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>|<img\b[^>]*>)',
-                         html_content, flags=re.DOTALL)
+        parts = re.split(
+            r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>|'
+            r'<img\b[^>]*>|<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>)',
+            html_content, flags=re.DOTALL | re.IGNORECASE)
         converted_parts = []
-        for part in parts:
-            if part.startswith('<ac:structured-macro') or part.startswith('<img'):
+        for index, part in enumerate(parts):
+            if index % 2 == 1:
                 converted_parts.append(part)
             else:
                 # ==高亮== 不跨行，防未闭合 == 吞掉后续内容
@@ -944,7 +946,10 @@ class MarkdownImporter:
 
     def _clean_unnecessary_backslashes(self, html_content):
         """清理 markdown2 在 HTML 转换过程中产生的多余反斜杠转义"""
-        parts = re.split(r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>)', html_content, flags=re.DOTALL)
+        parts = re.split(
+            r'(<ac:structured-macro\b[^>]*/>|<ac:structured-macro\b.*?</ac:structured-macro>|'
+            r'<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>)',
+            html_content, flags=re.DOTALL | re.IGNORECASE)
         cleaned_parts = []
         for i, part in enumerate(parts):
             if i % 2 == 1:
@@ -1123,7 +1128,9 @@ class MarkdownImporter:
         protected_md, math_blocks = self._protect_math_blocks(protected_md)
 
         # 2. 转换为HTML
-        html_content = markdown2.markdown(protected_md, extras=["tables", "fenced-code-blocks", "cuddled-lists"])
+        html_content = markdown2.markdown(
+            protected_md,
+            extras=["tables", "fenced-code-blocks", "cuddled-lists", "footnotes"])
 
         # 2.5 恢复受保护的代码片段
         if code_spans:

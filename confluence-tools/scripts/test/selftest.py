@@ -27,6 +27,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
+from bs4 import BeautifulSoup
 
 from common import (load_config, request_with_retry, collect_space_pages,
                     build_block_template)
@@ -96,6 +97,65 @@ class FakeResponse:
 
 
 class TestMdPreflight(unittest.TestCase):
+
+    def test_invalid_footnote_definitions_block_without_changing_source(self):
+        cases = (
+            ('正文[^missing]。\n', 'FOOTNOTE_DEFINITION_MISSING'),
+            ('正文 ' + '\\' * 2 + '[^missing]。\n',
+             'FOOTNOTE_DEFINITION_MISSING'),
+            ('正文[^n]。\n\n[^n]: 第一条\n[^n]: 第二条\n',
+             'FOOTNOTE_DEFINITION_DUPLICATE'),
+            ('正文[^a.b] 和 [^a-b]。\n\n[^a.b]: 第一条\n[^a-b]: 第二条\n',
+             'FOOTNOTE_DEFINITION_DUPLICATE'),
+            ('普通正文。\n\n[^unused]: 不可静默丢失的脚注\n',
+             'FOOTNOTE_DEFINITION_UNUSED'),
+            ('正文[^empty]。\n\n[^empty]:\n', 'FOOTNOTE_DEFINITION_EMPTY'),
+            ('正文[^empty]。\n\n[^empty]:\n\n后面的普通段落。\n',
+             'FOOTNOTE_DEFINITION_EMPTY'),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'footnotes.md'
+            for index, (content, expected_rule) in enumerate(cases):
+                with self.subTest(rule=expected_rule, content=content):
+                    original = content.encode('utf-8')
+                    source.write_bytes(original)
+                    result = review_markdown(source, root / str(index))
+                    self.assertFalse(result['passed'], result['report'])
+                    self.assertEqual(result['status'], REVIEW_BLOCKED)
+                    issue = next(item for item in result['report']['issues']
+                                 if item['rule_id'] == expected_rule)
+                    self.assertGreaterEqual(issue['line'], 1)
+                    self.assertGreaterEqual(issue['column'], 1)
+                    self.assertEqual(source.read_bytes(), original)
+
+    def test_code_and_escaped_footnotes_are_not_references_or_definitions(self):
+        content = ('`[^inline]` 和 ``[^double]: code``。\n\n'
+                   '```text\n[^fenced]: code body\n[^missing]\n```\n\n'
+                   '\\[^escaped] 和 \\[^escaped-definition]: literal\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'literals.md'
+            source.write_bytes(content.encode('utf-8'))
+            result = review_markdown(source, root / 'review')
+            self.assertTrue(result['passed'], result['report'])
+            self.assertFalse(any(item['rule_id'].startswith('FOOTNOTE_')
+                                 for item in result['report']['issues']))
+            self.assertEqual(result['candidate_text'], content)
+
+    def test_odd_backslashes_keep_literal_footnotes_out_of_preflight_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'escaped.md'
+            for count in (1, 3):
+                with self.subTest(backslashes=count):
+                    content = '字面引用 ' + '\\' * count + '[^literal]。\n'
+                    source.write_bytes(content.encode('utf-8'))
+                    result = review_markdown(source, root / str(count))
+                    self.assertTrue(result['passed'], result['report'])
+                    self.assertFalse(any(item['rule_id'].startswith('FOOTNOTE_')
+                                         for item in result['report']['issues']))
+                    self.assertEqual(result['candidate_text'], content)
 
     def test_spaced_formula_candidate_is_canonical_and_source_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -490,6 +550,151 @@ class TestMdImport(unittest.TestCase):
         self.load_patcher.stop()
         self.skill_root_patcher.stop()
         self.tmp.cleanup()
+
+    def test_footnote_text_and_repeated_references_survive_conversion(self):
+        content = ('正文[^note]，再次引用[^note]。\n\n'
+                   '[^note]: 脚注正文必须完整保留。\n')
+        source = Path(self.tmp.name) / 'footnote.md'
+        original = content.encode('utf-8')
+        source.write_bytes(original)
+        result = review_markdown(source, Path(self.tmp.name) / 'review')
+        storage = self.importer._convert_md_to_storage(result['candidate_text'])
+        soup = BeautifulSoup(storage, 'html.parser')
+        self.assertEqual(len(soup.select('sup.footnote-ref a[href="#fn-note"]')), 2)
+        notes = soup.select('li[id="fn-note"]')
+        self.assertEqual(len(notes), 1)
+        self.assertIn('脚注正文必须完整保留。', notes[0].get_text())
+        passed, errors = validate_storage(result, storage, 'literal')
+        self.assertTrue(passed, errors)
+        check = next(item for item in result['report']['storage_validation']['checks']
+                     if item['check'] == 'footnote_integrity')
+        self.assertTrue(check['passed'], check)
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_multiline_footnote_preserves_text_math_and_inline_code(self):
+        content = ('正文[^n]。\n\n'
+                   '[^n]: 第一段 **强调内容**，行内公式 $x_{n}$。\n\n'
+                   '    第二段 `flag==0` 和 `flag==1`。\n\n'
+                   '    $$y=x+1$$\n')
+        source = Path(self.tmp.name) / 'multiline.md'
+        source.write_bytes(content.encode('utf-8'))
+        result = review_markdown(source, Path(self.tmp.name) / 'review')
+        self.assertTrue(result['passed'], result['report'])
+        storage = self.importer._convert_md_to_storage(result['candidate_text'])
+        note = BeautifulSoup(storage, 'html.parser').find('li', id='fn-n')
+        self.assertIsNotNone(note)
+        self.assertIn('第一段', note.get_text())
+        self.assertIn('第二段', note.get_text())
+        self.assertEqual(note.find('strong').get_text(), '强调内容')
+        self.assertEqual([code.get_text() for code in note.find_all('code')],
+                         ['flag==0', 'flag==1'])
+        self.assertIn('ac:name="mathinline"', str(note))
+        self.assertIn('ac:name="mathblock"', str(note))
+        passed, errors = validate_storage(result, storage, 'literal')
+        self.assertTrue(passed, errors)
+
+    def test_footnotes_with_only_math_or_code_have_valid_bodies(self):
+        for index, body in enumerate(('$x_{n}$', '$$y=x+1$$', '`flag==0`')):
+            with self.subTest(body=body):
+                source = Path(self.tmp.name) / 'body.md'
+                source.write_bytes(('正文[^n]。\n\n[^n]: ' + body + '\n').encode('utf-8'))
+                result = review_markdown(source, Path(self.tmp.name) / str(index))
+                self.assertTrue(result['passed'], result['report'])
+                storage = self.importer._convert_md_to_storage(result['candidate_text'])
+                passed, errors = validate_storage(result, storage, 'literal')
+                self.assertTrue(passed, errors)
+                self.assertIsNotNone(BeautifulSoup(storage, 'html.parser').find('li', id='fn-n'))
+
+    def test_footnote_code_preserves_comparisons_and_literal_backslashes(self):
+        cases = (
+            ('代码\n\n    ```text\n    flag==0 or flag==1\n    ```',
+             'flag==0 or flag==1', 'macro'),
+            ('代码\n\n    ```\n    flag==0 or flag==1\n    ```',
+             'flag==0 or flag==1', 'macro'),
+            (r'`\[^literal]`', r'\[^literal]', 'inline'),
+        )
+        source = Path(self.tmp.name) / 'footnote-code.md'
+        for index, (body, expected_code, kind) in enumerate(cases):
+            with self.subTest(body=body):
+                content = '正文[^n]。\n\n[^n]: ' + body + '\n'
+                source.write_bytes(content.encode('utf-8'))
+                result = review_markdown(source, Path(self.tmp.name) / str(index))
+                self.assertTrue(result['passed'], result['report'])
+                storage = self.importer._convert_md_to_storage(result['candidate_text'])
+                note = BeautifulSoup(storage, 'html.parser').find('li', id='fn-n')
+                self.assertIsNotNone(note)
+                if kind == 'inline':
+                    code = note.find('code')
+                else:
+                    macro = note.find('ac:structured-macro', attrs={'ac:name': 'code'})
+                    self.assertIsNotNone(macro)
+                    code = macro.find('ac:plain-text-body')
+                self.assertIsNotNone(code)
+                self.assertEqual(code.get_text().strip(), expected_code)
+                passed, errors = validate_storage(result, storage, 'literal')
+                self.assertTrue(passed, errors)
+
+    def test_footnote_storage_rejects_missing_body_reference_or_target(self):
+        content = '正文[^n]。\n\n[^n]: 必须保留的第一句。以及第二句。\n'
+        source = Path(self.tmp.name) / 'integrity.md'
+        source.write_bytes(content.encode('utf-8'))
+        storage = self.importer._convert_md_to_storage(content)
+        self.assertIn('必须保留的第一句。以及第二句。', storage)
+        for index, change in enumerate(('body', 'partial_body', 'reference', 'target')):
+            with self.subTest(change=change):
+                soup = BeautifulSoup(storage, 'html.parser')
+                note = soup.find('li', id='fn-n')
+                self.assertIsNotNone(note)
+                if change in ('body', 'partial_body'):
+                    text = note.find(string=lambda value: value and '必须保留的第一句。' in value)
+                    self.assertIsNotNone(text)
+                    removed = ('必须保留的第一句。以及第二句。'
+                               if change == 'body' else '以及第二句。')
+                    text.replace_with(str(text).replace(removed, ''))
+                elif change == 'reference':
+                    soup.select_one('sup.footnote-ref').decompose()
+                else:
+                    del note['id']
+                result = review_markdown(source, Path(self.tmp.name) / str(index))
+                passed, errors = validate_storage(result, str(soup), 'literal')
+                self.assertFalse(passed, errors)
+                self.assertEqual(result['status'], REVIEW_BLOCKED)
+                check = next(item for item in result['report']['storage_validation']['checks']
+                             if item['check'] == 'footnote_integrity')
+                self.assertFalse(check['passed'], check)
+
+    def test_unreachable_footnote_cycle_cannot_pass_preflight(self):
+        content = '普通正文。\n\n[^a]: 第一条[^b]。\n[^b]: 第二条[^a]。\n'
+        source = Path(self.tmp.name) / 'cycle.md'
+        source.write_bytes(content.encode('utf-8'))
+        result = review_markdown(source, Path(self.tmp.name) / 'review')
+        if result['passed']:
+            storage = self.importer._convert_md_to_storage(result['candidate_text'])
+            passed, errors = validate_storage(result, storage, 'literal')
+            self.assertFalse(passed, errors)
+        self.assertEqual(result['status'], REVIEW_BLOCKED)
+
+    def test_inline_code_comparisons_do_not_become_highlights(self):
+        content = '使用 `flag==0`、`flag==1`、`flag==2`、`flag==3`，正文 ==高亮==。'
+        storage = self.importer._convert_md_to_storage(content)
+        soup = BeautifulSoup(storage, 'html.parser')
+        self.assertEqual([code.get_text() for code in soup.find_all('code')],
+                         ['flag==0', 'flag==1', 'flag==2', 'flag==3'])
+        self.assertEqual([strong.get_text() for strong in soup.find_all('strong')],
+                         ['高亮'])
+        self.assertTrue(all(code.find('strong') is None for code in soup.find_all('code')))
+
+    def test_highlight_conversion_preserves_complete_html_code_regions(self):
+        regions = ('<code>flag==0</code>',
+                   '<code class="language-text">flag==1 ==literal==</code>',
+                   '<pre>flag==2\nflag==3</pre>',
+                   '<pre><code>==literal==\nflag==4</code></pre>')
+        content = '<p>==高亮==</p>' + ' '.join(regions)
+        converted = self.importer._convert_highlight_marks(content)
+        for region in regions:
+            self.assertIn(region, converted)
+        self.assertEqual(converted.count('<strong>'), 1)
+        self.assertIn('<strong>高亮</strong>', converted)
 
     def test_code_protect_restore_roundtrip(self):
         md = '```python\nprint("hi")\n```\n\nand `code` here'
