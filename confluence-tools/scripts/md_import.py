@@ -35,6 +35,7 @@ if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
 from urllib.parse import unquote
 import markdown2
 from bs4 import BeautifulSoup
+from PIL import Image
 
 from common import (SKILL_ROOT, build_block_template, build_toc_macro,
                     collect_space_page_records, compile_inline_math_pattern,
@@ -114,6 +115,11 @@ class MarkdownImporter:
         self.image_width = import_cfg.get('image_width', 750)
         if type(self.image_width) is not int or self.image_width < 0:
             raise ValueError('import_config.image_width 必须为非负整数（0 表示不统一设置）')
+
+        self.image_small_width_threshold = import_cfg.get('image_small_width_threshold', 200)
+        if (type(self.image_small_width_threshold) is not int
+                or self.image_small_width_threshold < 0):
+            raise ValueError('import_config.image_small_width_threshold 必须为非负整数（0 表示关闭小图例外）')
 
         self.code_collapse_threshold = import_cfg.get('code_collapse_threshold', 10)
         if type(self.code_collapse_threshold) is not int or self.code_collapse_threshold < 0:
@@ -912,13 +918,6 @@ class MarkdownImporter:
                     value = img.get(key, styles.get(key))
                     if value is not None:
                         size_attrs.setdefault(key, value)
-            # 已有固定高度时也不补宽度，避免改变源图的宽高比例。
-            if self.image_width and not {'width', 'height'}.intersection(size_attrs):
-                size_attrs['width'] = str(self.image_width)
-            size_params = ''.join(
-                f' ac:{key}="{html.escape(str(value), quote=True)}"'
-                for key, value in size_attrs.items())
-
             if not img_path.startswith(('http', '//')):
                 # data: URI（base64 内嵌图片）：不做本地文件处理，保留原始引用
                 if img_path.startswith('data:'):
@@ -926,6 +925,20 @@ class MarkdownImporter:
                     return match.group(0)
                 abs_path = os.path.normpath(os.path.join(md_dir, unquote(img_path)))
                 if os.path.exists(abs_path):
+                    # 已有固定高度时也不补宽度，避免改变源图的宽高比例。
+                    if self.image_width and not {'width', 'height'}.intersection(size_attrs):
+                        width = self.image_width
+                        if self.image_small_width_threshold:
+                            try:
+                                with Image.open(abs_path) as image:
+                                    if image.width < self.image_small_width_threshold:
+                                        width = image.width
+                            except OSError:
+                                print(f'⚠️ 无法读取图片原始宽度，使用默认显示宽度 {width}px: {img_path}')
+                        size_attrs['width'] = str(width)
+                    size_params = ''.join(
+                        f' ac:{key}="{html.escape(str(value), quote=True)}"'
+                        for key, value in size_attrs.items())
                     attachment_url = self._upload_attachment(page_id, abs_path)
                     if attachment_url:
                         filename = os.path.basename(abs_path)

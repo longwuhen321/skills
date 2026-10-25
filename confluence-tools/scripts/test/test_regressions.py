@@ -266,20 +266,20 @@ class TestSafeConfigAndPackaging(unittest.TestCase):
             self.assertEqual(forbidden, [])
             self.assertEqual(len(suspicious), 3)
 
-    def test_dependency_check_reports_all_four_missing_in_stable_order(self):
+    def test_dependency_check_reports_all_five_missing_in_stable_order(self):
         with patch('dependency_check.importlib.import_module',
                    side_effect=ImportError('missing')) as import_module:
             self.assertEqual(
                 missing_dependencies(),
-                ['requests', 'markdown2', 'beautifulsoup4', 'markdownify'])
+                ['requests', 'markdown2', 'beautifulsoup4', 'markdownify', 'Pillow'])
         self.assertEqual(
             [call.args[0] for call in import_module.call_args_list],
-            ['requests', 'markdown2', 'bs4', 'markdownify'])
+            ['requests', 'markdown2', 'bs4', 'markdownify', 'PIL.Image'])
 
     def test_dependency_check_treats_broken_import_as_missing(self):
         with patch('dependency_check.importlib.import_module', side_effect=[
                 object(), ImportError('broken markdown2'), object(),
-                OSError('broken extension')]):
+                OSError('broken extension'), object()]):
             self.assertEqual(
                 missing_dependencies(), ['markdown2', 'markdownify'])
 

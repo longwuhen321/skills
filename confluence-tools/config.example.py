@@ -66,6 +66,11 @@ import_config = {
     # 无源尺寸时只补宽度，高度按比例缩放，不修改原图。单页和树导入共用。
     "image_width": 750,
 
+    # 小图例外阈值（原始像素宽度，px）：非负整数，默认 200，0 关闭例外。
+    # 无源尺寸且原图宽度严格小于阈值时按原宽显示，否则使用 image_width。
+    # image_width=0 时不补任何默认宽度；不改变上传的原图字节。
+    "image_small_width_threshold": 200,
+
     # 导入页面时的默认空间 Key。可被 --space 参数覆盖。
     "space": "ALG",
 

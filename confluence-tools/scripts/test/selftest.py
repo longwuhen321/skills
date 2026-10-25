@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image
 
 from common import (load_config, request_with_retry, collect_space_pages,
                     build_block_template)
@@ -909,7 +910,8 @@ class TestMdImport(unittest.TestCase):
 
     def test_image_width_applies_to_markdown_and_html_images(self):
         image = Path(self.tmp.name) / 'figure.png'
-        image.write_bytes(b'original image bytes')
+        Image.new('RGB', (482, 71)).save(image)
+        original = image.read_bytes()
         md_path = str(Path(self.tmp.name) / 'page.md')
         for width in (750, 1000):
             self.importer.image_width = width
@@ -924,11 +926,11 @@ class TestMdImport(unittest.TestCase):
                     self.assertNotIn('ac:height=', result)
                     self.assertIn('ri:filename="figure.png"', result)
                     upload.assert_called_once_with('123', str(image))
-        self.assertEqual(image.read_bytes(), b'original image bytes')
+        self.assertEqual(image.read_bytes(), original)
 
     def test_image_width_preserves_explicit_source_dimensions(self):
         image = Path(self.tmp.name) / 'figure.png'
-        image.write_bytes(b'original')
+        Image.new('RGB', (16, 16)).save(image)
         md_path = str(Path(self.tmp.name) / 'page.md')
         cases = (
             ('![figure](figure.png{width=320 height=160})', '320', '160'),
@@ -959,13 +961,87 @@ class TestMdImport(unittest.TestCase):
         image = Path(self.tmp.name) / 'figure.png'
         image.write_bytes(b'original')
         md_path = str(Path(self.tmp.name) / 'page.md')
-        with patch.object(self.importer, '_upload_attachment', return_value='/attachment'):
+        with patch.object(self.importer, '_upload_attachment', return_value='/attachment'), \
+                patch('md_import.Image.open') as open_image:
             result = self.importer._convert_md_links(
                 '<img src="figure.png" />', md_path, '123')
             self.assertNotIn('ac:width=', result)
             result = self.importer._convert_md_links(
                 '<img src="figure.png" width="320" />', md_path, '123')
             self.assertIn('ac:width="320"', result)
+            open_image.assert_not_called()
+
+    def test_small_image_threshold_configuration_and_validation(self):
+        self.assertEqual(self.importer.image_small_width_threshold, 200)
+        for value in (0, 200, 500):
+            with self.subTest(value=value), \
+                    patch.dict(MOCK_CFG['import_config'], image_small_width_threshold=value):
+                with MarkdownImporter(space_key='TEST') as importer:
+                    self.assertEqual(importer.image_small_width_threshold, value)
+        for value in (-1, True, False, '200', 200.0, None):
+            with self.subTest(value=value), \
+                    patch.dict(MOCK_CFG['import_config'], image_small_width_threshold=value), \
+                    patch('md_import.requests.Session') as session, \
+                    patch('md_import.os.makedirs') as makedirs:
+                with self.assertRaisesRegex(ValueError, 'image_small_width_threshold'):
+                    MarkdownImporter(space_key='TEST')
+                session.assert_not_called()
+                makedirs.assert_not_called()
+
+    def test_small_image_threshold_uses_strict_original_width(self):
+        md_path = str(Path(self.tmp.name) / 'page.md')
+        # 高度和面积不参与判断；等于阈值时仍用统一宽度。
+        for size in ((5, 3), (16, 16), (199, 800), (200, 16), (201, 16), (482, 71)):
+            for extension in ('png', 'jpg', 'gif', 'webp'):
+                image = Path(self.tmp.name) / f'figure.{extension}'
+                Image.new('RGB', size).save(image)
+                original = image.read_bytes()
+                for source in (f'![figure]({image.name})', f'<img src="{image.name}" />'):
+                    with self.subTest(size=size, extension=extension, source=source), \
+                            patch.object(self.importer, '_upload_attachment',
+                                         return_value='/attachment') as upload:
+                        storage = self.importer._convert_md_to_storage(source)
+                        result = self.importer._convert_md_links(storage, md_path, '123')
+                        expected = size[0] if size[0] < 200 else 750
+                        self.assertIn(f'ac:width="{expected}"', result)
+                        self.assertNotIn('ac:height=', result)
+                        upload.assert_called_once_with('123', str(image))
+                        self.assertEqual(image.read_bytes(), original)
+
+    def test_small_image_threshold_is_independent_of_default_width(self):
+        image = Path(self.tmp.name) / 'figure.png'
+        Image.new('RGB', (250, 20)).save(image)
+        self.importer.image_width = 1000
+        md_path = str(Path(self.tmp.name) / 'page.md')
+        for threshold, expected in ((200, 1000), (300, 250)):
+            self.importer.image_small_width_threshold = threshold
+            with self.subTest(threshold=threshold), \
+                    patch.object(self.importer, '_upload_attachment', return_value='/attachment'):
+                result = self.importer._convert_md_links('<img src="figure.png" />', md_path, '123')
+                self.assertIn(f'ac:width="{expected}"', result)
+
+    def test_small_image_threshold_zero_restores_uniform_width(self):
+        image = Path(self.tmp.name) / 'figure.png'
+        Image.new('RGB', (16, 16)).save(image)
+        self.importer.image_small_width_threshold = 0
+        with patch.object(self.importer, '_upload_attachment', return_value='/attachment'), \
+                patch('md_import.Image.open') as open_image:
+            result = self.importer._convert_md_links(
+                '<img src="figure.png" />', str(image.parent / 'page.md'), '123')
+            self.assertIn('ac:width="750"', result)
+            open_image.assert_not_called()
+
+    def test_small_image_unknown_dimensions_warn_and_use_default_width(self):
+        image = Path(self.tmp.name) / 'figure.svg'
+        image.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding='utf-8')
+        with patch.object(self.importer, '_upload_attachment', return_value='/attachment') as upload, \
+                patch('builtins.print') as output:
+            result = self.importer._convert_md_links(
+                '<img src="figure.svg" />', str(image.parent / 'page.md'), '123')
+            self.assertIn('ac:width="750"', result)
+            output.assert_called_once()
+            self.assertIn('无法读取图片原始宽度', output.call_args.args[0])
+            upload.assert_called_once_with('123', str(image))
 
     def test_image_width_leaves_external_images_code_and_macros_unchanged(self):
         source = ('<img src="https://example.invalid/figure.png" />'
@@ -974,10 +1050,12 @@ class TestMdImport(unittest.TestCase):
                   '<ac:structured-macro ac:name="code">'
                   '<ac:plain-text-body><![CDATA[![figure](figure.png)]]>'
                   '</ac:plain-text-body></ac:structured-macro>')
-        with patch.object(self.importer, '_upload_attachment') as upload:
+        with patch.object(self.importer, '_upload_attachment') as upload, \
+                patch('md_import.Image.open') as open_image:
             result = self.importer._convert_md_links(source, 'page.md', '123')
             self.assertEqual(result, source)
             upload.assert_not_called()
+            open_image.assert_not_called()
 
     def test_md_links_ignores_macro_cdata(self):
         # mathblock 宏 CDATA 内 LaTeX \right](0) 不应被图片正则误判（历史 bug：

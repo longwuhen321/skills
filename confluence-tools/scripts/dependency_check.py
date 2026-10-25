@@ -9,6 +9,7 @@ REQUIREMENTS = (
     ('markdown2', 'markdown2'),
     ('bs4', 'beautifulsoup4'),
     ('markdownify', 'markdownify'),
+    ('PIL.Image', 'Pillow'),
 )
 
 
@@ -52,7 +53,7 @@ def main():
         _report_failures(failures)
         print('   本检查只报告问题，不会安装或修改环境。')
         return 1
-    print('✓ Python 依赖检查通过: requests, markdown2, beautifulsoup4, markdownify')
+    print('✓ Python 依赖检查通过: requests, markdown2, beautifulsoup4, markdownify, Pillow')
     return 0
 
 

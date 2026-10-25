@@ -18,8 +18,8 @@
    "<python_path>" -X utf8 "<SKILL_DIR>/scripts/dependency_check.py"
    ```
 
-   必须能实际导入 `requests`、`markdown2`、`beautifulsoup4`（`bs4`）和
-   `markdownify`。缺依赖时中断；安装前展示命令并取得用户批准。
+   必须能实际导入 `requests`、`markdown2`、`beautifulsoup4`（`bs4`）、
+   `markdownify` 和 `Pillow`（`PIL.Image`）。缺依赖时中断；安装前展示命令并取得用户批准。
 3. `config.py` 已存在时运行：
 
    ```bash
@@ -82,7 +82,16 @@
     `style="width: ...px; height: ...px"` 像素样式优先；任一维度已指定时不补默认宽度。
     无源尺寸时只设置宽度，高度按比例缩放；不重采样原图，不处理外链或 data URI 图片。
     修改配置只影响后续导入，不自动修改已有页面；已有页面的尺寸调整需指定范围。
-12. `code_collapse_threshold`：导入生成的代码宏折叠阈值，默认 `10`；只接受非负整数。
+12. `image_small_width_threshold`：小图例外阈值，单位为原图像素宽度 px，默认 `200`；
+    只接受非负整数，`0` 关闭小图例外。非法值在网络会话及日志初始化前拒绝。
+    当 `image_width` 非零且源文档未指定尺寸时，原图宽度严格小于阈值则按原宽显示，
+    宽度等于或大于阈值则使用 `image_width`；高度、面积均不参与阈值判断。
+    例如阈值 `200`、统一宽度 `750` 时，16 px 图显示为 16 px，200 px 和 482 px 图均显示为 750 px。
+    `image_width=0` 时不补默认宽度，小图阈值也不介入；源文档明确尺寸始终优先。
+    Pillow 只读图片尺寸，不重采样或修改上传字节；支持 PNG、JPEG、GIF、WebP 等栅格图片。
+    无法识别尺寸时（例如 SVG），提示并沿用 `image_width`；需要指定尺寸时使用源文档宽高。
+    单页和树导入共用此规则，仅影响后续导入，不自动回溯服务器上的已有页面。
+13. `code_collapse_threshold`：导入生成的代码宏折叠阈值，默认 `10`；只接受非负整数。
     实际代码行数小于或等于阈值时 `collapse=false`，大于阈值时 `collapse=true`；
     `0` 表示折叠所有非空代码块，空代码块仍展开。非法值在网络会话及日志初始化前拒绝。
     按代码文本实际换行计数，CRLF、CR 和 LF 等价；不计围栏、语言标记或屏幕自动换行。
