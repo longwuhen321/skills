@@ -4,7 +4,7 @@ md2zh_pipeline 离线自测（不依赖网络/外部服务）
 运行: python selftest.py
 
 覆盖: 配置安全解析与写入（全局 config.py：python_path / decider / output_dir / tree_translation /
-      max_block_chars 写入与现值保留）、只读发布检查、分块提取（标题区间优先 + PROTECT 保护）、
+      max_block_chars 写入与现值保留）、只读发布检查、分块提取（相邻整节合并 + PROTECT 保护）、
       段落级 unit（多行契约：合并/重排/空行拒绝）、summarize 摘要、逐块验证契约、
       glossary 跨文件复用、合并、确定性渲染（字节级一致）、verify/review 完成标记、
       copy-assets、无覆盖归档、skill 文档直接路由与核心红线。
@@ -191,20 +191,20 @@ class TestPipeline(unittest.TestCase):
         self.assertIs(config['tree_translation'], True)
 
     def test_configure_writes_max_block_chars(self):
-        self._configure('user', '--max-block-chars', '20000')
+        self._configure('user', '--max-block-chars', '24000')
         config = self._load_cfg()
-        self.assertEqual(config['max_block_chars'], 20000)
+        self.assertEqual(config['max_block_chars'], 24000)
 
     def test_configure_preserves_max_block_chars(self):
-        self._configure('user', '--max-block-chars', '20000')
+        self._configure('user', '--max-block-chars', '24000')
         self._configure('ai')   # 不带 --max-block-chars → 保留现值
         config = self._load_cfg()
-        self.assertEqual(config['max_block_chars'], 20000)
+        self.assertEqual(config['max_block_chars'], 24000)
 
     def test_configure_defaults_max_block_chars(self):
         self._configure('user')
         config = self._load_cfg()
-        self.assertEqual(config['max_block_chars'], 16000)
+        self.assertEqual(config['max_block_chars'], 20000)
 
     def test_configure_rejects_nonpositive_max_block_chars(self):
         for value in ('0', '-1'):
@@ -243,6 +243,79 @@ class TestPipeline(unittest.TestCase):
         _state, blocks = self._extract()
         data = json.loads(blocks.read_text(encoding='utf-8'))
         self.assertGreaterEqual(len(data['translation_blocks']), 2)   # SAMPLE 可译字符超 20 → 拆块
+
+    def _assert_block_sizes(self, source, expected, budget=None):
+        self.src.write_text(source, encoding='utf-8')
+        options = ('--max-block-chars', str(budget)) if budget is not None else ()
+        self._configure('user', *options)
+        state, _blocks = self._extract()
+        data = json.loads(state.read_text(encoding='utf-8'))
+        blocks = data['translation_blocks']
+        self.assertEqual([b['translatable_chars'] for b in blocks], expected)
+        self.assertEqual(
+            [unit_id for b in blocks for unit_id in b['unit_ids']],
+            [unit['id'] for unit in data['units']],
+        )  # 原文顺序、完整覆盖，每个 unit 恰好一次
+
+    def test_extract_coalesces_adjacent_sections_at_default(self):
+        source = ''.join('# A\n\n' + 'x' * (size - 1) + '\n\n'
+                         for size in (6000, 7000, 5000, 9000))
+        self._assert_block_sizes(source, [18000, 9000])
+
+    def test_extract_whole_sections_at_budget_boundary(self):
+        for extra, expected in ((0, [20000]), (1, [10000, 10001])):
+            with self.subTest(extra=extra):
+                source = '# A\n\n' + 'x' * 9999 + '\n\n## B\n\n' + 'y' * (9999 + extra)
+                self._assert_block_sizes(source, expected)
+
+    def test_extract_keeps_next_section_whole(self):
+        self._assert_block_sizes('# A\n\naaaaa\n\n## B\n\nbbbbb\n', [6, 6], budget=10)
+
+    def test_extract_splits_long_section_and_packs_tail(self):
+        self._assert_block_sizes(
+            '# A\n\nxxxxxxxxx\n\nyyyyyyyyy\n\n## B\n', [10, 10], budget=10,
+        )
+
+    def test_extract_preserves_oversized_unit(self):
+        self._assert_block_sizes(
+            '# A\n\n' + 'x' * 25 + '\n\n## B\n\nok\n', [1, 25, 3], budget=10,
+        )
+
+    def test_extract_handles_preamble_and_empty_units(self):
+        for source, expected in (
+            ('Intro\n\n# A\n\ntext\n', [10]),
+            ('Only text.\n', [10]),
+            ('# A\n\n## B\n', [2]),
+            ('```python\nprint(1)\n```\n', []),
+        ):
+            with self.subTest(source=source):
+                self._assert_block_sizes(source, expected, budget=10)
+
+    def test_saved_plan_survives_config_change_and_rejects_reextraction(self):
+        self.src.write_text('# A\n\nab\n\n## B\n\ncd\n', encoding='utf-8')
+        self._configure('user', '--max-block-chars', '4')
+        state, _ = self._extract()
+        self._plan(state)
+        self._write_output()
+        manifest = self.task / 'run' / 'manifest.json'
+        result = run_pipeline('validate-block', state, manifest, 'block-0001')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        old_state = state.read_bytes()
+        old_manifest = json.loads(manifest.read_text(encoding='utf-8'))
+        self.assertEqual(len(old_manifest['blocks']), 2)
+
+        self._configure('user', '--max-block-chars', '20000')
+        self._plan(state)
+        resumed = json.loads(manifest.read_text(encoding='utf-8'))
+        self.assertEqual(state.read_bytes(), old_state)
+        self.assertEqual(resumed['plan_sha256'], old_manifest['plan_sha256'])
+        self.assertEqual(resumed['blocks'][0]['status'], 'accepted')
+
+        self._extract(state=state)
+        result = run_pipeline('plan-blocks', state, self.task / 'run')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('different extraction plan', result.stderr)
+        self.assertEqual(json.loads(manifest.read_text(encoding='utf-8')), resumed)
 
     def test_summarize_writes_structure_md(self):
         self.src.write_text(SAMPLE + '\n$$\nx + y\n$$\n', encoding='utf-8')
@@ -707,8 +780,15 @@ class TestPipeline(unittest.TestCase):
         self.assertIn('PROTECT', json.dumps(data))       # 代码/粗体/公式被保护
 
     def test_full_pipeline_roundtrip(self):
+        self.src.write_text(
+            SAMPLE + '\n## Next\n\nMore **text** and [a link](https://example.com).\n'
+            '\n### Last\n\nA final paragraph.\n', encoding='utf-8',
+        )
         self._configure()
         state, _ = self._extract()
+        data = json.loads(state.read_text(encoding='utf-8'))
+        self.assertEqual(len(data['translation_blocks']), 1)
+        self.assertEqual(sum(unit['kind'] == 'heading' for unit in data['units']), 3)
         self._plan(state)
         self._write_output()                              # 原样翻译
         r = run_pipeline('validate-block', state, self.task / 'run' / 'manifest.json', 'block-0001')

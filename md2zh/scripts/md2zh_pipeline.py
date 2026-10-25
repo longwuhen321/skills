@@ -41,7 +41,7 @@ CONFIG_PY_TEMPLATE = (
     '    "max_block_chars": {max_block_chars!r},\n'
     "}}\n"
 )
-DEFAULT_MAX_BLOCK_CHARS = 16000
+DEFAULT_MAX_BLOCK_CHARS = 20000
 MAX_BLOCK_ATTEMPTS = 3
 GLOSSARY_SCHEMA_VERSION = 1
 COMPLETION_SCHEMA_VERSION = 1
@@ -1169,13 +1169,13 @@ def build_translation_blocks(
     units: Sequence[Dict[str, Any]],
     max_chars: int = DEFAULT_MAX_BLOCK_CHARS,
 ) -> List[Dict[str, Any]]:
-    """Group units into blocks with heading sections as the natural boundary.
+    """Pack adjacent heading sections without splitting sections that fit.
 
-    Each heading section (a heading unit plus everything until the next
-    heading) becomes its own block when it fits within `max_chars`;
-    an over-sized section is split at unit boundaries (paragraph/line
-    edges), never inside a unit. The pre-heading file head is its own
-    section. Units keep source order.
+    A section is a heading and everything until the next heading; the
+    pre-heading file head is also a section. Pack whole sections up to
+    `max_chars`. Start an oversized section in a fresh block and split
+    only at unit boundaries. Its final block may absorb following whole
+    sections that fit. Never split a unit or change source order.
     """
     if max_chars <= 0:
         raise ValueError("block char budget must be positive")
@@ -1189,12 +1189,27 @@ def build_translation_blocks(
             start = index
     sections.append((start, len(units)))
 
-    # 2) each section is one group; split only when it exceeds max_chars
+    # 2) pack whole sections; split only oversized sections at unit edges
     groups: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    current_chars = 0
     for section_start, section_end in sections:
-        current: List[Dict[str, Any]] = []
+        section_units = units[section_start:section_end]
+        section_chars = sum(translatable_chars(unit) for unit in section_units)
+        if section_chars <= max_chars:
+            if current and current_chars + section_chars > max_chars:
+                groups.append(current)
+                current = []
+                current_chars = 0
+            current.extend(section_units)
+            current_chars += section_chars
+            continue
+
+        if current:
+            groups.append(current)
+        current = []
         current_chars = 0
-        for unit in units[section_start:section_end]:
+        for unit in section_units:
             unit_chars = translatable_chars(unit)
             if current and current_chars + unit_chars > max_chars:
                 groups.append(current)
@@ -1202,8 +1217,8 @@ def build_translation_blocks(
                 current_chars = 0
             current.append(unit)
             current_chars += unit_chars
-        if current:
-            groups.append(current)
+    if current:
+        groups.append(current)
 
     blocks: List[Dict[str, Any]] = []
     for number, group in enumerate(groups, 1):

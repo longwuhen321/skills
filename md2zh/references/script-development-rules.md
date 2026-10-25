@@ -14,7 +14,9 @@
 | 配置同步门禁 | `check_config_sync.py` | 比较模板与真实配置的键集合和值类型；不一致以 1/2 退出，禁止静默默认值继续 |
 | 同一解释器 | `configure_project` / `ensure_state_runtime` | 配置、提取和后续阶段使用同一 Python；state 绑定解释器，运行时不匹配即拒绝 |
 | 原子写入 | `write_bytes_atomic` / `write_json_atomic` | 配置、state、manifest、译文映射和完成标记不以半写状态替换目标 |
+| 小节合并与软目标 | `build_translation_blocks` | 默认 20000 个可译字符；顺序合并相邻完整小节，超长小节另起块按 unit 拆分，末块可容纳后续整节；单元不拆断、不遗漏、不重复，单个超长 unit 可超目标 |
 | 源哈希与分块指纹 | `extract` / `plan_blocks` / `state_block_surface` | state、manifest、输入块绑定源 SHA-256 与计划指纹；源或计划变化时拒绝复用旧结果 |
+| 已有计划兼容 | `plan_blocks` | 直接使用 state 中保存的分块，不因新默认值重新分块；重新提取产生不同计划时仍拒绝混用旧 manifest |
 | SEG 表面契约 | `translation_block_surface` / `parse_block_surface` | SEG 行必须原样、顺序不变；每段译文非空，无空白段、错位标记或尾部额外内容 |
 | PROTECT 完整性 | `validate_translated_template` | 每个保护标记恰好一次，成对标记顺序和嵌套不交叉，未知标记不得残留 |
 | Markdown 语法防注入 | `validate_no_introduced_syntax` | 译文不得增加危险标记、模板语法或块级 Markdown；不要放宽为仅检查首行 |
